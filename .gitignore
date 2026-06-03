@@ -1,0 +1,52 @@
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+build/
+**/build/
+.gradle/
+
+# vite
+.vite/
+
+# logs
+logs/
+*.log
+
+# env
+.env
+.env.*
+
+# databases
+*.db
+*.sqlite
+
+# editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# electron
+*.asar
+
+# capacitor / android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/captures/
+android/.cxx/
+
+# generated files
+coverage/
+.cache/
+tmp/
+temp/
+
+# binaries
+*.exe
+*.dll

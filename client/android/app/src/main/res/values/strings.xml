@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">StreamDeck</string>
+    <string name="title_activity_main">StreamDeck</string>
+    <string name="package_name">com.streamdesk.app</string>
+    <string name="custom_url_scheme">com.streamdesk.app</string>
+</resources>

@@ -1,0 +1,63 @@
+{
+  "name": "streamdeck",
+  "version": "1.0.4",
+  "description": "Stream Deck",
+  "main": "main.js",
+  "author": "Hoss",
+  "license": "ISC",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "nodemon src/server.js",
+    "start": "electron .",
+    "rebuild:dev": ".\\.\\node_modules\\.bin\\node-gyp rebuild --directory node_modules/better-sqlite3 && node-gyp rebuild --directory node_modules/robotjs && npm rebuild loudness",
+    "release": "powershell Copy-Item '.\\dist\\StreamDeck Setup 1.0.2.exe' 'F:\\'",
+    "dist": "electron-builder",
+    "dist:portable": "electron-builder --win portable",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "build": {
+    "appId": "com.hoss.streamdeck",
+    "productName": "StreamDeck",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "src/**/*",
+      "assets/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../client/dist",
+        "to": "client/dist"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.4",
+    "electron": "^30.5.1",
+    "electron-builder": "^26.8.1",
+    "nodemon": "^3.1.14"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0",
+    "express": "^5.2.1",
+    "loudness": "^0.4.2",
+    "robotjs": "^0.7.1",
+    "uuid": "^8.3.2",
+    "voicemeeter-connector": "^2.2.0",
+    "ws": "^8.20.1"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "appId": "com.streamdesk.app",
+  "appName": "StreamDeck",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "http"
+  },
+  "android": {
+    "adjustMarginsForEdgeToEdge": "auto"
+  },
+  "plugins": {
+    "StatusBar": {
+      "overlaysWebView": false,
+      "style": "DARK",
+      "backgroundColor": "#161618"
+    }
+  }
+}
