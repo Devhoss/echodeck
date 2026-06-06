@@ -51,3 +51,6 @@ temp/
 # binaries
 *.exe
 *.dll
+
+# Electron build output — released via GitHub Actions, not committed to repo
+host/dist/

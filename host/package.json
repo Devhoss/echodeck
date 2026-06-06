@@ -15,7 +15,6 @@
     "dist": "electron-builder",
     "dist:portable": "electron-builder --win portable",
     "postinstall": "electron-builder install-app-deps"
-
   },
   "build": {
     "appId": "com.hoss.echodeck",
@@ -36,10 +35,9 @@
       }
     ],
     "win": {
-      "target": [
-        "nsis"
-      ],
-      "icon": "assets/icon.ico"
+      "target": ["nsis"],
+      "icon": "assets/icon.ico",
+      "artifactName": "EchoDeck-Setup.exe"
     },
     "nsis": {
       "oneClick": false,
