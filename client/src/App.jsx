@@ -4,15 +4,22 @@ import { DndContext, closestCenter } from "@dnd-kit/core";
 import { Haptics, ImpactStyle } from "@capacitor/haptics";
 import { useSortable } from "@dnd-kit/sortable";
 import deck from "/deck-icon.png";
+import DesktopApp from "./desktop/DesktopApp.jsx";
 import { CSS } from "@dnd-kit/utilities";
+import {
+  isPaired,
+  setPairConfig,
+  loadPairConfig,
+  getWsUrl,
+  isElectron,
+} from "./constants.js";
+import PairingScreen from "./PairingScreen.jsx";
 import {
   SortableContext,
   rectSortingStrategy,
   arrayMove,
 } from "@dnd-kit/sortable";
 import ConfigUI from "./ConfigUI.jsx";
-
-const WS_URL = `ws://192.168.100.10:9001`;
 
 const globalStyles = `
   @keyframes pulse {
@@ -84,6 +91,7 @@ async function playSound(dataUrl) {
 }
 
 export default function App() {
+  const [paired, setPaired] = useState(() => isPaired());
   const [buttons, setButtons] = useState([]);
   const [pages, setPages] = useState([]);
   const [currentPage, setCurrentPage] = useState(null);
@@ -100,17 +108,38 @@ export default function App() {
   const lastMessageAtRef = useRef(0);
   const pageButtonsCacheRef = useRef(new Map());
   const reorderTimer = useRef(null);
+  const [pairedHost, setPairedHost] = useState(() => {
+    loadPairConfig();
+    return getWsUrl(); // non-null if already paired
+  });
 
   useEffect(() => {
+    const wsUrl = getWsUrl();
+    if (!wsUrl) return;
+
+    console.log("isElectron", isElectron());
+    console.log("location", window.location.href);
+    console.log("hostname", window.location.hostname);
+    console.log("ws", getWsUrl());
+
     lastMessageAtRef.current = Date.now();
-    const ws = new ReconnectingWebSocket(WS_URL, [], {
+    const ws = new ReconnectingWebSocket(getWsUrl(), [], {
       maxRetryTime: 10000,
       reconnectionDelayGrowFactor: 1.5,
     });
 
-    const onOpen = () => setStatus("connected");
-    const onClose = () => setStatus("disconnected");
-    const onError = () => setStatus("disconnected");
+    const onOpen = () => {
+      console.log("WS open", getWsUrl());
+      setStatus("connected");
+    };
+    const onClose = (e) => {
+      console.log("WS close", e.code, e.reason);
+      setStatus("disconnected");
+    };
+    const onError = (e) => {
+      console.log("WS error", e);
+      setStatus("disconnected");
+    };
     const onMessage = (e) => {
       lastMessageAtRef.current = Date.now();
       const msg = JSON.parse(e.data);
@@ -190,7 +219,7 @@ export default function App() {
       ws.removeEventListener("message", onMessage);
       ws.close();
     };
-  }, []);
+  }, [pairedHost]);
 
   const pressButton = useCallback(async (id) => {
     if (wsRef.current?.readyState !== WebSocket.OPEN) {
@@ -272,9 +301,48 @@ export default function App() {
 
   const buttonIds = useMemo(() => buttons.map((b) => b.id), [buttons]);
 
+  const params = new URLSearchParams(window.location.search);
+  const forceDesktop =
+    params.get("desktop") === "1" ||
+    import.meta.env.VITE_FORCE_DESKTOP === "true";
+
+  const desktopMode = isElectron() || forceDesktop;
+
+  if (desktopMode) {
+    return (
+      <DesktopApp
+        buttons={buttons}
+        setButtons={setButtons}
+        pages={pages}
+        setPages={setPages}
+        currentPage={currentPage}
+        setCurrentPage={setCurrentPage}
+        status={status}
+        stats={stats}
+        volume={volume}
+        muted={muted}
+        wsRef={wsRef}
+        switchPage={switchPage}
+        pageButtonsCacheRef={pageButtonsCacheRef}
+      />
+    );
+  }
+
   if (view === "config") return <ConfigUI onBack={() => setView("deck")} />;
 
   const isConnected = status === "connected";
+
+  if (!paired) {
+    return (
+      <PairingScreen
+        onPaired={(host, port, token) => {
+          setPairConfig(host, port, token);
+          setPaired(true);
+          setPairedHost(host); // triggers WS useEffect to re-run
+        }}
+      />
+    );
+  }
 
   return (
     <div
@@ -343,7 +411,7 @@ export default function App() {
             letterSpacing: 0.3,
           }}
         >
-          StreamDeck
+          EchoDeck
         </span>
 
         {/* FEATURE: System stats — CPU / RAM / clock pills */}

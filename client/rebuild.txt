@@ -1,0 +1,6 @@
+cd client
+npm run build
+npx cap sync android
+npx cap run android
+
+dev URL: http://localhost:5173/?desktop=1

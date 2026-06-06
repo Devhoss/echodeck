@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">StreamDeck</string>
-    <string name="title_activity_main">StreamDeck</string>
-    <string name="package_name">com.streamdesk.app</string>
-    <string name="custom_url_scheme">com.streamdesk.app</string>
+    <string name="app_name">EchoDeck</string>
+    <string name="title_activity_main">EchoDeck</string>
+    <string name="package_name">com.echodeck.app</string>
+    <string name="custom_url_scheme">com.echodeck.app</string>
 </resources>

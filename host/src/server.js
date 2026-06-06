@@ -7,6 +7,7 @@ const os = require("os");
 const db = require("./db");
 const { getActiveWindow, listOpenWindows } = require("./activeWindow");
 const { findMatchingRule } = require("./ruleEngine");
+const { PORT, LAN_IP, LAN_URL } = require("./network");
 const {
   executeAction,
   executeSequence,
@@ -16,7 +17,6 @@ const {
   playAudioOnDevice, // FEATURE: Soundboard — PC-side ffplay playback
 } = require("./actions");
 
-const PORT = 9001;
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
@@ -41,6 +41,13 @@ app.get("/api/pages", (req, res) => {
   res.json(pages.map((p) => ({ ...p, buttons: db.getButtons(p.id) })));
 });
 
+const { randomBytes } = require("crypto");
+const PAIR_TOKEN = randomBytes(4).toString("hex"); // e.g. "a3f9c2b1"
+
+app.get("/api/pair-info", (req, res) => {
+  res.json({ host: LAN_IP, port: PORT, token: PAIR_TOKEN });
+});
+
 // FEATURE: Audio output switching — list Windows playback devices
 app.get("/api/audio-devices", async (req, res) => {
   try {
@@ -56,8 +63,7 @@ app.get("/api/audio-devices", async (req, res) => {
 // POST /api/settings          → body { key, value }
 app.get("/api/settings", (req, res) => {
   const pc_sound_device = db.getSetting("pc_sound_device") ?? "";
-  const auto_profile_switching =
-    db.getSetting("auto_profile_switching") ?? "1";
+  const auto_profile_switching = db.getSetting("auto_profile_switching") ?? "1";
   res.json({
     pc_sound_device,
     auto_profile_switching: auto_profile_switching === "1",
@@ -273,7 +279,7 @@ const statsInterval = setInterval(async () => {
     }),
     volume: volume ?? null,
     muted: muted ?? null,
-  });   
+  });
   clients.forEach((ws) => {
     if (ws.readyState === 1) ws.send(msg);
   });
@@ -486,7 +492,7 @@ function broadcastUpdate(id, fields) {
   });
 }
 
-const isPackaged = process.mainModule.filename.includes("app.asar");
+const isPackaged = process.env.ECHODECK_PACKAGED === "1";
 const clientPath = isPackaged
   ? path.join(process.resourcesPath, "client", "dist")
   : path.join(__dirname, "../../client/dist");
@@ -495,7 +501,9 @@ app.use(express.static(clientPath));
 app.use((req, res) => res.sendFile(path.join(clientPath, "index.html")));
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`✅ Macro Deck running on http://192.168.100.10:${PORT}`);
+  console.log(`✅ EchoDeck running on ${LAN_URL}`);
+  console.log(`   Phone URL:    ${LAN_URL}`);
+  console.log(`   Local URL:    http://localhost:${PORT}`);
 });
 
 process.on("SIGTERM", () => {

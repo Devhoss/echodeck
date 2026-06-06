@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { API } from "./constants.js";
+import { getApiUrl } from "./constants.js";
 
 const ACTION_GROUPS = [
   { label: "General", types: ["keystroke", "type", "shell", "url", "launch"] },
@@ -49,6 +49,10 @@ const emptyCondition = () => ({
   value: "",
 });
 
+function api(path) {
+  return `${getApiUrl()}${path}`;
+}
+
 // FEATURE: Soundboard routing — 3-way options
 const SOUND_TARGETS = [
   { value: "phone", label: "📱 Phone only", desc: "You hear it" },
@@ -86,7 +90,7 @@ export default function ConfigUI({ onBack }) {
 
   async function loadSettings() {
     try {
-      const res = await fetch(`${API}/settings`);
+      const res = await fetch(api("/settings"));
       const data = await res.json();
       setPcSoundDevice(data.pc_sound_device ?? "");
       setAutoSwitchEnabled(data.auto_profile_switching !== false);
@@ -96,7 +100,7 @@ export default function ConfigUI({ onBack }) {
   }
 
   async function saveSettings() {
-    await fetch(`${API}/settings`, {
+    await fetch(`api/settings`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key: "pc_sound_device", value: pcSoundDevice }),
@@ -107,7 +111,7 @@ export default function ConfigUI({ onBack }) {
 
   async function saveAutoSwitchEnabled(enabled) {
     setAutoSwitchEnabled(enabled);
-    await fetch(`${API}/settings`, {
+    await fetch(`api/settings`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key: "auto_profile_switching", value: enabled }),
@@ -116,7 +120,7 @@ export default function ConfigUI({ onBack }) {
 
   async function loadProfileRules() {
     try {
-      const res = await fetch(`${API}/profile-rules`);
+      const res = await fetch(`api/profile-rules`);
       setProfileRules(await res.json());
     } catch {
       setProfileRules([]);
@@ -124,14 +128,14 @@ export default function ConfigUI({ onBack }) {
   }
 
   async function getCurrentApp() {
-    const res = await fetch(`${API}/active-window`);
+    const res = await fetch(`api/active-window`);
     const data = await res.json();
     setActiveWindow(data);
     return data;
   }
 
   async function loadOpenWindows() {
-    const res = await fetch(`${API}/open-windows`);
+    const res = await fetch(`api/open-windows`);
     const data = await res.json();
     setOpenWindows(Array.isArray(data) ? data : []);
     setShowAppPicker(true);
@@ -169,7 +173,7 @@ export default function ConfigUI({ onBack }) {
 
   async function loadAudioDevices() {
     try {
-      const res = await fetch(`${API}/audio-devices`);
+      const res = await fetch(`api/audio-devices`);
       setAudioDevices(await res.json());
     } catch {
       setAudioDevices([]);
@@ -180,7 +184,7 @@ export default function ConfigUI({ onBack }) {
     abortRef.current?.abort();
     abortRef.current = new AbortController();
     try {
-      const res = await fetch(`${API}/pages`, {
+      const res = await fetch("api/pages", {
         signal: abortRef.current.signal,
       });
       const data = await res.json();
@@ -210,8 +214,8 @@ export default function ConfigUI({ onBack }) {
       ...rulePatch,
     };
     const endpoint = currentRule
-      ? `${API}/profile-rules/${currentRule.id}`
-      : `${API}/profile-rules`;
+      ? `api/profile-rules/${currentRule.id}`
+      : `api}/profile-rules`;
     const method = currentRule ? "PATCH" : "POST";
     await fetch(endpoint, {
       method,
@@ -223,14 +227,14 @@ export default function ConfigUI({ onBack }) {
 
   async function deleteProfileRule() {
     if (!currentRule) return;
-    await fetch(`${API}/profile-rules/${currentRule.id}`, { method: "DELETE" });
+    await fetch(`api/profile-rules/${currentRule.id}`, { method: "DELETE" });
     await loadProfileRules();
   }
 
   async function addPage() {
     const name = prompt("Page name:");
     if (!name) return;
-    await fetch(`${API}/pages`, {
+    await fetch(`api/pages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
@@ -240,13 +244,13 @@ export default function ConfigUI({ onBack }) {
 
   async function deletePage(id) {
     if (!confirm("Delete this page and all its buttons?")) return;
-    await fetch(`${API}/pages/${id}`, { method: "DELETE" });
+    await fetch(`api/pages/${id}`, { method: "DELETE" });
     setActivePage(pages.find((p) => p.id !== id)?.id || null);
     await loadPages();
   }
 
   async function addButton() {
-    await fetch(`${API}/buttons`, {
+    await fetch("api/buttons", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ page_id: activePage }),
@@ -256,7 +260,7 @@ export default function ConfigUI({ onBack }) {
 
   async function saveButton() {
     setSaving(true);
-    await fetch(`${API}/buttons/${editing}`, {
+    await fetch(`api/buttons/${editing}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(form),
@@ -268,7 +272,7 @@ export default function ConfigUI({ onBack }) {
 
   async function deleteButton(id) {
     if (!confirm("Delete this button?")) return;
-    await fetch(`${API}/buttons/${id}`, { method: "DELETE" });
+    await fetch(`api/buttons/${id}`, { method: "DELETE" });
     setEditing(null);
     await loadPages();
   }
@@ -731,7 +735,7 @@ export default function ConfigUI({ onBack }) {
                   onChange={async (e) => {
                     const file = e.target.files[0];
                     if (!file || !editing) return;
-                    const res = await fetch(`${API}/buttons/${editing}/icon`, {
+                    const res = await fetch(`api/buttons/${editing}/icon`, {
                       method: "POST",
                       headers: { "Content-Type": file.type },
                       body: file,
@@ -746,7 +750,7 @@ export default function ConfigUI({ onBack }) {
                   style={{ ...s.cancelBtn, padding: "7px 10px", flexShrink: 0 }}
                   onClick={() => {
                     patchForm({ icon_data: null });
-                    fetch(`${API}/buttons/${editing}`, {
+                    fetch(`api/buttons/${editing}`, {
                       method: "PATCH",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({ icon_data: null }),
@@ -1069,7 +1073,7 @@ export default function ConfigUI({ onBack }) {
                           <button
                             style={s.browseBtn}
                             onClick={async () => {
-                              const res = await fetch(`${API}/pick-file`);
+                              const res = await fetch(`api/pick-file`);
                               const data = await res.json();
                               if (data.path)
                                 patchForm({ action_value: data.path });
@@ -1297,7 +1301,7 @@ export default function ConfigUI({ onBack }) {
                     }}
                     onClick={async () => {
                       patchForm({ sound_file: null });
-                      await fetch(`${API}/buttons/${editing}/sound`, {
+                      await fetch(`api/buttons/${editing}/sound`, {
                         method: "DELETE",
                       });
                       await loadPages();
@@ -1333,7 +1337,7 @@ export default function ConfigUI({ onBack }) {
                         const file = e.target.files[0];
                         if (!file || !editing) return;
                         const res = await fetch(
-                          `${API}/buttons/${editing}/sound`,
+                          `api/buttons/${editing}/sound`,
                           {
                             method: "POST",
                             headers: { "Content-Type": file.type },
@@ -1365,14 +1369,11 @@ export default function ConfigUI({ onBack }) {
                     onChange={async (e) => {
                       const file = e.target.files[0];
                       if (!file || !editing) return;
-                      const res = await fetch(
-                        `${API}/buttons/${editing}/sound`,
-                        {
-                          method: "POST",
-                          headers: { "Content-Type": file.type },
-                          body: file,
-                        },
-                      );
+                      const res = await fetch(`api/buttons/${editing}/sound`, {
+                        method: "POST",
+                        headers: { "Content-Type": file.type },
+                        body: file,
+                      });
                       patchForm({ sound_file: (await res.json()).sound_file });
                       await loadPages();
                     }}
@@ -1612,7 +1613,9 @@ function AutoSwitchRuleEditor({
           onClick={onCaptureDelayed}
           disabled={captureCountdown > 0}
         >
-          {captureCountdown > 0 ? `Capturing in ${captureCountdown}` : "Capture in 3s"}
+          {captureCountdown > 0
+            ? `Capturing in ${captureCountdown}`
+            : "Capture in 3s"}
         </button>
         <button style={styles.smallBtn} onClick={onRefreshCurrentApp}>
           Refresh
@@ -1727,7 +1730,9 @@ function AutoSwitchRuleEditor({
           </div>
           <div style={styles.appPickerList}>
             {openWindows.length === 0 && (
-              <div style={styles.emptyPicker}>No visible app windows found.</div>
+              <div style={styles.emptyPicker}>
+                No visible app windows found.
+              </div>
             )}
             {openWindows.map((app, index) => (
               <button
@@ -1737,7 +1742,9 @@ function AutoSwitchRuleEditor({
               >
                 <span style={styles.appProcess}>{app.process}</span>
                 <span style={styles.appTitle}>{app.windowTitle}</span>
-                <span style={styles.appPath}>{app.executablePath || "Path unavailable"}</span>
+                <span style={styles.appPath}>
+                  {app.executablePath || "Path unavailable"}
+                </span>
               </button>
             ))}
           </div>
