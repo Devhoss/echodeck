@@ -11,7 +11,6 @@
     "start": "electron .",
     "rebuild:electron": "npx @electron/rebuild -f",
     "rebuild": "electron-builder install-app-deps",
-    "release": "powershell Copy-Item '.\\dist\\EchoDeck Setup 1.0.8.exe' 'F:\\'",
     "predist": "npx @electron/rebuild -f && cd ../client && npm run build",
     "dist": "electron-builder",
     "dist:portable": "electron-builder --win portable",

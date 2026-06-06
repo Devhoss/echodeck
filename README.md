@@ -6,13 +6,15 @@ EchoDeck is a next-generation Stream Deck alternative built with Electron, React
 
 It combines:
 
-* dynamic profiles
-* automation
-* app-aware switching
-* live widgets
-* macros
-* desktop integrations
-* real-time controls
+- dynamic profiles
+- automation
+- app-aware switching
+- live widgets
+- macros
+- desktop integrations
+- real-time controls
+- soundboard routing
+- native tray integration
 
 into a customizable desktop command center.
 
@@ -22,179 +24,60 @@ into a customizable desktop command center.
 
 ## Smart Auto Profile Switching
 
-Automatically switch profiles depending on the active application.
+Automatically switch profiles depending on the active application on your PC.
 
-### Examples
+### How It Works
 
-* VS Code → Coding profile
-* Discord → Voice profile
-* OBS → Streaming profile
-* Browser → Media profile
+Each page can have one **rule**. A rule is a list of conditions that describe when that page should activate. EchoDeck watches your currently focused window and evaluates all rules continuously.
 
-### Supports
+A condition checks one thing about the focused window:
 
-* process matching
-* window title matching
-* executable path matching
-* AND / OR logic
-* priorities
-* regex rules
-* enabled / disabled rules
+| Type | What it checks |
+|---|---|
+| **Process** | The `.exe` name (e.g. `Code.exe`, `chrome.exe`) |
+| **Window title** | The text in the title bar |
+| **Executable path** | The full file path on disk |
 
----
+Each condition uses an operator to match against a value you type:
+`equals` · `contains` · `starts_with` · `ends_with` · `regex` · `not_equals` · `not_contains` · `exists`
 
-## Real-Time Dashboard
+### Logic: AND vs OR
 
-Live websocket-powered dashboard with:
+When a rule has multiple conditions:
 
-* instant profile switching
-* button updates
-* system monitoring
-* volume control
-* device state sync
+- **AND** — all conditions must match for the page to activate
+- **OR** — any one condition matching is enough
 
----
+Most setups only need a single condition, so this only matters if you add a second one.
 
-## Dynamic Profiles
+### Priority
 
-Create unlimited profiles/pages:
+If two pages have rules that both match your current app, **priority decides which one wins — lower number = higher priority**. A rule with priority `10` beats one with `100`. If all your pages target different apps, leave everything at `100`.
 
-* Main
-* Coding
-* Sounds
-* Streaming
-* Gaming
-* Productivity
-* AI tools
-* Custom workflows
+### Rule Enabled Toggle
 
----
+The checkbox next to a rule lets you temporarily disable it without deleting it.
 
-## Macro & Action System
+### Example
 
-Trigger:
+> You want your **Streaming** page when OBS is focused, and your **Coding** page when VS Code is open.
+>
+> - Streaming page rule: Process **equals** `obs64.exe`, priority `100`
+> - Coding page rule: Process **equals** `Code.exe`, priority `100`
+>
+> Clicking into OBS flips the deck to Streaming. Clicking into VS Code flips it to Coding. Anything else — it stays on whatever page it was last on.
 
-* keyboard shortcuts
-* applications
-* URLs
-* shell commands
-* media controls
-* system actions
+### Supported Condition Types
 
----
-
-## Live Widgets
-
-### Current Widgets
-
-* CPU usage
-* RAM usage
-* clock
-* volume control
-
-### Planned Widgets
-
-* media playback
-* YouTube live previews
-* Twitch integration
-* Home Assistant
-* OBS stats
-* AI widgets
-* homelab monitoring
-
----
-
-## Electron Desktop Integration
-
-Native desktop functionality:
-
-* tray integration
-* startup launch
-* active window detection
-* native notifications
-* native process monitoring
-
----
-
-# Screenshots
-
-## Main Dashboard
-
-*Add screenshot here later*
-
-## Config UI
-
-*Add screenshot here later*
-
----
-
-# Tech Stack
-
-## Frontend
-
-* React
-* Vite
-* Electron
-* WebSockets
-
-## Backend
-
-* Node.js
-* Express
-* SQLite
-
-## Desktop Features
-
-* Electron Tray
-* Native Window Detection
-* Process Monitoring
-
----
-
-# Project Structure
-
-```bash
-echodeck/
-├── client/
-│   ├── src/
-│   │   ├── App.jsx
-│   │   ├── ConfigUI.jsx
-│   │   ├── constants.js
-│   │   └── index.css
-│   └── package.json
-│
-├── host/
-│   ├── src/
-│   │   ├── server.js
-│   │   ├── actions.js
-│   │   ├── db.js
-│   │   ├── activeWindow.js
-│   │   └── ruleEngine.js
-│   │
-│   ├── main.js
-│   ├── macro-deck.db
-│   └── package.json
-│
-└── README.md
 ```
-
----
-
-# Auto Profile Switching
-
-EchoDeck includes a production-grade rule engine.
-
-## Supported Condition Types
-
-```txt
 process
 window_title
 executable_path
 ```
 
-## Supported Operators
+### Supported Operators
 
-```txt
+```
 equals
 contains
 starts_with
@@ -205,7 +88,7 @@ not_contains
 exists
 ```
 
-## Example Rule
+### Example Rule (JSON)
 
 ```json
 {
@@ -221,66 +104,175 @@ exists
 }
 ```
 
-### Result
+---
 
-```txt
-Focus VS Code → Switch to Coding profile
+## Real-Time Dashboard
+
+Live WebSocket-powered dashboard with:
+
+- instant profile switching
+- button updates
+- system monitoring (CPU, RAM, clock)
+- volume control
+- device state sync
+
+---
+
+## Dynamic Profiles
+
+Create unlimited profiles/pages:
+
+- Main · Coding · Sounds · Streaming · Gaming
+- Productivity · AI Tools · Custom workflows
+
+---
+
+## Macro & Action System
+
+Trigger:
+
+- keyboard shortcuts
+- applications & URLs
+- shell commands
+- media & volume controls
+- audio device switching
+- soundboard (phone-only, PC-only, or both)
+
+---
+
+## Soundboard
+
+Each button can play a sound file with three routing modes:
+
+| Mode | Who hears it |
+|---|---|
+| 📱 Phone only | You hear it |
+| 🖥️ PC only | Your call/stream hears it (via Voicemeeter) |
+| 📱+🖥️ Both | Everyone hears it |
+
+Configure the PC output device under **Audio Settings** in the top bar.
+
+---
+
+## Live Widgets
+
+### Current Widgets
+
+- CPU usage
+- RAM usage
+- Clock
+- Volume control
+
+### Planned Widgets
+
+- Media playback
+- Live Browser (YouTube previews, Twitch chat, Home Assistant, security cameras)
+- OBS stats
+- AI widgets
+- Homelab monitoring
+
+---
+
+## Electron Desktop Integration
+
+- **System tray** — runs silently in the background; single-click to toggle the window
+- **Startup launch** — registers with Windows at install, opens hidden to tray on boot
+- **Active window detection** — powers auto profile switching
+- **Native notifications** — startup confirmation, tray hints
+- **Process monitoring** — real-time running app list for rule capture
+
+---
+
+# Screenshots
+
+## Main Dashboard
+
+*Add screenshot here*
+
+## Config UI
+
+*Add screenshot here*
+
+---
+
+# Tech Stack
+
+## Frontend
+
+- React · Vite · Electron · WebSockets
+
+## Backend
+
+- Node.js · Express · SQLite
+
+## Desktop
+
+- Electron Tray · Native Window Detection · Process Monitoring · Login Item Registration
+
+---
+
+# Project Structure
+
+```
+echodeck/
+├── client/
+│   ├── src/
+│   │   ├── App.jsx
+│   │   ├── desktop/
+│   │   │   └── DesktopApp.jsx
+│   │   ├── ConfigUI.jsx
+│   │   ├── constants.js
+│   │   └── index.css
+│   └── package.json
+│
+├── host/
+│   ├── src/
+│   │   ├── server.js
+│   │   ├── actions.js
+│   │   ├── db.js
+│   │   ├── network.js
+│   │   ├── activeWindow.js
+│   │   └── ruleEngine.js
+│   │
+│   ├── main.js
+│   ├── preload.js
+│   ├── macro-deck.db
+│   └── package.json
+│
+└── README.md
 ```
 
 ---
 
-# Running The Project
+# Running the Project
 
 ## Install Dependencies
 
-### Client
-
 ```bash
-cd client
-npm install
+# Client
+cd client && npm install
+
+# Host
+cd host && npm install
 ```
 
-### Host
+## Start Development
 
 ```bash
-cd host
-npm install
+# 1. Start the frontend (Vite dev server)
+cd client && npm run dev
+
+# 2. Start the backend
+cd host && node src/server.js
+
+# 3. Start Electron
+cd host && npm start
 ```
 
----
-
-# Start Development
-
-## Start Frontend
+## Build
 
 ```bash
-cd client
-npm run dev
-```
-
-## Start Host
-
-```bash
-cd host
-node src/server.js
-```
-
-## Start Electron
-
-```bash
-cd host
-npm start
-```
-
----
-
-# Build
-
-## Client Build
-
-```bash
-cd client
-npm run build
+cd client && npm run build
 ```
 
 ---
@@ -289,41 +281,40 @@ npm run build
 
 ## Completed
 
-* Real-time dashboard
-* WebSocket syncing
-* Dynamic pages/profiles
-* Auto profile switching
-* Rule engine
-* SQLite persistence
-* Electron tray integration
-* Volume controls
-* Active window detection
-* Running app picker
-* Delayed app capture
-* Config UI
-
----
+- Real-time WebSocket dashboard
+- Dynamic pages / profiles
+- Auto profile switching with rule engine
+- SQLite persistence
+- Electron tray integration (single-click toggle, startup launch, hidden-on-boot)
+- Volume controls & audio device switching
+- Soundboard with 3-way routing (phone / PC / both)
+- Active window detection & running app picker
+- Delayed app capture (3-second countdown)
+- Full Electron desktop UI (Elgato-style layout)
+- Drag-to-reorder buttons
+- Button toggle states
+- Icon & sound file uploads
+- QR code phone pairing
+- Config UI (mobile-friendly)
+- Audio settings panel
+- Windows startup registration
+- Mobile companion app only Android for now
 
 ## In Progress
 
-* Full Electron desktop UI
-* Better dashboard layout
-* Plugin architecture
-* Widget system
-* Advanced profile editor
-
----
+- Plugin architecture
+- Widget system expansion
+- Advanced profile editor
 
 ## Planned
 
-* Browser-aware profiles
-* YouTube live widgets
-* Twitch integration
-* OBS integration
-* AI integrations
-* Mobile companion app
-* Plugin marketplace
-* Multi-device syncing
+- Live Browser button (page previews inside a key)
+- Browser-aware profiles (switch by URL/tab)
+- Twitch / YouTube integration
+- OBS integration
+- AI-powered controls & suggestions
+- Plugin marketplace
+- Multi-device syncing
 
 ---
 
@@ -331,58 +322,42 @@ npm run build
 
 EchoDeck is not just a Stream Deck clone.
 
-The goal is to build:
+The goal is to build a **smart desktop command center** — a contextual workflow automation platform that knows what you're doing and surfaces the right controls at the right time.
 
-* a smart desktop command center
-* contextual workflow automation platform
-* live widget system
-* creator productivity hub
-* homelab & AI control panel
-
-combining ideas from:
-
-* Stream Deck
-* Raycast
-* OBS
-* Home Assistant
-* BetterTouchTool
-* desktop automation tools
-
-into a unified experience.
+Combining ideas from Stream Deck, Raycast, OBS, Home Assistant, BetterTouchTool, and desktop automation tools into one unified experience.
 
 ---
 
 # Future Ideas
 
+## Live Browser Buttons
+
+Embed a live web view inside a deck key — updated snapshots or live iframes of:
+
+- YouTube stream preview
+- Twitch chat
+- Home Assistant dashboard
+- Security camera feeds
+- Discord activity
+
 ## Smart Browser Profiles
 
-```txt
-youtube.com → Media profile
-github.com → Coding profile
-figma.com → Design profile
 ```
-
----
+youtube.com  →  Media profile
+github.com   →  Coding profile
+figma.com    →  Design profile
+```
 
 ## AI-Powered Controls
 
-* AI-generated workflows
-* voice commands
-* smart suggestions
-* contextual actions
-
----
+- AI-generated workflows
+- Voice commands
+- Smart suggestions
+- Contextual actions
 
 ## Live Integrations
 
-* Discord
-* Spotify
-* Twitch
-* YouTube
-* OBS
-* Home Assistant
-* MQTT
-* OpenClaw ecosystem
+Discord · Spotify · Twitch · YouTube · OBS · Home Assistant · MQTT
 
 ---
 

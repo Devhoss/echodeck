@@ -1,0 +1,87 @@
+name: Android Release
+
+on:
+  push:
+    tags:
+      - "v*" # triggers on any tag like v1.0.0, v1.2.3, etc.
+
+jobs:
+  build-apk:
+    name: Build & Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Node.js ───────────────────────────────────────────────────────────
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+          cache-dependency-path: client/package-lock.json
+
+      # ── 3. Java (required by Gradle) ─────────────────────────────────────────
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      # ── 4. Install client dependencies ───────────────────────────────────────
+      - name: Install client dependencies
+        working-directory: client
+        run: npm ci
+
+      # ── 5. Build the React/Vite web bundle ───────────────────────────────────
+      - name: Build web bundle
+        working-directory: client
+        run: npm run build
+
+      # ── 6. Sync into Capacitor Android project ───────────────────────────────
+      - name: Capacitor sync
+        working-directory: client
+        run: npx cap sync android
+
+      # ── 7. Make Gradle wrapper executable ────────────────────────────────────
+      - name: Make gradlew executable
+        working-directory: client/android
+        run: chmod +x gradlew
+
+      # ── 8. Build debug APK ───────────────────────────────────────────────────
+      # Using assembleDebug — no keystore needed, works perfectly for sideloading.
+      # Switch to assembleRelease + signing steps when you have a keystore.
+      - name: Build APK
+        working-directory: client/android
+        run: ./gradlew assembleDebug --no-daemon
+
+      # ── 9. Rename APK to include version tag ─────────────────────────────────
+      - name: Rename APK
+        run: |
+          VERSION="${{ github.ref_name }}"
+          cp client/android/app/build/outputs/apk/debug/app-debug.apk \
+             echodeck-${VERSION}.apk
+          echo "APK_NAME=echodeck-${VERSION}.apk" >> $GITHUB_ENV
+
+      # ── 10. Create GitHub Release and upload APK ─────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "EchoDeck ${{ github.ref_name }}"
+          body: |
+            ## EchoDeck ${{ github.ref_name }}
+
+            ### Install on Android
+            1. Download `${{ env.APK_NAME }}` below
+            2. On your phone: **Settings → Install unknown apps** → allow your browser/file manager
+            3. Open the downloaded APK and install
+
+            ### What's new
+            <!-- Add your changelog here before pushing the tag, or edit the release after -->
+          files: ${{ env.APK_NAME }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -25,6 +25,7 @@ logs/
 .vscode/*
 !.vscode/extensions.json
 .idea/
+/echodeck/client/rebuild.txt
 
 # OS
 .DS_Store

@@ -4,3 +4,21 @@ npx cap sync android
 npx cap run android
 
 dev URL: http://localhost:5173/?desktop=1
+
+# apk release
+# 1. Make sure everything is committed and pushed
+git add .
+git commit -m "your message"
+git push
+
+# 2. Tag it and push the tag — this triggers the CI build
+git tag v1.0.0
+git push origin v1.0.0
+
+
+# Version naming
+Just increment the tag each time:
+v1.0.0  →  first public build
+v1.0.1  →  small fix
+v1.1.0  →  new feature
+v2.0.0  →  big update
