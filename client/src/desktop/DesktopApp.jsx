@@ -104,6 +104,25 @@ const emptyCondition = () => ({
   value: "",
 });
 
+function parseDeviceName(userAgent) {
+  if (!userAgent) return "Phone";
+
+  // Android: "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit..."
+  //          "Mozilla/5.0 (Linux; Android 12; SM-S908B) AppleWebKit..."
+  const androidModel = userAgent.match(/\(Linux;[^;]+;\s*([^)]+)\)/);
+  if (androidModel) {
+    const model = androidModel[1].trim();
+    // Strip build suffixes like "SM-S908B Build/..."
+    return model.replace(/\s+Build\/.*$/, "").trim();
+  }
+
+  // iOS: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)"
+  if (userAgent.includes("iPhone")) return "iPhone";
+  if (userAgent.includes("iPad")) return "iPad";
+
+  return "Phone";
+}
+
 const globalStyles = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
 
@@ -587,6 +606,16 @@ export default function DesktopApp({
   const buttonIds = buttons.map((b) => b.id);
   const activeBtn = buttons.find((b) => b.id === activeId);
   const currentRule = profileRules.find((r) => r.page_id === currentPage);
+  const phoneDevices = useMemo(
+    () =>
+      connectedDevices.filter(
+        (d) =>
+          d.ip !== "127.0.0.1" &&
+          d.ip !== "::1" &&
+          !d.ip?.startsWith("::ffff:127."),
+      ),
+    [connectedDevices],
+  );
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -604,9 +633,7 @@ export default function DesktopApp({
         onPair={openPairQR}
         pairOpen={showQR}
         onDevices={() => setShowDevices(true)}
-        devicesCount={
-          connectedDevices.filter((d) => !d.ip?.startsWith("127")).length
-        }
+        devicesCount={phoneDevices.length}
         onAudioSettings={() => setShowAudioSettings(true)}
       />
 
@@ -881,7 +908,7 @@ export default function DesktopApp({
                     color: "#6060a0",
                   }}
                 >
-                  {connectedDevices.length}
+                  {phoneDevices.length}
                 </span>
               </div>
               <button
@@ -905,92 +932,86 @@ export default function DesktopApp({
                 overflowY: "auto",
               }}
             >
-              {(() => {
-                const phoneDevices = connectedDevices.filter(
-                  (d) => d.ip !== "127.0.0.1" && d.ip !== "::1",
-                );
-                return phoneDevices.length === 0 ? (
-                  <div
-                    style={{
-                      textAlign: "center",
-                      padding: "32px 0",
-                      color: "#44445a",
-                      fontSize: 13,
-                    }}
-                  >
-                    No devices connected
-                  </div>
-                ) : (
-                  <div
-                    style={{ display: "flex", flexDirection: "column", gap: 8 }}
-                  >
-                    {phoneDevices.map((device) => {
-                      const connectedAgo = device.connectedAt
-                        ? Math.floor(
-                            (Date.now() - new Date(device.connectedAt)) / 60000,
-                          )
-                        : null;
-                      return (
-                        <div
-                          key={device.id}
-                          style={{
-                            background: "#1a1a26",
-                            border: "1px solid #2a2a38",
-                            borderRadius: 12,
-                            padding: "12px 14px",
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 12,
-                          }}
-                        >
-                          <div style={{ fontSize: 22, flexShrink: 0 }}>📱</div>
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div
-                              style={{
-                                fontWeight: 700,
-                                fontSize: 13,
-                                color: "#c0c0d8",
-                                marginBottom: 2,
-                              }}
-                            >
-                              {`Phone — ${device.ip}`}
-                            </div>
-                            <div style={{ fontSize: 11, color: "#44445a" }}>
-                              {connectedAgo !== null
-                                ? connectedAgo === 0
-                                  ? "Connected just now"
-                                  : `Connected ${connectedAgo}m ago`
-                                : "Connected"}
-                              {device.currentPage && ` · page active`}
-                            </div>
-                          </div>
-                          <button
-                            onClick={() =>
-                              askConfirm(
-                                `Disconnect Phone (${device.ip})?`,
-                                () => disconnectDevice(device.id),
-                              )
-                            }
+              {phoneDevices.length === 0 ? (
+                <div
+                  style={{
+                    textAlign: "center",
+                    padding: "32px 0",
+                    color: "#44445a",
+                    fontSize: 13,
+                  }}
+                >
+                  No devices connected
+                </div>
+              ) : (
+                <div
+                  style={{ display: "flex", flexDirection: "column", gap: 8 }}
+                >
+                  {phoneDevices.map((device) => {
+                    const connectedAgo = device.connectedAt
+                      ? Math.floor(
+                          (Date.now() - new Date(device.connectedAt)) / 60000,
+                        )
+                      : null;
+                    return (
+                      <div
+                        key={device.id}
+                        style={{
+                          background: "#1a1a26",
+                          border: "1px solid #2a2a38",
+                          borderRadius: 12,
+                          padding: "12px 14px",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 12,
+                        }}
+                      >
+                        <div style={{ fontSize: 22, flexShrink: 0 }}>📱</div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div
                             style={{
-                              background: "#2a1010",
-                              border: "1px solid #4a1a1a",
-                              borderRadius: 8,
-                              color: "#f87171",
-                              cursor: "pointer",
-                              fontSize: 11,
-                              padding: "5px 10px",
-                              fontWeight: 600,
-                              flexShrink: 0,
+                              fontWeight: 700,
+                              fontSize: 13,
+                              color: "#c0c0d8",
+                              marginBottom: 2,
                             }}
                           >
-                            Disconnect
-                          </button>
+                            {`${parseDeviceName(device.userAgent)} — ${device.ip}`}
+                          </div>
+                          <div style={{ fontSize: 11, color: "#44445a" }}>
+                            {connectedAgo !== null
+                              ? connectedAgo === 0
+                                ? "Connected just now"
+                                : `Connected ${connectedAgo}m ago`
+                              : "Connected"}
+                            {device.currentPage && ` · page active`}
+                          </div>
                         </div>
-                      );
-                    })}
-                  </div>
-                );
-              })()}
+                        <button
+                          onClick={() =>
+                            askConfirm(`Disconnect Phone (${device.ip})?`, () =>
+                              disconnectDevice(device.id),
+                            )
+                          }
+                          style={{
+                            background: "#2a1010",
+                            border: "1px solid #4a1a1a",
+                            borderRadius: 8,
+                            color: "#f87171",
+                            cursor: "pointer",
+                            fontSize: 11,
+                            padding: "5px 10px",
+                            fontWeight: 600,
+                            flexShrink: 0,
+                          }}
+                        >
+                          Disconnect
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
               <div
                 style={{
                   marginTop: 14,

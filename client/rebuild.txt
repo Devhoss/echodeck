@@ -12,8 +12,8 @@ git commit -m "your message"
 git push
 
 # 2. Tag it and push the tag — this triggers the CI build
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.0.2
+git push origin v1.0.2
 
 
 # Version naming
