@@ -189,7 +189,6 @@ export default function DesktopApp({
   const [audioDevices, setAudioDevices] = useState([]);
   const [profileRules, setProfileRules] = useState([]);
   const [autoSwitch, setAutoSwitch] = useState(true);
-  const [autoSwitchDelay, setAutoSwitchDelay] = useState(0);
   const reorderTimer = useRef(null);
   const captureTimerRef = useRef(null);
   const [selectedPage, setSelectedPage] = useState(null);
@@ -249,7 +248,6 @@ export default function DesktopApp({
       .then((d) => {
         setAutoSwitch(d.auto_profile_switching !== false);
         setPcSoundDevice(d.pc_sound_device ?? "");
-        setAutoSwitchDelay(Number(d.auto_switch_delay ?? 0));
       })
       .catch(() => {});
 
@@ -458,15 +456,6 @@ export default function DesktopApp({
     setTimeout(() => setAudioSettingsSaved(false), 2000);
   }
 
-  async function saveAutoSwitchDelay(ms) {
-    setAutoSwitchDelay(ms);
-    await fetch(`${api()}/settings`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: "auto_switch_delay", value: String(ms) }),
-    });
-  }
-
   async function disconnectDevice(clientId) {
     await fetch(`${api()}/clients/${clientId}`, { method: "DELETE" });
     setConnectedDevices((prev) => prev.filter((d) => d.id !== clientId));
@@ -647,7 +636,6 @@ export default function DesktopApp({
           currentPage={currentPage}
           profileRules={profileRules}
           autoSwitch={autoSwitch}
-          switchDelay={autoSwitchDelay}
           currentRule={currentRule}
           activeWindow={activeWindow}
           openWindows={openWindows}
@@ -660,7 +648,6 @@ export default function DesktopApp({
           onAddPage={addPage}
           onDeletePage={deletePage}
           onToggleAutoSwitch={toggleAutoSwitch}
-          onChangeDelay={saveAutoSwitchDelay}
           onSaveRule={saveProfileRule}
           onDeleteRule={deleteProfileRule}
           onSelectRunningApp={loadOpenWindows}
@@ -1592,7 +1579,7 @@ function Sidebar({
       {/* Auto-switch rule editor */}
       {currentPage && (
         <AutoSwitchRuleEditor
-          key={currentRule?.id ?? "no-rule"}
+          key={currentPage}
           rule={currentRule}
           enabled={autoSwitch}
           switchDelay={switchDelay}
@@ -1653,13 +1640,11 @@ function Toggle({ value, onChange }) {
 function AutoSwitchRuleEditor({
   rule,
   enabled,
-  switchDelay,
   activeWindow,
   openWindows,
   showAppPicker,
   captureCountdown,
   onToggleGlobal,
-  onChangeDelay,
   onSave,
   onDelete,
   onSelectRunningApp,
@@ -1672,6 +1657,7 @@ function AutoSwitchRuleEditor({
     enabled: false,
     priority: 100,
     logic: "AND",
+    switch_delay: 0,
     conditions: [emptyCondition()],
   });
 
@@ -1814,7 +1800,9 @@ function AutoSwitchRuleEditor({
         >
           <span style={rs.miniLabel}>⏱ Switch delay</span>
           <span style={{ fontSize: 11, fontWeight: 700, color: "#7aafff" }}>
-            {switchDelay === 0 ? "Instant" : `${switchDelay / 1000}s`}
+            {(localDraft.switch_delay ?? 0) === 0
+              ? "Instant"
+              : `${(localDraft.switch_delay ?? 0) / 1000}s`}
           </span>
         </div>
         <input
@@ -1822,8 +1810,8 @@ function AutoSwitchRuleEditor({
           min="0"
           max="5000"
           step="500"
-          value={switchDelay ?? 0}
-          onChange={(e) => onChangeDelay(Number(e.target.value))}
+          value={localDraft.switch_delay ?? 0}
+          onChange={(e) => patchDraft({ switch_delay: Number(e.target.value) })}
           style={{ width: "100%", accentColor: "#3a6fff", cursor: "pointer" }}
         />
         <div style={{ fontSize: 10, color: "#2c2c4a", marginTop: 3 }}>
@@ -1870,7 +1858,14 @@ function AutoSwitchRuleEditor({
                   ? "workspace"
                   : "C:\\Path\\App.exe"
             }
-            onChange={(e) => patchCondition(index, { value: e.target.value })}
+            onChange={(e) => {
+              const op = e.target.value;
+              patchCondition(index, {
+                operator: op,
+                // Clear value when switching to exists — it's unused and misleading
+                ...(op === "exists" ? { value: "" } : {}),
+              });
+            }}
           />
           {/* Per-condition app picker button */}
           <button

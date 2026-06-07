@@ -2,6 +2,7 @@
 // hot path (polled every 2s). listOpenWindows still uses PowerShell
 // but is only called on-demand from the UI, so it's fine.
 
+const path = require("path");
 let _activeWin = null;
 
 async function getActiveWin() {
@@ -18,11 +19,21 @@ async function getActiveWindow() {
     const fn = await getActiveWin();
     const win = await fn();
     if (!win) return null;
+
+    const executablePath = win.owner?.path ?? "";
+    // Normalize process name to match PowerShell picker format: "name.exe"
+    const rawName = win.owner?.name ?? "";
+    const exeName = executablePath
+      ? path.basename(executablePath) // e.g. "msedge.exe"
+      : rawName.toLowerCase().endsWith(".exe")
+        ? rawName
+        : rawName + ".exe"; // fallback: append .exe if missing
+
     return {
-      process: win.owner?.name ?? "",
+      process: exeName,
       pid: win.owner?.processId ?? 0,
       windowTitle: win.title ?? "",
-      executablePath: win.owner?.path ?? "",
+      executablePath,
       browserUrl: null,
     };
   } catch {

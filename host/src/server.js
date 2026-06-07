@@ -539,7 +539,6 @@ async function evaluateAutoSwitch() {
   const nextWindow = await getActiveWindow();
   if (!nextWindow) return;
 
-  // Only act if the window actually changed
   if (
     nextWindow.process === activeWindow?.process &&
     nextWindow.windowTitle === activeWindow?.windowTitle
@@ -548,29 +547,58 @@ async function evaluateAutoSwitch() {
 
   activeWindow = nextWindow;
 
-  // Apply configured switch delay (debounce) — default 0 = instant
-  const delayMs = Number(db.getSetting("auto_switch_delay") ?? 0);
+  // Single rule lookup — reused for both delay and the switch itself
+  const pages = db.getPages();
+  if (!pages.length) return;
+  const rule = findMatchingRule(db.getProfileRules(), activeWindow);
+  const delayMs = Number(rule?.switch_delay ?? 0);
+
+  clearTimeout(autoSwitchDebounceTimer);
 
   if (delayMs <= 0) {
-    await performSwitch();
+    performSwitch(pages, rule);
   } else {
-    // Cancel any pending switch — the user is still alt-tabbing
-    clearTimeout(autoSwitchDebounceTimer);
-    autoSwitchDebounceTimer = setTimeout(async () => {
-      // Re-check the window hasn't changed again during the delay
-      const confirmed = await getActiveWindow();
-      if (confirmed?.process === activeWindow?.process) {
-        await performSwitch();
-      }
+    autoSwitchDebounceTimer = setTimeout(() => {
+      // No second getActiveWindow call — the change-detection guard above
+      // already confirmed the window changed; if they switched again
+      // during the delay, evaluateAutoSwitch will have cancelled this
+      // timer and started a new one with the newer window/rule.
+      performSwitch(pages, rule);
     }, delayMs);
   }
+}
+
+function performSwitch(pages, rule) {
+  const nextPageId = rule?.page_id || pages[0].id;
+  const nextRuleId = rule?.id || null;
+  if (nextPageId === autoPageId && nextRuleId === activeRuleId) return;
+
+  autoPageId = nextPageId;
+  activeRuleId = nextRuleId;
+  clients.forEach((ws) => {
+    ws.currentPage = nextPageId;
+    if (ws.readyState === 1) sendState(ws, nextPageId);
+  });
+}
+
+function performSwitch(pages, rule) {
+  const nextPageId = rule?.page_id || pages[0].id;
+  const nextRuleId = rule?.id || null;
+  if (nextPageId === autoPageId && nextRuleId === activeRuleId) return;
+
+  autoPageId = nextPageId;
+  activeRuleId = nextRuleId;
+  clients.forEach((ws) => {
+    ws.currentPage = nextPageId;
+    if (ws.readyState === 1) sendState(ws, nextPageId);
+  });
 }
 
 const autoSwitchInterval = setInterval(() => {
   evaluateAutoSwitch().catch((e) =>
     console.warn("Auto profile switch error:", e.message),
   );
-}, 2000);
+}, 300);
 
 function broadcastUpdate(id, fields) {
   const msg = JSON.stringify({ t: "update", id, ...fields });

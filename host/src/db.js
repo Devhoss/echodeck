@@ -58,6 +58,7 @@ db.exec(`
     priority INTEGER DEFAULT 100,
     logic TEXT DEFAULT 'AND',
     conditions TEXT NOT NULL DEFAULT '[]',
+    switch_delay INTEGER DEFAULT 0,
     FOREIGN KEY (page_id) REFERENCES pages(id)
   );
 `);
@@ -85,6 +86,14 @@ if (!existingCols.includes("sound_target"))
   db.exec(`ALTER TABLE buttons ADD COLUMN sound_target TEXT DEFAULT 'phone'`);
 if (!existingCols.includes("audio_device"))
   db.exec(`ALTER TABLE buttons ADD COLUMN audio_device TEXT DEFAULT NULL`);
+
+const existingRuleCols = db
+  .pragma("table_info(profile_rules)")
+  .map((c) => c.name);
+if (!existingRuleCols.includes("switch_delay"))
+  db.exec(
+    `ALTER TABLE profile_rules ADD COLUMN switch_delay INTEGER DEFAULT 0`,
+  );
 
 // --- Seed ---
 const pageCount = db.prepare("SELECT COUNT(*) as c FROM pages").get().c;
@@ -271,10 +280,15 @@ function safeJsonArray(value) {
 }
 
 function normalizeRule(rule) {
-  const logic = String(rule.logic || "AND").toUpperCase() === "OR" ? "OR" : "AND";
+  const logic =
+    String(rule.logic || "AND").toUpperCase() === "OR" ? "OR" : "AND";
   const priority = Number.isFinite(Number(rule.priority))
     ? Math.max(0, Math.min(1000, Number(rule.priority)))
     : 100;
+  const switch_delay = Math.max(
+    0,
+    Math.min(5000, Number(rule.switch_delay ?? 0)),
+  );
   const conditions = Array.isArray(rule.conditions) ? rule.conditions : [];
 
   return {
@@ -282,6 +296,7 @@ function normalizeRule(rule) {
     enabled: rule.enabled ? 1 : 0,
     priority,
     logic,
+    switch_delay,
     conditions: JSON.stringify(conditions),
   };
 }
@@ -302,8 +317,8 @@ function createProfileRule(rule) {
   const normalized = normalizeRule(rule);
   db.prepare(
     `INSERT INTO profile_rules
-      (id, page_id, enabled, priority, logic, conditions)
-     VALUES (?,?,?,?,?,?)`,
+      (id, page_id, enabled, priority, logic, conditions, switch_delay)
+     VALUES (?,?,?,?,?,?,?)`,
   ).run(
     rule.id,
     normalized.page_id,
@@ -311,6 +326,7 @@ function createProfileRule(rule) {
     normalized.priority,
     normalized.logic,
     normalized.conditions,
+    normalized.switch_delay,
   );
   return getProfileRule(rule.id);
 }
@@ -321,7 +337,7 @@ function updateProfileRule(id, fields) {
   const normalized = normalizeRule({ ...existing, ...fields });
   db.prepare(
     `UPDATE profile_rules
-     SET page_id=?, enabled=?, priority=?, logic=?, conditions=?
+     SET page_id=?, enabled=?, priority=?, logic=?, conditions=?, switch_delay=?
      WHERE id=?`,
   ).run(
     normalized.page_id,
@@ -329,6 +345,7 @@ function updateProfileRule(id, fields) {
     normalized.priority,
     normalized.logic,
     normalized.conditions,
+    normalized.switch_delay,
     id,
   );
   return getProfileRule(id);

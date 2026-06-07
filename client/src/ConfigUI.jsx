@@ -586,7 +586,7 @@ export default function ConfigUI({ onBack }) {
           </div>
           {currentPage && (
             <AutoSwitchRuleEditor
-              key={currentRule?.id ?? "no-rule"}
+              key={currentPage}
               rule={currentRule}
               enabled={autoSwitchEnabled}
               switchDelay={autoSwitchDelay}
