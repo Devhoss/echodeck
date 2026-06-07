@@ -14,7 +14,7 @@ const {
   getVolume,
   getMuted,
   getAudioDevices,
-  playAudioOnDevice, // FEATURE: Soundboard — PC-side ffplay playback
+  playAudioOnDevice,
 } = require("./actions");
 
 const app = express();
@@ -42,13 +42,12 @@ app.get("/api/pages", (req, res) => {
 });
 
 const { randomBytes } = require("crypto");
-const PAIR_TOKEN = randomBytes(4).toString("hex"); // e.g. "a3f9c2b1"
+const PAIR_TOKEN = randomBytes(4).toString("hex");
 
 app.get("/api/pair-info", (req, res) => {
   res.json({ host: LAN_IP, port: PORT, token: PAIR_TOKEN });
 });
 
-// FEATURE: Audio output switching — list Windows playback devices
 app.get("/api/audio-devices", async (req, res) => {
   try {
     res.json(await getAudioDevices());
@@ -58,28 +57,65 @@ app.get("/api/audio-devices", async (req, res) => {
   }
 });
 
-// FEATURE: Settings — get/set global config (e.g. pc_sound_device)
-// GET  /api/settings          → { pc_sound_device: "Voicemeeter Input ..." }
-// POST /api/settings          → body { key, value }
 app.get("/api/settings", (req, res) => {
   const pc_sound_device = db.getSetting("pc_sound_device") ?? "";
   const auto_profile_switching = db.getSetting("auto_profile_switching") ?? "1";
+  const auto_switch_delay = db.getSetting("auto_switch_delay") ?? "0";
   res.json({
     pc_sound_device,
     auto_profile_switching: auto_profile_switching === "1",
+    auto_switch_delay: Number(auto_switch_delay),
   });
 });
 
 app.post("/api/settings", (req, res) => {
   const { key, value } = req.body;
-  const allowed = ["pc_sound_device", "auto_profile_switching"];
+  const allowed = [
+    "pc_sound_device",
+    "auto_profile_switching",
+    "auto_switch_delay",
+  ];
   if (!allowed.includes(key))
     return res.status(400).json({ error: "Unknown setting" });
   db.setSetting(
     key,
-    key === "auto_profile_switching" ? (value ? "1" : "0") : (value ?? ""),
+    key === "auto_profile_switching"
+      ? value
+        ? "1"
+        : "0"
+      : String(value ?? ""),
   );
   res.json({ ok: true });
+});
+
+// ── Connected devices ─────────────────────────────────────────────────────────
+// GET /api/clients  → list all connected WebSocket clients with metadata
+app.get("/api/clients", (req, res) => {
+  const list = [];
+  clients.forEach((ws) => {
+    if (ws.readyState === 1) {
+      list.push({
+        id: ws.clientId,
+        ip: ws.clientIp,
+        connectedAt: ws.connectedAt,
+        currentPage: ws.currentPage || null,
+        userAgent: ws.userAgent || null,
+      });
+    }
+  });
+  res.json(list);
+});
+
+// DELETE /api/clients/:id  → disconnect a specific client
+app.delete("/api/clients/:id", (req, res) => {
+  let found = false;
+  clients.forEach((ws) => {
+    if (ws.clientId === req.params.id) {
+      ws.terminate();
+      found = true;
+    }
+  });
+  res.json({ ok: found });
 });
 
 app.get("/api/active-window", async (req, res) => {
@@ -158,7 +194,6 @@ app.delete("/api/pages/:id", (req, res) => {
   res.json({ ok: true });
 });
 
-// FEATURE: Animated icons
 app.post(
   "/api/buttons/:id/icon",
   express.raw({ type: ["image/*", "video/*"], limit: "10mb" }),
@@ -171,7 +206,6 @@ app.post(
   },
 );
 
-// FEATURE: Soundboard — upload audio clip for a button (stored as base64 data URL)
 app.post(
   "/api/buttons/:id/sound",
   express.raw({ type: "audio/*", limit: "5mb" }),
@@ -186,7 +220,6 @@ app.post(
   },
 );
 
-// FEATURE: Soundboard — remove sound from a button
 app.delete("/api/buttons/:id/sound", (req, res) => {
   const btn = db.updateButton(req.params.id, { sound_file: null });
   broadcastState();
@@ -232,12 +265,15 @@ app.delete("/api/buttons/:id", (req, res) => {
 });
 
 // --- WebSocket ---
+// Tracks every connected client with metadata for the devices panel
 const clients = new Set();
 let lastCpuTimes = os.cpus().map((c) => c.times);
 let activeWindow = null;
 let autoPageId = null;
 let activeRuleId = null;
 let manualSwitchPausedUntil = 0;
+// Debounce timer for auto-switch delay
+let autoSwitchDebounceTimer = null;
 
 function getCpuPercent() {
   const current = os.cpus().map((c) => c.times);
@@ -261,6 +297,26 @@ function getCpuPercent() {
   return totalTick === 0
     ? 0
     : Math.round(((totalTick - totalIdle) / totalTick) * 100);
+}
+
+// Broadcast connected clients list to the Electron desktop window
+function broadcastClients() {
+  const list = [];
+  clients.forEach((ws) => {
+    if (ws.readyState === 1) {
+      list.push({
+        id: ws.clientId,
+        ip: ws.clientIp,
+        connectedAt: ws.connectedAt,
+        currentPage: ws.currentPage || null,
+      });
+    }
+  });
+  const msg = JSON.stringify({ t: "clients", clients: list });
+  clients.forEach((ws) => {
+    // Only send to Electron desktop clients, not phone clients
+    if (ws.readyState === 1 && ws.isDesktop) ws.send(msg);
+  });
 }
 
 const statsInterval = setInterval(async () => {
@@ -287,10 +343,24 @@ const statsInterval = setInterval(async () => {
 
 const holdIntervals = new Map();
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, req) => {
+  // Attach metadata to each client for the devices panel
+  ws.clientId = uuid();
+  ws.clientIp = req.socket.remoteAddress?.replace("::ffff:", "") || "unknown";
+  ws.connectedAt = new Date().toISOString();
+  ws.userAgent = req.headers["user-agent"] || null;
+  // Mark Electron desktop clients (they connect from localhost)
+  ws.isDesktop =
+    ws.clientIp === "127.0.0.1" ||
+    ws.clientIp === "::1" ||
+    ws.clientIp === "localhost";
+
   clients.add(ws);
-  console.log(`Client connected. Total: ${clients.size}`);
+  console.log(
+    `Client connected [${ws.clientId}] from ${ws.clientIp}. Total: ${clients.size}`,
+  );
   sendState(ws);
+  broadcastClients();
 
   ws.on("message", (raw) => {
     let msg;
@@ -304,11 +374,8 @@ wss.on("connection", (ws) => {
       const btn = db.getButton(msg.id);
       if (!btn) return;
 
-      // FEATURE: Soundboard — route audio based on sound_target
       if (btn.sound_file) {
         const target = btn.sound_target || "phone";
-
-        // Send to phone (the client that pressed)
         if (target === "phone" || target === "both") {
           if (ws.readyState === 1) {
             ws.send(
@@ -316,10 +383,6 @@ wss.on("connection", (ws) => {
             );
           }
         }
-
-        // Play on PC via ffplay → Voicemeeter virtual input
-        // pc_sound_device setting holds the Voicemeeter device name
-        // e.g. "Voicemeeter Input (VB-Audio Voicemeeter VAIO)"
         if (target === "pc" || target === "both") {
           const pcDevice = db.getSetting("pc_sound_device") ?? "";
           playAudioOnDevice(btn.sound_file, pcDevice).catch((e) =>
@@ -328,14 +391,12 @@ wss.on("connection", (ws) => {
         }
       }
 
-      // FEATURE: Multi-action buttons
       if (btn.actions && btn.actions.length > 0) {
         console.log(`Multi-action: ${btn.label} (${btn.actions.length} steps)`);
         executeSequence(btn.actions);
         return;
       }
 
-      // FEATURE: Toggle buttons
       if (btn.is_toggle) {
         const newState = btn.toggle_state ? 0 : 1;
         db.updateButton(btn.id, { toggle_state: newState });
@@ -348,7 +409,6 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      // Standard action
       console.log(
         `Press: ${btn.label} (${btn.action_type}: ${btn.action_value})`,
       );
@@ -383,6 +443,7 @@ wss.on("connection", (ws) => {
       manualSwitchPausedUntil = Date.now() + 15000;
       ws.currentPage = msg.page_id;
       sendState(ws, msg.page_id);
+      broadcastClients();
     }
 
     if (msg.t === "reorder_buttons") {
@@ -398,6 +459,8 @@ wss.on("connection", (ws) => {
       holdIntervals.delete(ws);
     }
     clients.delete(ws);
+    console.log(`Client disconnected [${ws.clientId}]. Total: ${clients.size}`);
+    broadcastClients();
   };
   ws.on("close", cleanup);
   ws.on("error", cleanup);
@@ -433,10 +496,7 @@ function sendState(ws, page_id) {
 }
 
 function toDeckButton(btn) {
-  return {
-    ...btn,
-    sound_file: !!btn.sound_file,
-  };
+  return { ...btn, sound_file: !!btn.sound_file };
 }
 
 function broadcastState() {
@@ -455,16 +515,9 @@ function broadcastRules() {
   });
 }
 
-async function evaluateAutoSwitch() {
-  if (Date.now() < manualSwitchPausedUntil) return;
-  if (db.getSetting("auto_profile_switching") === "0") return;
-
+async function performSwitch() {
   const pages = db.getPages();
   if (!pages.length) return;
-
-  const nextWindow = await getActiveWindow();
-  if (!nextWindow) return;
-  activeWindow = nextWindow;
 
   const rule = findMatchingRule(db.getProfileRules(), activeWindow);
   const nextPageId = rule?.page_id || pages[0].id;
@@ -477,6 +530,40 @@ async function evaluateAutoSwitch() {
     ws.currentPage = nextPageId;
     if (ws.readyState === 1) sendState(ws, nextPageId);
   });
+}
+
+async function evaluateAutoSwitch() {
+  if (Date.now() < manualSwitchPausedUntil) return;
+  if (db.getSetting("auto_profile_switching") === "0") return;
+
+  const nextWindow = await getActiveWindow();
+  if (!nextWindow) return;
+
+  // Only act if the window actually changed
+  if (
+    nextWindow.process === activeWindow?.process &&
+    nextWindow.windowTitle === activeWindow?.windowTitle
+  )
+    return;
+
+  activeWindow = nextWindow;
+
+  // Apply configured switch delay (debounce) — default 0 = instant
+  const delayMs = Number(db.getSetting("auto_switch_delay") ?? 0);
+
+  if (delayMs <= 0) {
+    await performSwitch();
+  } else {
+    // Cancel any pending switch — the user is still alt-tabbing
+    clearTimeout(autoSwitchDebounceTimer);
+    autoSwitchDebounceTimer = setTimeout(async () => {
+      // Re-check the window hasn't changed again during the delay
+      const confirmed = await getActiveWindow();
+      if (confirmed?.process === activeWindow?.process) {
+        await performSwitch();
+      }
+    }, delayMs);
+  }
 }
 
 const autoSwitchInterval = setInterval(() => {

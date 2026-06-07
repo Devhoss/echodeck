@@ -1,42 +1,81 @@
 import { useState } from "react";
 import {
-  CapacitorBarcodeScanner,
-  CapacitorBarcodeScannerTypeHint,
-} from "@capacitor/barcode-scanner";
+  BarcodeScanner,
+  BarcodeFormat,
+} from "@capacitor-mlkit/barcode-scanning";
 
 export default function PairingScreen({ onPaired }) {
   const [manualHost, setManualHost] = useState("");
   const [manualPort, setManualPort] = useState("9001");
   const [error, setError] = useState(null);
   const [testing, setTesting] = useState(false);
+  const [scanning, setScanning] = useState(false);
 
   async function startScan() {
     setError(null);
-    setTesting(true);
+
     try {
-      const result = await CapacitorBarcodeScanner.scanBarcode({
-        hint: CapacitorBarcodeScannerTypeHint.QR_CODE,
-      });
-      if (result?.ScanResult) {
-        parsePairUrl(result.ScanResult);
-      } else {
-        setError("No QR code detected. Please try again.");
+      // Check/request permission
+      const { camera } = await BarcodeScanner.requestPermissions();
+      if (camera !== "granted" && camera !== "limited") {
+        setError(
+          "Camera permission required. Enable it in Settings → Apps → EchoDeck → Permissions.",
+        );
+        return;
       }
-    } catch {
-      setError("Camera permission denied or scan cancelled.");
+
+      // Check if ML Kit is available (may need to download on first run)
+      const { available } =
+        await BarcodeScanner.isGoogleBarcodeScannerModuleAvailable();
+      if (!available) {
+        await BarcodeScanner.installGoogleBarcodeScannerModule();
+        setError("Scanner module is installing, please try again in a moment.");
+        return;
+      }
+
+      setScanning(true);
+
+      const { barcodes } = await BarcodeScanner.scan({
+        formats: [BarcodeFormat.QrCode],
+      });
+
+      setScanning(false);
+
+      if (barcodes.length === 0) {
+        setError("No QR code detected. Please try again.");
+        return;
+      }
+
+      parsePairUrl(barcodes[0].rawValue);
+    } catch (err) {
+      setScanning(false);
+      console.error("SCAN ERROR:", err);
+      if (err?.message?.includes("cancel")) {
+        // user dismissed — no error shown
+      } else {
+        setError("Scan failed: " + (err?.message ?? "unknown error"));
+      }
     }
-    setTesting(false);
   }
 
   function parsePairUrl(raw) {
+    const cleaned = raw.trim();
+    console.log("RAW QR:", cleaned);
+
     try {
-      const url = new URL(raw);
-      const host = url.searchParams.get("host");
-      const port = parseInt(url.searchParams.get("port") || "9001", 10);
-      const token = url.searchParams.get("token");
-      if (!host) throw new Error("No host in QR");
+      const queryString = cleaned.includes("?")
+        ? cleaned.split("?")[1]
+        : cleaned;
+      const params = new URLSearchParams(queryString);
+      const host = params.get("host");
+      const port = parseInt(params.get("port") || "9001", 10);
+      const token = params.get("token");
+
+      console.log("PAIR PARAMS:", { host, port, token });
+      if (!host) throw new Error("No host param in QR");
       connectAndPair(host, port, token);
-    } catch {
+    } catch (err) {
+      console.error("PARSE ERROR:", err, cleaned);
       setError(
         "Invalid QR code. Make sure you scan the EchoDeck pairing code.",
       );
@@ -88,11 +127,18 @@ export default function PairingScreen({ onPaired }) {
         <p style={styles.step}>Step 3 — Scan the QR code below</p>
 
         <button
-          style={styles.primaryBtn}
+          style={{
+            ...styles.primaryBtn,
+            opacity: testing || scanning ? 0.7 : 1,
+          }}
           onClick={startScan}
-          disabled={testing}
+          disabled={testing || scanning}
         >
-          {testing ? "Scanning…" : "📷  Scan QR Code"}
+          {scanning
+            ? "📷  Point at QR code…"
+            : testing
+              ? "Connecting…"
+              : "📷  Scan QR Code"}
         </button>
       </div>
 
@@ -119,7 +165,10 @@ export default function PairingScreen({ onPaired }) {
           inputMode="numeric"
         />
         <button
-          style={styles.secondaryBtn}
+          style={{
+            ...styles.secondaryBtn,
+            opacity: testing || !manualHost.trim() ? 0.5 : 1,
+          }}
           onClick={connectManual}
           disabled={testing || !manualHost.trim()}
         >
@@ -185,16 +234,6 @@ const styles = {
     fontWeight: 600,
     cursor: "pointer",
   },
-  cancelBtn: {
-    marginTop: 24,
-    padding: "12px 32px",
-    background: "rgba(255,255,255,0.1)",
-    border: "1px solid rgba(255,255,255,0.2)",
-    borderRadius: 12,
-    color: "#ccc",
-    fontSize: 14,
-    cursor: "pointer",
-  },
   label: {
     display: "block",
     fontSize: 11,
@@ -240,34 +279,5 @@ const styles = {
     color: "#f87171",
     fontSize: 12,
     lineHeight: 1.6,
-  },
-  scanOverlay: {
-    position: "fixed",
-    inset: 0,
-    background: "transparent",
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    justifyContent: "flex-end",
-    padding: 32,
-    zIndex: 9999,
-  },
-  scanFrame: {
-    position: "absolute",
-    top: "50%",
-    left: "50%",
-    transform: "translate(-50%, -60%)",
-    width: 220,
-    height: 220,
-    border: "2px solid #6c63ff",
-    borderRadius: 16,
-    boxShadow: "0 0 0 4000px rgba(0,0,0,0.6)",
-  },
-  scanHint: {
-    color: "#ccc",
-    fontSize: 13,
-    marginBottom: 16,
-    textAlign: "center",
-    zIndex: 1,
   },
 };

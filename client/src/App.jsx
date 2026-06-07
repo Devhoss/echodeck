@@ -12,6 +12,7 @@ import {
   loadPairConfig,
   getWsUrl,
   isElectron,
+  clearPairConfig,
 } from "./constants.js";
 import PairingScreen from "./PairingScreen.jsx";
 import {
@@ -108,6 +109,7 @@ export default function App() {
   const lastMessageAtRef = useRef(0);
   const pageButtonsCacheRef = useRef(new Map());
   const reorderTimer = useRef(null);
+  const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
   const [pairedHost, setPairedHost] = useState(() => {
     loadPairConfig();
     return getWsUrl(); // non-null if already paired
@@ -253,6 +255,26 @@ export default function App() {
   const stopVolumeHold = useCallback(() => {
     if (wsRef.current?.readyState !== WebSocket.OPEN) return;
     wsRef.current.send(JSON.stringify({ t: "volume_hold_stop" }));
+  }, []);
+
+  const handleDisconnect = useCallback(() => {
+    setShowDisconnectConfirm(true);
+  }, []);
+
+  const confirmDisconnect = useCallback(() => {
+    setShowDisconnectConfirm(false);
+    wsRef.current?.close();
+    wsRef.current = null;
+    clearPairConfig();
+    setPaired(false);
+    setPairedHost(null);
+    setStatus("connecting");
+    setButtons([]);
+    setPages([]);
+    setCurrentPage(null);
+    setStats(null);
+    setVolume(null);
+    setMuted(false);
   }, []);
 
   const switchPage = useCallback((page_id) => {
@@ -475,6 +497,25 @@ export default function App() {
         <button
           onMouseDown={(e) => {
             e.preventDefault();
+            handleDisconnect();
+          }}
+          style={{
+            background: "none",
+            border: "1px solid #3a1a1a",
+            borderRadius: 8,
+            color: "#f87171",
+            cursor: "pointer",
+            padding: "5px 12px",
+            fontSize: 12,
+            fontWeight: 500,
+          }}
+        >
+          ⏏ Disconnect
+        </button>
+
+        <button
+          onMouseDown={(e) => {
+            e.preventDefault();
             setView("config");
           }}
           style={{
@@ -573,6 +614,89 @@ export default function App() {
           </div>
         </SortableContext>
       </DndContext>
+
+      {showDisconnectConfirm && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.75)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9999,
+            padding: "0 32px",
+          }}
+        >
+          <div
+            style={{
+              background: "#16161e",
+              border: "1px solid #2a2a38",
+              borderRadius: 18,
+              padding: "28px 24px",
+              width: "100%",
+              maxWidth: 320,
+              textAlign: "center",
+            }}
+          >
+            <div style={{ fontSize: 32, marginBottom: 12 }}>⏏️</div>
+            <div
+              style={{
+                fontWeight: 700,
+                fontSize: 16,
+                color: "#e0e0ec",
+                marginBottom: 8,
+              }}
+            >
+              Disconnect?
+            </div>
+            <div
+              style={{
+                fontSize: 13,
+                color: "#55556a",
+                marginBottom: 24,
+                lineHeight: 1.5,
+              }}
+            >
+              You'll need to scan the QR code again to reconnect.
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button
+                onClick={() => setShowDisconnectConfirm(false)}
+                style={{
+                  flex: 1,
+                  padding: "12px 0",
+                  background: "rgba(255,255,255,0.06)",
+                  border: "1px solid rgba(255,255,255,0.1)",
+                  borderRadius: 10,
+                  color: "#888",
+                  fontSize: 14,
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDisconnect}
+                style={{
+                  flex: 1,
+                  padding: "12px 0",
+                  background: "#2e0d0d",
+                  border: "1px solid #5c1a1a",
+                  borderRadius: 10,
+                  color: "#f87171",
+                  fontSize: 14,
+                  cursor: "pointer",
+                  fontWeight: 700,
+                }}
+              >
+                Disconnect
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

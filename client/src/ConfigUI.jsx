@@ -71,11 +71,18 @@ export default function ConfigUI({ onBack }) {
   const [showSettings, setShowSettings] = useState(false);
   const [pcSoundDevice, setPcSoundDevice] = useState("");
   const [autoSwitchEnabled, setAutoSwitchEnabled] = useState(true);
+  const [autoSwitchDelay, setAutoSwitchDelay] = useState(0);
   const [profileRules, setProfileRules] = useState([]);
+  // Always-fresh ref so async callbacks (saveAppAsRule, startDelayedCapture)
+  // never read stale closure state when looking up existing rules
+  const profileRulesRef = useRef([]);
   const [activeWindow, setActiveWindow] = useState(null);
   const [openWindows, setOpenWindows] = useState([]);
   const [showAppPicker, setShowAppPicker] = useState(false);
+  // Track which page's rule the app picker / delayed capture is targeting
+  const pickerTargetPageIdRef = useRef(null);
   const [captureCountdown, setCaptureCountdown] = useState(0);
+  const [captureTargetPageId, setCaptureTargetPageId] = useState(null);
   const [settingsSaved, setSettingsSaved] = useState(false);
   const captureTimerRef = useRef(null);
   const abortRef = useRef(null);
@@ -94,6 +101,7 @@ export default function ConfigUI({ onBack }) {
       const data = await res.json();
       setPcSoundDevice(data.pc_sound_device ?? "");
       setAutoSwitchEnabled(data.auto_profile_switching !== false);
+      setAutoSwitchDelay(Number(data.auto_switch_delay ?? 0));
     } catch {
       /* ignore */
     }
@@ -111,17 +119,28 @@ export default function ConfigUI({ onBack }) {
 
   async function saveAutoSwitchEnabled(enabled) {
     setAutoSwitchEnabled(enabled);
-    await fetch(`api/settings`, {
+    await fetch(api("/settings"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key: "auto_profile_switching", value: enabled }),
     });
   }
 
+  async function saveAutoSwitchDelay(ms) {
+    setAutoSwitchDelay(ms);
+    await fetch(api("/settings"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: "auto_switch_delay", value: String(ms) }),
+    });
+  }
+
   async function loadProfileRules() {
     try {
-      const res = await fetch(`api/profile-rules`);
-      setProfileRules(await res.json());
+      const res = await fetch(api("/profile-rules"));
+      const data = await res.json();
+      profileRulesRef.current = data;
+      setProfileRules(data);
     } catch {
       setProfileRules([]);
     }
@@ -134,31 +153,35 @@ export default function ConfigUI({ onBack }) {
     return data;
   }
 
-  async function loadOpenWindows() {
-    const res = await fetch(`api/open-windows`);
+  async function loadOpenWindows(pageId) {
+    pickerTargetPageIdRef.current = pageId;
+    const res = await fetch(api("/open-windows"));
     const data = await res.json();
     setOpenWindows(Array.isArray(data) ? data : []);
     setShowAppPicker(true);
   }
 
   async function saveAppAsRule(app) {
-    await saveProfileRule({
+    // Use refs — never stale unlike state captured in a closure
+    const targetPageId = pickerTargetPageIdRef.current || activePage;
+    const existingRule = profileRulesRef.current.find(
+      (r) => r.page_id === targetPageId,
+    );
+    await saveProfileRuleForPage(targetPageId, existingRule, {
       enabled: true,
       logic: "AND",
       conditions: [
-        {
-          type: "process",
-          operator: "equals",
-          value: app.process || "",
-        },
+        { type: "process", operator: "equals", value: app.process || "" },
       ],
     });
     setActiveWindow(app);
     setShowAppPicker(false);
+    pickerTargetPageIdRef.current = null;
   }
 
-  function startDelayedCapture() {
+  function startDelayedCapture(pageId) {
     clearInterval(captureTimerRef.current);
+    setCaptureTargetPageId(pageId);
     setCaptureCountdown(3);
     let remaining = 3;
     captureTimerRef.current = setInterval(async () => {
@@ -167,7 +190,19 @@ export default function ConfigUI({ onBack }) {
       if (remaining > 0) return;
       clearInterval(captureTimerRef.current);
       const app = await getCurrentApp();
-      await saveAppAsRule(app);
+      const targetPageId = pageId;
+      // Use ref for always-fresh rule lookup
+      const existingRule = profileRulesRef.current.find(
+        (r) => r.page_id === targetPageId,
+      );
+      await saveProfileRuleForPage(targetPageId, existingRule, {
+        enabled: true,
+        logic: "AND",
+        conditions: [
+          { type: "process", operator: "equals", value: app.process || "" },
+        ],
+      });
+      setCaptureTargetPageId(null);
     }, 1000);
   }
 
@@ -202,32 +237,33 @@ export default function ConfigUI({ onBack }) {
     [],
   );
 
-  async function saveProfileRule(rulePatch) {
-    if (!activePage) return;
+  // Core rule save — always operates on a specific pageId, never assumes activePage
+  async function saveProfileRuleForPage(pageId, existingRule, rulePatch) {
+    if (!pageId) return;
     const nextRule = {
-      page_id: activePage,
+      page_id: pageId,
       enabled: true,
       priority: 100,
       logic: "AND",
       conditions: [emptyCondition()],
-      ...(currentRule || {}),
+      ...(existingRule || {}),
       ...rulePatch,
     };
-    const endpoint = currentRule
-      ? `api/profile-rules/${currentRule.id}`
-      : `api}/profile-rules`;
-    const method = currentRule ? "PATCH" : "POST";
+    const endpoint = existingRule
+      ? api(`/profile-rules/${existingRule.id}`)
+      : api("/profile-rules");
+    const method = existingRule ? "PATCH" : "POST";
     await fetch(endpoint, {
       method,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(nextRule),
     });
-    await loadProfileRules();
+    await loadProfileRules(); // also updates profileRulesRef via loadProfileRules
   }
 
-  async function deleteProfileRule() {
-    if (!currentRule) return;
-    await fetch(`api/profile-rules/${currentRule.id}`, { method: "DELETE" });
+  async function deleteProfileRule(ruleId) {
+    if (!ruleId) return;
+    await fetch(api(`/profile-rules/${ruleId}`), { method: "DELETE" });
     await loadProfileRules();
   }
 
@@ -550,19 +586,31 @@ export default function ConfigUI({ onBack }) {
           </div>
           {currentPage && (
             <AutoSwitchRuleEditor
+              key={currentRule?.id ?? "no-rule"}
               rule={currentRule}
               enabled={autoSwitchEnabled}
+              switchDelay={autoSwitchDelay}
               activeWindow={activeWindow}
               openWindows={openWindows}
-              showAppPicker={showAppPicker}
-              captureCountdown={captureCountdown}
+              showAppPicker={
+                showAppPicker && pickerTargetPageIdRef.current === activePage
+              }
+              captureCountdown={
+                captureTargetPageId === activePage ? captureCountdown : 0
+              }
               onToggleGlobal={saveAutoSwitchEnabled}
-              onSave={saveProfileRule}
-              onDelete={deleteProfileRule}
-              onSelectRunningApp={loadOpenWindows}
+              onChangeDelay={saveAutoSwitchDelay}
+              onSave={(patch) =>
+                saveProfileRuleForPage(activePage, currentRule, patch)
+              }
+              onDelete={() => deleteProfileRule(currentRule?.id)}
+              onSelectRunningApp={() => loadOpenWindows(activePage)}
               onPickApp={saveAppAsRule}
-              onClosePicker={() => setShowAppPicker(false)}
-              onCaptureDelayed={startDelayedCapture}
+              onClosePicker={() => {
+                setShowAppPicker(false);
+                pickerTargetPageIdRef.current = null;
+              }}
+              onCaptureDelayed={() => startDelayedCapture(activePage)}
               onRefreshCurrentApp={getCurrentApp}
             />
           )}
@@ -1550,11 +1598,13 @@ function ActionTypeSelect({ value, onChange, style }) {
 function AutoSwitchRuleEditor({
   rule,
   enabled,
+  switchDelay,
   activeWindow,
   openWindows,
   showAppPicker,
   captureCountdown,
   onToggleGlobal,
+  onChangeDelay,
   onSave,
   onDelete,
   onSelectRunningApp,
@@ -1563,31 +1613,55 @@ function AutoSwitchRuleEditor({
   onCaptureDelayed,
   onRefreshCurrentApp,
 }) {
-  const draft = rule || {
+  const emptyDraft = () => ({
     enabled: false,
     priority: 100,
     logic: "AND",
     conditions: [emptyCondition()],
-  };
+  });
 
-  const conditions = draft.conditions?.length
-    ? draft.conditions
+  const [localDraft, setLocalDraft] = useState(() => rule || emptyDraft());
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // Which condition index triggered the app picker (-1 = whole-rule quick-set)
+  const [pickerConditionIndex, setPickerConditionIndex] = useState(-1);
+
+  // useEffect(() => {
+  //   if (!dirty) {
+  //     setLocalDraft(rule || emptyDraft());
+  //   }
+  //   // eslint-disable-next-line react-hooks/exhaustive-deps
+  // }, [rule]);
+
+  const conditions = localDraft.conditions?.length
+    ? localDraft.conditions
     : [emptyCondition()];
 
-  const patchRule = (patch) => onSave({ ...draft, ...patch });
-  const patchCondition = (index, patch) => {
-    patchRule({
+  function patchDraft(patch) {
+    setLocalDraft((d) => ({ ...d, ...patch }));
+    setDirty(true);
+  }
+
+  function patchCondition(index, patch) {
+    patchDraft({
       conditions: conditions.map((condition, i) =>
         i === index ? { ...condition, ...patch } : condition,
       ),
     });
-  };
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    await onSave(localDraft);
+    setSaving(false);
+    setDirty(false);
+  }
 
   return (
     <div style={styles.rulePanel}>
       <div style={styles.ruleHeader}>
         <div>
-          <div style={styles.ruleTitle}>Auto profile switching</div>
+          <div style={styles.ruleTitle}>Auto-switch</div>
           <div style={styles.ruleMeta}>
             {activeWindow?.process
               ? `${activeWindow.process} · ${activeWindow.windowTitle || "Untitled"}`
@@ -1600,13 +1674,13 @@ function AutoSwitchRuleEditor({
             checked={enabled}
             onChange={(e) => onToggleGlobal(e.target.checked)}
           />
-          Enabled
+          {enabled ? "On" : "Off"}
         </label>
       </div>
 
       <div style={styles.ruleActions}>
         <button style={styles.smallBtn} onClick={onSelectRunningApp}>
-          Select running app
+          Select app
         </button>
         <button
           style={styles.smallBtn}
@@ -1615,7 +1689,7 @@ function AutoSwitchRuleEditor({
         >
           {captureCountdown > 0
             ? `Capturing in ${captureCountdown}`
-            : "Capture in 3s"}
+            : "Capture 3s"}
         </button>
         <button style={styles.smallBtn} onClick={onRefreshCurrentApp}>
           Refresh
@@ -1628,85 +1702,147 @@ function AutoSwitchRuleEditor({
       </div>
 
       <div style={styles.ruleGrid}>
-        <label style={styles.miniLabel}>Rule enabled</label>
+        <label style={styles.miniLabel}>Rule</label>
         <input
           type="checkbox"
-          checked={!!draft.enabled}
-          onChange={(e) => patchRule({ enabled: e.target.checked })}
+          checked={!!localDraft.enabled}
+          onChange={(e) => patchDraft({ enabled: e.target.checked })}
         />
-
         <label style={styles.miniLabel}>Logic</label>
         <select
           style={styles.compactInput}
-          value={draft.logic || "AND"}
-          onChange={(e) => patchRule({ logic: e.target.value })}
+          value={localDraft.logic || "AND"}
+          onChange={(e) => patchDraft({ logic: e.target.value })}
         >
           <option value="AND">AND</option>
           <option value="OR">OR</option>
         </select>
-
         <label style={styles.miniLabel}>Priority</label>
         <input
           type="number"
           min="0"
           max="1000"
           style={styles.compactInput}
-          value={draft.priority ?? 100}
-          onChange={(e) => patchRule({ priority: Number(e.target.value) || 0 })}
+          value={localDraft.priority ?? 100}
+          onChange={(e) =>
+            patchDraft({ priority: Number(e.target.value) || 0 })
+          }
         />
+      </div>
+
+      <div
+        style={{
+          background: "#0f172a",
+          border: "1px solid #263040",
+          borderRadius: 8,
+          padding: "10px 12px",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginBottom: 6,
+          }}
+        >
+          <label style={{ ...styles.miniLabel, color: "#93c5fd" }}>
+            ⏱ Switch delay
+          </label>
+          <span style={{ fontSize: 11, fontWeight: 700, color: "#93c5fd" }}>
+            {switchDelay === 0 ? "Instant" : `${switchDelay / 1000}s`}
+          </span>
+        </div>
+        <input
+          type="range"
+          min="0"
+          max="5000"
+          step="500"
+          value={switchDelay}
+          onChange={(e) => onChangeDelay(Number(e.target.value))}
+          style={{ width: "100%", accentColor: "#3b82f6" }}
+        />
+        <div style={{ fontSize: 10, color: "#334155", marginTop: 4 }}>
+          Wait this long after a window focus change before switching pages.
+        </div>
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         {conditions.map((condition, index) => (
-          <div key={index} style={styles.conditionRow}>
-            <select
-              style={styles.compactInput}
-              value={condition.type}
-              onChange={(e) => patchCondition(index, { type: e.target.value })}
-            >
-              {CONDITION_TYPES.map((type) => (
-                <option key={type.value} value={type.value}>
-                  {type.label}
-                </option>
-              ))}
-            </select>
-            <select
-              style={styles.compactInput}
-              value={condition.operator}
-              onChange={(e) =>
-                patchCondition(index, { operator: e.target.value })
-              }
-            >
-              {CONDITION_OPERATORS.map((operator) => (
-                <option key={operator.value} value={operator.value}>
-                  {operator.label}
-                </option>
-              ))}
-            </select>
-            <input
-              style={{ ...styles.compactInput, flex: 1 }}
-              value={condition.value || ""}
-              disabled={condition.operator === "exists"}
-              placeholder={
-                condition.type === "process"
-                  ? "Code.exe"
-                  : condition.type === "window_title"
-                    ? "workspace"
-                    : "C:\\Path\\App.exe"
-              }
-              onChange={(e) => patchCondition(index, { value: e.target.value })}
-            />
-            <button
-              style={styles.iconBtn}
-              onClick={() =>
-                patchRule({
-                  conditions: conditions.filter((_, i) => i !== index),
-                })
-              }
-              disabled={conditions.length === 1}
-            >
-              x
-            </button>
+          <div
+            key={index}
+            style={{ display: "flex", flexDirection: "column", gap: 4 }}
+          >
+            <div style={styles.conditionRow}>
+              <select
+                style={styles.compactInput}
+                value={condition.type}
+                onChange={(e) =>
+                  patchCondition(index, { type: e.target.value })
+                }
+              >
+                {CONDITION_TYPES.map((type) => (
+                  <option key={type.value} value={type.value}>
+                    {type.label}
+                  </option>
+                ))}
+              </select>
+              <select
+                style={styles.compactInput}
+                value={condition.operator}
+                onChange={(e) =>
+                  patchCondition(index, { operator: e.target.value })
+                }
+              >
+                {CONDITION_OPERATORS.map((operator) => (
+                  <option key={operator.value} value={operator.value}>
+                    {operator.label}
+                  </option>
+                ))}
+              </select>
+              <input
+                style={{ ...styles.compactInput, flex: 1 }}
+                value={condition.value || ""}
+                disabled={condition.operator === "exists"}
+                placeholder={
+                  condition.type === "process"
+                    ? "App.exe"
+                    : condition.type === "window_title"
+                      ? "workspace"
+                      : "C:\\Path\\App.exe"
+                }
+                onChange={(e) =>
+                  patchCondition(index, { value: e.target.value })
+                }
+              />
+              {/* Per-condition app picker button */}
+              <button
+                style={{
+                  ...styles.iconBtn,
+                  color: "#93c5fd",
+                  fontSize: 13,
+                  padding: "0 4px",
+                }}
+                title="Pick from running apps"
+                onClick={() => {
+                  setPickerConditionIndex(index);
+                  onSelectRunningApp(null); // opens the picker without changing the whole rule
+                }}
+              >
+                ⊞
+              </button>
+              <button
+                style={styles.iconBtn}
+                onClick={() =>
+                  patchDraft({
+                    conditions: conditions.filter((_, i) => i !== index),
+                  })
+                }
+                disabled={conditions.length === 1}
+              >
+                x
+              </button>
+            </div>
           </div>
         ))}
       </div>
@@ -1714,11 +1850,28 @@ function AutoSwitchRuleEditor({
       <button
         style={styles.addConditionBtn}
         onClick={() =>
-          patchRule({ conditions: [...conditions, emptyCondition()] })
+          patchDraft({ conditions: [...conditions, emptyCondition()] })
         }
       >
         + Add condition
       </button>
+
+      {dirty && (
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          style={{
+            ...styles.smallBtn,
+            background: saving ? "#1e293b" : "#3b5fff",
+            color: saving ? "#64748b" : "#fff",
+            fontWeight: 700,
+            width: "100%",
+            textAlign: "center",
+          }}
+        >
+          {saving ? "Saving…" : "💾 Save rule"}
+        </button>
+      )}
 
       {showAppPicker && (
         <div style={styles.appPicker}>
@@ -1738,7 +1891,21 @@ function AutoSwitchRuleEditor({
               <button
                 key={`${app.pid}-${app.windowTitle}-${index}`}
                 style={styles.appPickerItem}
-                onClick={() => onPickApp(app)}
+                onClick={() => {
+                  if (pickerConditionIndex >= 0) {
+                    // Update only the specific condition that triggered the picker
+                    patchCondition(pickerConditionIndex, {
+                      type: "process",
+                      operator: "equals",
+                      value: app.process || "",
+                    });
+                    setPickerConditionIndex(-1);
+                    onClosePicker();
+                  } else {
+                    // Whole-rule quick-set (triggered by top "Select app" button)
+                    onPickApp(app);
+                  }
+                }}
               >
                 <span style={styles.appProcess}>{app.process}</span>
                 <span style={styles.appTitle}>{app.windowTitle}</span>
@@ -1990,7 +2157,7 @@ const styles = {
   },
   conditionRow: {
     display: "grid",
-    gridTemplateColumns: "130px 120px minmax(120px, 1fr) 28px",
+    gridTemplateColumns: "1fr 1fr 1fr 20px 20px",
     gap: 6,
     alignItems: "center",
   },

@@ -170,6 +170,7 @@ export default function DesktopApp({
   const [audioDevices, setAudioDevices] = useState([]);
   const [profileRules, setProfileRules] = useState([]);
   const [autoSwitch, setAutoSwitch] = useState(true);
+  const [autoSwitchDelay, setAutoSwitchDelay] = useState(0);
   const reorderTimer = useRef(null);
   const captureTimerRef = useRef(null);
   const [selectedPage, setSelectedPage] = useState(null);
@@ -194,6 +195,8 @@ export default function DesktopApp({
   const [showAudioSettings, setShowAudioSettings] = useState(false);
   const [pcSoundDevice, setPcSoundDevice] = useState("");
   const [audioSettingsSaved, setAudioSettingsSaved] = useState(false);
+  const [showDevices, setShowDevices] = useState(false);
+  const [connectedDevices, setConnectedDevices] = useState([]);
 
   // Derive button counts from the cache ref + live buttons for current page
   const pageButtonCounts = useMemo(() => {
@@ -227,9 +230,22 @@ export default function DesktopApp({
       .then((d) => {
         setAutoSwitch(d.auto_profile_switching !== false);
         setPcSoundDevice(d.pc_sound_device ?? "");
+        setAutoSwitchDelay(Number(d.auto_switch_delay ?? 0));
       })
       .catch(() => {});
-    return () => clearInterval(captureTimerRef.current);
+
+    // Load connected devices and refresh every 5s
+    const refreshDevices = () =>
+      fetch(`${api()}/clients`)
+        .then((r) => r.json())
+        .then(setConnectedDevices)
+        .catch(() => {});
+    refreshDevices();
+    const devicesInterval = setInterval(refreshDevices, 5000);
+    return () => {
+      clearInterval(captureTimerRef.current);
+      clearInterval(devicesInterval);
+    };
   }, []);
 
   const patchForm = useCallback(
@@ -423,6 +439,20 @@ export default function DesktopApp({
     setTimeout(() => setAudioSettingsSaved(false), 2000);
   }
 
+  async function saveAutoSwitchDelay(ms) {
+    setAutoSwitchDelay(ms);
+    await fetch(`${api()}/settings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: "auto_switch_delay", value: String(ms) }),
+    });
+  }
+
+  async function disconnectDevice(clientId) {
+    await fetch(`${api()}/clients/${clientId}`, { method: "DELETE" });
+    setConnectedDevices((prev) => prev.filter((d) => d.id !== clientId));
+  }
+
   // ── Profile rule management ───────────────────────────────────────────────
 
   async function reloadProfileRules() {
@@ -573,8 +603,11 @@ export default function DesktopApp({
         status={status}
         onPair={openPairQR}
         pairOpen={showQR}
+        onDevices={() => setShowDevices(true)}
+        devicesCount={
+          connectedDevices.filter((d) => !d.ip?.startsWith("127")).length
+        }
         onAudioSettings={() => setShowAudioSettings(true)}
-        audioSettingsOpen={showAudioSettings}
       />
 
       {/* ── Body ── */}
@@ -587,6 +620,7 @@ export default function DesktopApp({
           currentPage={currentPage}
           profileRules={profileRules}
           autoSwitch={autoSwitch}
+          switchDelay={autoSwitchDelay}
           currentRule={currentRule}
           activeWindow={activeWindow}
           openWindows={openWindows}
@@ -599,6 +633,7 @@ export default function DesktopApp({
           onAddPage={addPage}
           onDeletePage={deletePage}
           onToggleAutoSwitch={toggleAutoSwitch}
+          onChangeDelay={saveAutoSwitchDelay}
           onSaveRule={saveProfileRule}
           onDeleteRule={deleteProfileRule}
           onSelectRunningApp={loadOpenWindows}
@@ -792,6 +827,186 @@ export default function DesktopApp({
         </div>
       )}
 
+      {/* ── Devices Modal ── */}
+      {showDevices && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.7)",
+            backdropFilter: "blur(4px)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+          }}
+          onClick={() => setShowDevices(false)}
+        >
+          <div
+            style={{
+              background: "#16161e",
+              border: "1px solid #2a2a38",
+              borderRadius: 18,
+              width: 420,
+              maxWidth: "90vw",
+              boxShadow: "0 24px 80px rgba(0,0,0,0.7)",
+              overflow: "hidden",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "16px 20px",
+                borderBottom: "1px solid #1e1e2c",
+                background: "#0f0f14",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 16 }}>📱</span>
+                <span
+                  style={{ fontWeight: 700, fontSize: 14, color: "#e0e0ec" }}
+                >
+                  Connected Devices
+                </span>
+                <span
+                  style={{
+                    fontSize: 11,
+                    background: "#1a1a2a",
+                    border: "1px solid #2a2a3a",
+                    borderRadius: 10,
+                    padding: "1px 7px",
+                    color: "#6060a0",
+                  }}
+                >
+                  {connectedDevices.length}
+                </span>
+              </div>
+              <button
+                onClick={() => setShowDevices(false)}
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "#44445a",
+                  cursor: "pointer",
+                  fontSize: 16,
+                  padding: "2px 6px",
+                }}
+              >
+                ✕
+              </button>
+            </div>
+            <div
+              style={{
+                padding: "16px 20px 20px",
+                maxHeight: 400,
+                overflowY: "auto",
+              }}
+            >
+              {(() => {
+                const phoneDevices = connectedDevices.filter(
+                  (d) => d.ip !== "127.0.0.1" && d.ip !== "::1",
+                );
+                return phoneDevices.length === 0 ? (
+                  <div
+                    style={{
+                      textAlign: "center",
+                      padding: "32px 0",
+                      color: "#44445a",
+                      fontSize: 13,
+                    }}
+                  >
+                    No devices connected
+                  </div>
+                ) : (
+                  <div
+                    style={{ display: "flex", flexDirection: "column", gap: 8 }}
+                  >
+                    {phoneDevices.map((device) => {
+                      const connectedAgo = device.connectedAt
+                        ? Math.floor(
+                            (Date.now() - new Date(device.connectedAt)) / 60000,
+                          )
+                        : null;
+                      return (
+                        <div
+                          key={device.id}
+                          style={{
+                            background: "#1a1a26",
+                            border: "1px solid #2a2a38",
+                            borderRadius: 12,
+                            padding: "12px 14px",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 12,
+                          }}
+                        >
+                          <div style={{ fontSize: 22, flexShrink: 0 }}>📱</div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div
+                              style={{
+                                fontWeight: 700,
+                                fontSize: 13,
+                                color: "#c0c0d8",
+                                marginBottom: 2,
+                              }}
+                            >
+                              {`Phone — ${device.ip}`}
+                            </div>
+                            <div style={{ fontSize: 11, color: "#44445a" }}>
+                              {connectedAgo !== null
+                                ? connectedAgo === 0
+                                  ? "Connected just now"
+                                  : `Connected ${connectedAgo}m ago`
+                                : "Connected"}
+                              {device.currentPage && ` · page active`}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() =>
+                              askConfirm(
+                                `Disconnect Phone (${device.ip})?`,
+                                () => disconnectDevice(device.id),
+                              )
+                            }
+                            style={{
+                              background: "#2a1010",
+                              border: "1px solid #4a1a1a",
+                              borderRadius: 8,
+                              color: "#f87171",
+                              cursor: "pointer",
+                              fontSize: 11,
+                              padding: "5px 10px",
+                              fontWeight: 600,
+                              flexShrink: 0,
+                            }}
+                          >
+                            Disconnect
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+              <div
+                style={{
+                  marginTop: 14,
+                  fontSize: 11,
+                  color: "#2a2a40",
+                  textAlign: "center",
+                }}
+              >
+                Multiple phones can connect simultaneously. Each gets its own
+                session.
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Audio Settings Modal ── */}
       {showAudioSettings && (
         <div
@@ -804,7 +1019,6 @@ export default function DesktopApp({
             alignItems: "center",
             justifyContent: "center",
             zIndex: 1000,
-            animation: "fadeIn 0.15s ease",
           }}
           onClick={() => setShowAudioSettings(false)}
         >
@@ -817,11 +1031,9 @@ export default function DesktopApp({
               maxWidth: "90vw",
               boxShadow: "0 24px 80px rgba(0,0,0,0.7)",
               overflow: "hidden",
-              animation: "popIn 0.18s ease",
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Modal header */}
             <div
               style={{
                 display: "flex",
@@ -848,17 +1060,13 @@ export default function DesktopApp({
                   color: "#44445a",
                   cursor: "pointer",
                   fontSize: 16,
-                  lineHeight: 1,
                   padding: "2px 6px",
                 }}
               >
                 ✕
               </button>
             </div>
-
-            {/* Modal body */}
             <div style={{ padding: "20px 20px 24px" }}>
-              {/* PC Soundboard Output Device */}
               <div
                 style={{
                   background: "#1a0a2e",
@@ -891,165 +1099,43 @@ export default function DesktopApp({
                   <strong style={{ color: "#a855f7" }}>
                     Voicemeeter Input
                   </strong>{" "}
-                  so Discord (or any app) can hear the soundboard.
+                  so Discord can hear the soundboard.
                 </div>
-
-                <label
+                <input
+                  value={pcSoundDevice}
+                  onChange={(e) => setPcSoundDevice(e.target.value)}
+                  placeholder="Voicemeeter Input (VB-Audio Voicemeeter VAIO)"
                   style={{
-                    display: "block",
-                    fontSize: 11,
+                    width: "100%",
+                    background: "#0f0f1a",
+                    border: "1px solid #3b1a5c",
+                    borderRadius: 8,
+                    color: "#e0e0ec",
+                    padding: "8px 10px",
+                    fontSize: 12,
+                    marginBottom: 12,
+                    boxSizing: "border-box",
+                    outline: "none",
+                  }}
+                />
+                <button
+                  onClick={saveAudioSettings}
+                  style={{
+                    width: "100%",
+                    padding: "8px 0",
+                    borderRadius: 8,
+                    fontSize: 12,
                     fontWeight: 700,
-                    color: "#c084fc",
-                    marginBottom: 6,
-                    letterSpacing: 0.3,
+                    background: audioSettingsSaved
+                      ? "linear-gradient(135deg,#1a4a2a,#1a5c34)"
+                      : "linear-gradient(135deg,#7c3aed,#9333ea)",
+                    border: "none",
+                    color: audioSettingsSaved ? "#34d399" : "#fff",
+                    cursor: "pointer",
                   }}
                 >
-                  Device name
-                </label>
-                {audioDevices.length > 0 ? (
-                  <select
-                    value={pcSoundDevice}
-                    onChange={(e) => setPcSoundDevice(e.target.value)}
-                    style={{ marginBottom: 12 }}
-                  >
-                    <option value="">— system default —</option>
-                    {audioDevices.map((d) => (
-                      <option key={d.id} value={d.name}>
-                        {d.name}
-                        {d.isDefault ? " ✓" : ""}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <>
-                    <div
-                      style={{
-                        fontSize: 11,
-                        color: "#5a3080",
-                        marginBottom: 8,
-                      }}
-                    >
-                      No devices auto-detected. Enter the exact name from
-                      Windows Sound settings.
-                    </div>
-                    <input
-                      value={pcSoundDevice}
-                      onChange={(e) => setPcSoundDevice(e.target.value)}
-                      placeholder="Voicemeeter Input (VB-Audio Voicemeeter VAIO)"
-                      style={{ marginBottom: 12 }}
-                    />
-                  </>
-                )}
-
-                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <button
-                    onClick={saveAudioSettings}
-                    style={{
-                      flex: 1,
-                      padding: "8px 0",
-                      borderRadius: 8,
-                      fontSize: 12,
-                      fontWeight: 700,
-                      background: audioSettingsSaved
-                        ? "linear-gradient(135deg,#1a4a2a,#1a5c34)"
-                        : "linear-gradient(135deg,#7c3aed,#9333ea)",
-                      border: "none",
-                      color: audioSettingsSaved ? "#34d399" : "#fff",
-                      cursor: "pointer",
-                      transition: "all 0.15s",
-                    }}
-                  >
-                    {audioSettingsSaved ? "✓ Saved!" : "Save"}
-                  </button>
-                  <button
-                    onClick={() => {
-                      fetch(`${api()}/audio-devices`)
-                        .then((r) => r.json())
-                        .then(setAudioDevices)
-                        .catch(() => {});
-                    }}
-                    style={{
-                      padding: "8px 12px",
-                      borderRadius: 8,
-                      fontSize: 11,
-                      fontWeight: 600,
-                      background: "#1a1a26",
-                      border: "1px solid #2c2c3a",
-                      color: "#7a7a8a",
-                      cursor: "pointer",
-                    }}
-                  >
-                    ↺ Refresh
-                  </button>
-                </div>
-              </div>
-
-              {/* Voicemeeter setup guide */}
-              <div
-                style={{
-                  background: "#0f1a0f",
-                  border: "1px solid #1a4a1a",
-                  borderRadius: 12,
-                  padding: 16,
-                }}
-              >
-                <div
-                  style={{
-                    fontWeight: 700,
-                    fontSize: 13,
-                    color: "#4ade80",
-                    marginBottom: 10,
-                  }}
-                >
-                  🎙️ Voicemeeter Banana setup
-                </div>
-                {[
-                  ["1", "Open Voicemeeter Banana"],
-                  ["2", "Hardware Input 1 → select your real microphone"],
-                  ["3", "Hardware Out A1 → select your speakers/headphones"],
-                  [
-                    "4",
-                    'In Discord: Input Device → "Voicemeeter Output (VB-Audio Voicemeeter VAIO)"',
-                  ],
-                  [
-                    "5",
-                    'Set PC device above → "Voicemeeter Input (VB-Audio Voicemeeter VAIO)"',
-                  ],
-                  ["6", "Press a soundboard button — your call will hear it!"],
-                ].map(([n, text]) => (
-                  <div
-                    key={n}
-                    style={{
-                      display: "flex",
-                      gap: 10,
-                      marginBottom: 7,
-                      fontSize: 12,
-                      alignItems: "flex-start",
-                    }}
-                  >
-                    <span
-                      style={{
-                        width: 18,
-                        height: 18,
-                        borderRadius: "50%",
-                        background: "#1a4a1a",
-                        color: "#4ade80",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        fontSize: 10,
-                        fontWeight: 700,
-                        flexShrink: 0,
-                        marginTop: 1,
-                      }}
-                    >
-                      {n}
-                    </span>
-                    <span style={{ color: "#6aaa6a", lineHeight: 1.5 }}>
-                      {text}
-                    </span>
-                  </div>
-                ))}
+                  {audioSettingsSaved ? "✓ Saved!" : "Save"}
+                </button>
               </div>
             </div>
           </div>
@@ -1146,8 +1232,9 @@ function TopBar({
   status,
   onPair,
   pairOpen,
+  onDevices,
+  devicesCount,
   onAudioSettings,
-  audioSettingsOpen,
 }) {
   return (
     <div style={styles.topBar}>
@@ -1188,24 +1275,32 @@ function TopBar({
       </div>
 
       <div style={styles.topBarRight}>
+        {/* Devices button — shows count of connected phones */}
         <button
-          onClick={onAudioSettings}
+          onClick={onDevices}
           style={{
             ...styles.topBarBtn,
-            ...(audioSettingsOpen
-              ? {
-                  background: "rgba(168,85,247,0.12)",
-                  border: "1px solid rgba(168,85,247,0.35)",
-                  color: "#c084fc",
-                }
+            ...(devicesCount > 0
+              ? { borderColor: "rgba(52,211,153,0.3)", color: "#34d399" }
               : {}),
           }}
+          title="Connected devices"
+        >
+          <span style={{ fontSize: 11 }}>📱</span>
+          <span>Devices{devicesCount > 0 ? ` (${devicesCount})` : ""}</span>
+        </button>
+
+        {/* Audio settings */}
+        <button
+          onClick={onAudioSettings}
+          style={styles.topBarBtn}
           title="Audio settings"
         >
           <span style={{ fontSize: 11 }}>🎛️</span>
           <span>Audio</span>
         </button>
 
+        {/* QR pair */}
         <button
           onClick={onPair}
           style={{
@@ -1213,8 +1308,8 @@ function TopBar({
             ...(pairOpen ? styles.topBarBtnActive : {}),
           }}
         >
-          <span style={{ fontSize: 11 }}>📱</span>
-          <span>{pairOpen ? "QR Open" : "Connect Phone"}</span>
+          <span style={{ fontSize: 11 }}>＋</span>
+          <span>{pairOpen ? "QR Open" : "Add Phone"}</span>
         </button>
 
         <div
@@ -1335,6 +1430,7 @@ function Sidebar({
   currentPage,
   profileRules,
   autoSwitch,
+  switchDelay,
   currentRule,
   activeWindow,
   openWindows,
@@ -1344,6 +1440,7 @@ function Sidebar({
   onAddPage,
   onDeletePage,
   onToggleAutoSwitch,
+  onChangeDelay,
   onSaveRule,
   onDeleteRule,
   onSelectRunningApp,
@@ -1474,13 +1571,16 @@ function Sidebar({
       {/* Auto-switch rule editor */}
       {currentPage && (
         <AutoSwitchRuleEditor
+          key={currentRule?.id ?? "no-rule"}
           rule={currentRule}
           enabled={autoSwitch}
+          switchDelay={switchDelay}
           activeWindow={activeWindow}
           openWindows={openWindows}
           showAppPicker={showAppPicker}
           captureCountdown={captureCountdown}
           onToggleGlobal={onToggleAutoSwitch}
+          onChangeDelay={onChangeDelay}
           onSave={onSaveRule}
           onDelete={onDeleteRule}
           onSelectRunningApp={onSelectRunningApp}
@@ -1532,11 +1632,13 @@ function Toggle({ value, onChange }) {
 function AutoSwitchRuleEditor({
   rule,
   enabled,
+  switchDelay,
   activeWindow,
   openWindows,
   showAppPicker,
   captureCountdown,
   onToggleGlobal,
+  onChangeDelay,
   onSave,
   onDelete,
   onSelectRunningApp,
@@ -1545,22 +1647,53 @@ function AutoSwitchRuleEditor({
   onCaptureDelayed,
   onRefreshCurrentApp,
 }) {
-  const draft = rule || {
+  const emptyDraft = () => ({
     enabled: false,
     priority: 100,
     logic: "AND",
     conditions: [emptyCondition()],
-  };
-  const conditions = draft.conditions?.length
-    ? draft.conditions
+  });
+
+  // ── Local draft — edits live here, not in the DB until Save is clicked ──
+  const [localDraft, setLocalDraft] = useState(() => rule || emptyDraft());
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // Which condition index triggered the app picker (-1 = whole-rule quick-set)
+  const [pickerConditionIndex, setPickerConditionIndex] = useState(-1);
+
+  // Sync from parent when the rule prop changes from outside
+  // (page switch, initial load, picker writing a new rule)
+  // but NOT when we're mid-edit (dirty=true)
+  // useEffect(() => {
+  //   if (!dirty) {
+  //     setLocalDraft(rule || emptyDraft());
+  //   }
+  //   // eslint-disable-next-line react-hooks/exhaustive-deps
+  // }, [rule]);
+
+  const conditions = localDraft.conditions?.length
+    ? localDraft.conditions
     : [emptyCondition()];
-  const patchRule = (patch) => onSave({ ...draft, ...patch });
-  const patchCondition = (index, patch) =>
-    patchRule({
+
+  function patchDraft(patch) {
+    setLocalDraft((d) => ({ ...d, ...patch }));
+    setDirty(true);
+  }
+
+  function patchCondition(index, patch) {
+    patchDraft({
       conditions: conditions.map((c, i) =>
         i === index ? { ...c, ...patch } : c,
       ),
     });
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    await onSave(localDraft);
+    setSaving(false);
+    setDirty(false);
+  }
 
   const rs = ruleStyles;
 
@@ -1622,15 +1755,15 @@ function AutoSwitchRuleEditor({
         <label style={rs.miniLabel}>Rule</label>
         <input
           type="checkbox"
-          checked={!!draft.enabled}
-          onChange={(e) => patchRule({ enabled: e.target.checked })}
+          checked={!!localDraft.enabled}
+          onChange={(e) => patchDraft({ enabled: e.target.checked })}
           style={{ cursor: "pointer" }}
         />
         <label style={rs.miniLabel}>Logic</label>
         <select
           style={rs.compactSelect}
-          value={draft.logic || "AND"}
-          onChange={(e) => patchRule({ logic: e.target.value })}
+          value={localDraft.logic || "AND"}
+          onChange={(e) => patchDraft({ logic: e.target.value })}
         >
           <option value="AND">AND</option>
           <option value="OR">OR</option>
@@ -1641,76 +1774,140 @@ function AutoSwitchRuleEditor({
           min="0"
           max="1000"
           style={rs.compactInput}
-          value={draft.priority ?? 100}
-          onChange={(e) => patchRule({ priority: Number(e.target.value) || 0 })}
+          value={localDraft.priority ?? 100}
+          onChange={(e) =>
+            patchDraft({ priority: Number(e.target.value) || 0 })
+          }
         />
       </div>
 
-      {/* Conditions */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-        {conditions.map((cond, index) => (
-          <div key={index} style={rs.conditionRow}>
-            <select
-              style={rs.condInput}
-              value={cond.type}
-              onChange={(e) => patchCondition(index, { type: e.target.value })}
-            >
-              {CONDITION_TYPES.map((t) => (
-                <option key={t.value} value={t.value}>
-                  {t.label}
-                </option>
-              ))}
-            </select>
-            <select
-              style={rs.condInput}
-              value={cond.operator}
-              onChange={(e) =>
-                patchCondition(index, { operator: e.target.value })
-              }
-            >
-              {CONDITION_OPERATORS.map((op) => (
-                <option key={op.value} value={op.value}>
-                  {op.label}
-                </option>
-              ))}
-            </select>
-            <input
-              style={rs.condInput}
-              value={cond.value || ""}
-              disabled={cond.operator === "exists"}
-              placeholder={
-                cond.type === "process"
-                  ? "Code.exe"
-                  : cond.type === "window_title"
-                    ? "workspace"
-                    : "C:\\Path\\App.exe"
-              }
-              onChange={(e) => patchCondition(index, { value: e.target.value })}
-            />
-            <button
-              style={rs.removeCondBtn}
-              onClick={() =>
-                patchRule({
-                  conditions: conditions.filter((_, i) => i !== index),
-                })
-              }
-              disabled={conditions.length === 1}
-              title="Remove condition"
-            >
-              ✕
-            </button>
-          </div>
-        ))}
+      {/* Switch delay slider */}
+      <div style={rs.delayRow}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginBottom: 5,
+          }}
+        >
+          <span style={rs.miniLabel}>⏱ Switch delay</span>
+          <span style={{ fontSize: 11, fontWeight: 700, color: "#7aafff" }}>
+            {switchDelay === 0 ? "Instant" : `${switchDelay / 1000}s`}
+          </span>
+        </div>
+        <input
+          type="range"
+          min="0"
+          max="5000"
+          step="500"
+          value={switchDelay ?? 0}
+          onChange={(e) => onChangeDelay(Number(e.target.value))}
+          style={{ width: "100%", accentColor: "#3a6fff", cursor: "pointer" }}
+        />
+        <div style={{ fontSize: 10, color: "#2c2c4a", marginTop: 3 }}>
+          Waits before switching — prevents flicker when alt-tabbing.
+        </div>
       </div>
+
+      {/* Conditions */}
+
+      {conditions.map((cond, index) => (
+        <div key={index} style={rs.conditionRow}>
+          <select
+            style={rs.condSelect}
+            value={cond.type}
+            onChange={(e) => patchCondition(index, { type: e.target.value })}
+          >
+            {CONDITION_TYPES.map((t) => (
+              <option key={t.value} value={t.value}>
+                {t.label}
+              </option>
+            ))}
+          </select>
+          <select
+            style={rs.condSelect}
+            value={cond.operator}
+            onChange={(e) =>
+              patchCondition(index, { operator: e.target.value })
+            }
+          >
+            {CONDITION_OPERATORS.map((op) => (
+              <option key={op.value} value={op.value}>
+                {op.label}
+              </option>
+            ))}
+          </select>
+          <input
+            style={rs.condInput}
+            value={cond.value || ""}
+            disabled={cond.operator === "exists"}
+            placeholder={
+              cond.type === "process"
+                ? "App.exe"
+                : cond.type === "window_title"
+                  ? "workspace"
+                  : "C:\\Path\\App.exe"
+            }
+            onChange={(e) => patchCondition(index, { value: e.target.value })}
+          />
+          {/* Per-condition app picker button */}
+          <button
+            style={{ ...rs.removeCondBtn, color: "#5a8fff", fontSize: 12 }}
+            title="Pick from running apps"
+            onClick={() => {
+              setPickerConditionIndex(index);
+              onSelectRunningApp();
+            }}
+          >
+            ⊞
+          </button>
+          <button
+            style={rs.removeCondBtn}
+            onClick={() =>
+              patchDraft({
+                conditions: conditions.filter((_, i) => i !== index),
+              })
+            }
+            disabled={conditions.length === 1}
+            title="Remove condition"
+          >
+            ✕
+          </button>
+        </div>
+      ))}
 
       <button
         style={rs.addCondBtn}
         onClick={() =>
-          patchRule({ conditions: [...conditions, emptyCondition()] })
+          patchDraft({ conditions: [...conditions, emptyCondition()] })
         }
       >
         + Add condition
       </button>
+
+      {/* Save button — only shown when there are unsaved changes */}
+      {dirty && (
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          style={{
+            width: "100%",
+            padding: "7px 0",
+            borderRadius: 7,
+            fontSize: 11,
+            fontWeight: 700,
+            background: saving
+              ? "#1a1a2e"
+              : "linear-gradient(135deg,#3a5fff,#5b4fcf)",
+            border: "none",
+            color: saving ? "#44445a" : "#fff",
+            cursor: saving ? "default" : "pointer",
+          }}
+        >
+          {saving ? "Saving…" : "Save rule"}
+        </button>
+      )}
 
       {/* App picker dropdown */}
       {showAppPicker && (
@@ -1729,7 +1926,21 @@ function AutoSwitchRuleEditor({
               <button
                 key={`${app.pid}-${i}`}
                 style={rs.pickerItem}
-                onClick={() => onPickApp(app)}
+                onClick={() => {
+                  if (pickerConditionIndex >= 0) {
+                    // Update only the specific condition that triggered the picker
+                    patchCondition(pickerConditionIndex, {
+                      type: "process",
+                      operator: "equals",
+                      value: app.process || "",
+                    });
+                    setPickerConditionIndex(-1);
+                    onClosePicker();
+                  } else {
+                    // Whole-rule quick-set (triggered by top "Select app" button)
+                    onPickApp(app);
+                  }
+                }}
               >
                 <span style={rs.pickerProcess}>{app.process}</span>
                 <span style={rs.pickerTitle}>{app.windowTitle}</span>
@@ -2530,7 +2741,7 @@ const styles = {
 
   // ── Sidebar ──
   sidebar: {
-    width: 272,
+    width: 320,
     flexShrink: 0,
     background: "#0f0f14",
     borderRight: "1px solid #1e1e28",
@@ -2977,10 +3188,30 @@ const ruleStyles = {
     boxSizing: "border-box",
     fontFamily: "'DM Sans', system-ui, sans-serif",
   },
+  condSelect: {
+    background: "#1a1a26",
+    border: "1px solid #2c2c3a",
+    borderRadius: 6,
+    color: "#c8c8d4",
+    padding: "5px 20px 5px 8px",
+    fontSize: 11,
+    outline: "none",
+    boxSizing: "border-box",
+    width: "100%",
+    minWidth: 0,
+    appearance: "none",
+    WebkitAppearance: "none",
+    MozAppearance: "none",
+    backgroundImage:
+      "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M2 3.5L5 6.5L8 3.5' stroke='%238888a8' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\")",
+    backgroundRepeat: "no-repeat",
+    backgroundPosition: "right 6px center",
+    backgroundSize: "10px",
+  },
   conditionRow: {
     display: "grid",
-    gridTemplateColumns: "80px 80px 1fr 2px",
-    gap: 4,
+    gridTemplateColumns: "1.4fr 1.2fr 1.6fr 14px 14px",
+    gap: 6,
     alignItems: "center",
     width: "100%",
   },
@@ -2989,23 +3220,27 @@ const ruleStyles = {
     border: "1px solid #2c2c3a",
     borderRadius: 6,
     color: "#c8c8d4",
-    padding: "5px 6px",
+    padding: "5px 8px",
     fontSize: 11,
     outline: "none",
     boxSizing: "border-box",
     width: "100%",
     minWidth: 0,
-    fontFamily: "'DM Sans', system-ui, sans-serif",
+    fontFamily: "DM Sans, system-ui, sans-serif",
   },
   removeCondBtn: {
-    background: "none",
+    width: 14,
+    height: 14,
+    display: "grid",
+    placeItems: "center",
+    background: "transparent",
     border: "none",
-    color: "#3a3a50",
+    color: "#5b5b70",
+    fontSize: 11,
     cursor: "pointer",
-    fontSize: 9,
-    padding: "2px 4px",
-    flexShrink: 0,
-    fontFamily: "'DM Sans', system-ui, sans-serif",
+    padding: 0,
+    lineHeight: 1,
+    transition: "color 0.15s ease, transform 0.15s ease",
   },
   addCondBtn: {
     alignSelf: "flex-start",
@@ -3018,6 +3253,12 @@ const ruleStyles = {
     fontSize: 10,
     fontWeight: 600,
     fontFamily: "'DM Sans', system-ui, sans-serif",
+  },
+  delayRow: {
+    background: "#111120",
+    border: "1px solid #252538",
+    borderRadius: 7,
+    padding: "8px 10px",
   },
   picker: {
     borderRadius: 8,

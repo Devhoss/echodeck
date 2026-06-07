@@ -99,12 +99,19 @@ function resolveHost() {
 }
 
 function resolvePort() {
-  if (typeof window !== "undefined" && window.__ECHODECK__?.port) {
-    return window.__ECHODECK__.port;
+  if (typeof window !== "undefined" && window.__ECHODECK__?.isElectron) {
+    return window.__ECHODECK__.port || PORT;
   }
+
+  if (isNativeMobile()) {
+    loadPairConfig();
+    return _pairedPort || PORT;
+  }
+
   if (import.meta.env?.VITE_PORT) {
     return parseInt(import.meta.env.VITE_PORT, 10);
   }
+
   return PORT;
 }
 

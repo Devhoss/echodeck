@@ -215,7 +215,11 @@ Configure the PC output device under **Audio Settings** in the top bar.
 
 ```
 echodeck/
-├── client/
+├── .github/
+│   └── workflows/
+│       └── android-release.yml   ← CI: builds APK + EXE on every tag push
+│
+├── client/                       ← React frontend + Capacitor Android app
 │   ├── src/
 │   │   ├── App.jsx
 │   │   ├── desktop/
@@ -223,9 +227,10 @@ echodeck/
 │   │   ├── ConfigUI.jsx
 │   │   ├── constants.js
 │   │   └── index.css
+│   ├── android/                  ← Capacitor Android project (generated)
 │   └── package.json
 │
-├── host/
+├── host/                         ← Electron main process + Express backend
 │   ├── src/
 │   │   ├── server.js
 │   │   ├── actions.js
@@ -233,18 +238,26 @@ echodeck/
 │   │   ├── network.js
 │   │   ├── activeWindow.js
 │   │   └── ruleEngine.js
-│   │
+│   ├── assets/
+│   │   └── icon.png / icon.ico
 │   ├── main.js
 │   ├── preload.js
 │   ├── macro-deck.db
 │   └── package.json
 │
+├── build-android.ps1             ← Local Android build script (Windows)
 └── README.md
 ```
 
 ---
 
 # Running the Project
+
+## Prerequisites
+
+- [Node.js](https://nodejs.org/) v22 or later
+- [Android Studio](https://developer.android.com/studio) (only needed for local Android builds)
+- Windows OS (the desktop app is Windows-only for now)
 
 ## Install Dependencies
 
@@ -265,15 +278,85 @@ cd client && npm run dev
 # 2. Start the backend
 cd host && node src/server.js
 
-# 3. Start Electron
+# 3. Start Electron (separate terminal)
 cd host && npm start
 ```
 
 ## Build
 
 ```bash
+# Build the React/Vite web bundle
 cd client && npm run build
+
+# Build the Windows installer (also runs the client build via predist)
+cd host && npm run dist
 ```
+
+---
+
+# Releases
+
+EchoDeck uses **GitHub Actions** to automatically build and publish releases.
+Every time a version tag is pushed, the CI pipeline builds both the Windows installer
+and the Android APK in parallel, then attaches them to a GitHub Release.
+
+## How it works
+
+```
+git tag v1.2.0 && git push origin v1.2.0
+          ↓
+GitHub Actions triggers two parallel jobs:
+  ┌─────────────────────────┐   ┌──────────────────────────┐
+  │  Build Android APK      │   │  Build Windows EXE       │
+  │  ubuntu-latest          │   │  windows-latest          │
+  │                         │   │                          │
+  │  npm run build          │   │  npm run build (client)  │
+  │  cap sync android       │   │  npm run dist (host)     │
+  │  gradlew assembleDebug  │   │  electron-builder        │
+  └────────────┬────────────┘   └─────────────┬────────────┘
+               └──────────┬──────────────────┘
+                          ↓
+              GitHub Release: v1.2.0
+              ├── EchoDeck-Setup.exe
+              └── echodeck-v1.2.0.apk
+```
+
+## Cutting a release
+
+Make sure everything is committed and pushed, then:
+
+```bash
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+That's it. Check the **Actions** tab on GitHub to watch the build, then **Releases** for the output.
+
+## Version naming
+
+```
+v1.0.0  →  first stable build
+v1.0.1  →  bug fix
+v1.1.0  →  new feature
+v2.0.0  →  major update
+```
+
+## Local Android build (Windows)
+
+If you want to build the APK locally without pushing a tag:
+
+```powershell
+# From the repo root
+.\build-android.ps1            # outputs echodeck-local.apk
+.\build-android.ps1 v1.2.0    # outputs echodeck-v1.2.0.apk
+```
+
+## Notes for forks
+
+- The workflow uses `GITHUB_TOKEN` which is automatically available — no secrets needed
+- The APK is debug-signed, which is fine for sideloading
+- Windows SmartScreen will warn on the EXE since it has no code signing certificate — click **More info → Run anyway**. This is expected for unsigned open-source apps
+- If you fork and want your own releases, no changes are needed — the workflow uses `github.ref_name` so it picks up your own tags automatically
 
 ---
 
@@ -298,7 +381,8 @@ cd client && npm run build
 - Config UI (mobile-friendly)
 - Audio settings panel
 - Windows startup registration
-- Mobile companion app only Android for now
+- Android companion app
+- Automated GitHub releases (APK + EXE via CI)
 
 ## In Progress
 
@@ -313,6 +397,7 @@ cd client && npm run build
 - Twitch / YouTube integration
 - OBS integration
 - AI-powered controls & suggestions
+- iOS companion app
 - Plugin marketplace
 - Multi-device syncing
 
