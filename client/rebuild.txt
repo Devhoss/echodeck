@@ -3,13 +3,17 @@ npm run build
 npx cap sync android
 npx cap run android
 
-dev URL: http://localhost:5173/?desktop=1
+Desktop app dev URL: http://localhost:5173/?desktop=1
 
 # apk release
 # 1. Make sure everything is committed and pushed
 git add .
 git commit -m "your message"
 git push
+
+# Delete the tag locally and on GitHub
+git tag -d v1.0.*
+git push origin --delete v1.0.*
 
 # 2. Tag it and push the tag — this triggers the CI build
 git tag v1.0.2

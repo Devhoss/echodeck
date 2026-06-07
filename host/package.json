@@ -35,7 +35,9 @@
       }
     ],
     "win": {
-      "target": ["nsis"],
+      "target": [
+        "nsis"
+      ],
       "icon": "assets/icon.ico",
       "artifactName": "EchoDeck-Setup.exe"
     },
@@ -53,6 +55,7 @@
     "nodemon": "^3.1.14"
   },
   "dependencies": {
+    "active-win": "^8.2.1",
     "better-sqlite3": "^12.10.0",
     "express": "^5.2.1",
     "loudness": "^0.4.2",

@@ -570,7 +570,7 @@ const autoSwitchInterval = setInterval(() => {
   evaluateAutoSwitch().catch((e) =>
     console.warn("Auto profile switch error:", e.message),
   );
-}, 1000);
+}, 2000);
 
 function broadcastUpdate(id, fields) {
   const msg = JSON.stringify({ t: "update", id, ...fields });
