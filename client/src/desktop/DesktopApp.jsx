@@ -188,6 +188,7 @@ export default function DesktopApp({
   const [activeId, setActiveId] = useState(null); // dnd drag overlay
   const [audioDevices, setAudioDevices] = useState([]);
   const [profileRules, setProfileRules] = useState([]);
+  const [ruleEditorKey, setRuleEditorKey] = useState(0);
   const [autoSwitch, setAutoSwitch] = useState(true);
   const reorderTimer = useRef(null);
   const captureTimerRef = useRef(null);
@@ -501,6 +502,7 @@ export default function DesktopApp({
       method: "DELETE",
     });
     await reloadProfileRules();
+    setRuleEditorKey((k) => k + 1); // ← force editor remount with clean state
   }
 
   async function getCurrentApp() {
@@ -633,6 +635,7 @@ export default function DesktopApp({
           pages={pages}
           buttons={buttons}
           pageButtonCounts={pageButtonCounts}
+          ruleEditorKey={ruleEditorKey}
           currentPage={currentPage}
           profileRules={profileRules}
           autoSwitch={autoSwitch}
@@ -1439,6 +1442,7 @@ function Sidebar({
   profileRules,
   autoSwitch,
   switchDelay,
+  ruleEditorKey,
   currentRule,
   activeWindow,
   openWindows,
@@ -1504,9 +1508,9 @@ function Sidebar({
                 >
                   {p.name}
                 </span>
-                {rule?.enabled && (
+                {rule?.enabled && rule.conditions?.[0]?.value && (
                   <span style={styles.pageItemRule}>
-                    ⚡ {rule.conditions?.[0]?.value || "rule"}
+                    ⚡ {rule.conditions[0].value}
                   </span>
                 )}
               </div>
@@ -1579,7 +1583,7 @@ function Sidebar({
       {/* Auto-switch rule editor */}
       {currentPage && (
         <AutoSwitchRuleEditor
-          key={currentPage}
+          key={`${currentPage}-${ruleEditorKey}`}
           rule={currentRule}
           enabled={autoSwitch}
           switchDelay={switchDelay}

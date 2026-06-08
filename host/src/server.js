@@ -19,7 +19,13 @@ const {
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({
+  server,
+  perMessageDeflate: false, // no compression — faster handshake on mobile
+});
+
+const PING_INTERVAL = 15_000;
+const PONG_TIMEOUT = 10_000;
 
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
@@ -309,9 +315,11 @@ function broadcastClients() {
         ip: ws.clientIp,
         connectedAt: ws.connectedAt,
         currentPage: ws.currentPage || null,
+        userAgent: ws.userAgent || null, // ← was missing here
       });
     }
   });
+
   const msg = JSON.stringify({ t: "clients", clients: list });
   clients.forEach((ws) => {
     // Only send to Electron desktop clients, not phone clients
@@ -344,22 +352,45 @@ const statsInterval = setInterval(async () => {
 const holdIntervals = new Map();
 
 wss.on("connection", (ws, req) => {
-  // Attach metadata to each client for the devices panel
   ws.clientId = uuid();
   ws.clientIp = req.socket.remoteAddress?.replace("::ffff:", "") || "unknown";
   ws.connectedAt = new Date().toISOString();
   ws.userAgent = req.headers["user-agent"] || null;
-  // Mark Electron desktop clients (they connect from localhost)
   ws.isDesktop =
     ws.clientIp === "127.0.0.1" ||
     ws.clientIp === "::1" ||
     ws.clientIp === "localhost";
+  ws.isAlive = true; // ← for heartbeat
+
+  const pingTimer = setInterval(() => {
+    if (!ws.isAlive) {
+      ws.terminate();
+      return;
+    }
+    ws.isAlive = false;
+    ws.ping();
+  }, PING_INTERVAL);
+
+  ws.on("pong", () => {
+    ws.isAlive = true;
+  });
 
   clients.add(ws);
   console.log(
     `Client connected [${ws.clientId}] from ${ws.clientIp}. Total: ${clients.size}`,
   );
-  sendState(ws);
+
+  // ✅ 300ms delay — more forgiving for slow mobile connections
+  setTimeout(() => {
+    if (ws.readyState === 1) {
+      try {
+        sendState(ws);
+      } catch {
+        ws.terminate();
+      }
+    }
+  }, 300);
+
   broadcastClients();
 
   ws.on("message", (raw) => {
@@ -453,6 +484,7 @@ wss.on("connection", (ws, req) => {
   });
 
   const cleanup = () => {
+    clearInterval(pingTimer);
     const interval = holdIntervals.get(ws);
     if (interval) {
       clearInterval(interval);
@@ -501,7 +533,13 @@ function toDeckButton(btn) {
 
 function broadcastState() {
   clients.forEach((ws) => {
-    if (ws.readyState === 1) sendState(ws, ws.currentPage);
+    if (ws.readyState === 1) {
+      try {
+        sendState(ws, ws.currentPage);
+      } catch {
+        ws.terminate();
+      }
+    }
   });
 }
 
@@ -512,23 +550,6 @@ function broadcastRules() {
   });
   clients.forEach((ws) => {
     if (ws.readyState === 1) ws.send(msg);
-  });
-}
-
-async function performSwitch() {
-  const pages = db.getPages();
-  if (!pages.length) return;
-
-  const rule = findMatchingRule(db.getProfileRules(), activeWindow);
-  const nextPageId = rule?.page_id || pages[0].id;
-  const nextRuleId = rule?.id || null;
-  if (nextPageId === autoPageId && nextRuleId === activeRuleId) return;
-
-  autoPageId = nextPageId;
-  activeRuleId = nextRuleId;
-  clients.forEach((ws) => {
-    ws.currentPage = nextPageId;
-    if (ws.readyState === 1) sendState(ws, nextPageId);
   });
 }
 
@@ -566,19 +587,6 @@ async function evaluateAutoSwitch() {
       performSwitch(pages, rule);
     }, delayMs);
   }
-}
-
-function performSwitch(pages, rule) {
-  const nextPageId = rule?.page_id || pages[0].id;
-  const nextRuleId = rule?.id || null;
-  if (nextPageId === autoPageId && nextRuleId === activeRuleId) return;
-
-  autoPageId = nextPageId;
-  activeRuleId = nextRuleId;
-  clients.forEach((ws) => {
-    ws.currentPage = nextPageId;
-    if (ws.readyState === 1) sendState(ws, nextPageId);
-  });
 }
 
 function performSwitch(pages, rule) {
