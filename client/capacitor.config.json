@@ -6,7 +6,8 @@
     "androidScheme": "http"
   },
   "android": {
-    "adjustMarginsForEdgeToEdge": "auto"
+    "adjustMarginsForEdgeToEdge": "auto",
+    "allowMixedContent": true
   },
   "plugins": {
     "StatusBar": {

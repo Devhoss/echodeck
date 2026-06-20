@@ -7,7 +7,7 @@
  *   RIGHT  — property panel (inline editor, no full-screen overlay)
  *
  * Receives all live state (buttons, pages, stats, volume, ws) as props from App.jsx.
- * All mutations go through the same fetch() calls as ConfigUI — no new API surface.
+ * All mutations go through the existing REST/WebSocket API — no new API surface.
  */
 
 import { useCallback, useEffect, useRef, useState, memo, useMemo } from "react";
@@ -28,6 +28,13 @@ import {
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import {
+  ACTION_BY_ID,
+  ACTION_CATEGORIES,
+  ACTION_REGISTRY,
+  actionTypeLabel,
+  applyActionTypeDefaults,
+} from "../actionRegistry.js";
 import { getApiUrl } from "../constants.js";
 
 // Resolved at call time (inside effects/handlers), always after preload injection
@@ -50,33 +57,11 @@ const COLORS = [
   "#6b4a0a",
 ];
 
-const ACTION_GROUPS = [
-  { label: "General", types: ["keystroke", "type", "shell", "url", "launch"] },
-  {
-    label: "Volume",
-    types: ["volume_up", "volume_down", "volume_set", "volume_mute"],
-  },
-  { label: "Audio", types: ["audio_switch_device"] },
-];
-const ACTION_LABELS = {
-  keystroke: "Keystroke",
-  type: "Type Text",
-  shell: "Shell Command",
-  url: "Open URL",
-  launch: "Launch App",
-  volume_up: "Volume Up",
-  volume_down: "Volume Down",
-  volume_set: "Set Volume",
-  volume_mute: "Toggle Mute",
-  audio_switch_device: "Switch Audio Device",
-};
-const VOLUME_NO_VALUE = new Set(["volume_mute", "volume_up", "volume_down"]);
-const VOLUME_ACTIONS = new Set([
-  "volume_up",
-  "volume_down",
-  "volume_set",
-  "volume_mute",
-]);
+const VOLUME_ACTIONS = new Set(
+  ACTION_REGISTRY.filter((action) => action.id.startsWith("volume_")).map(
+    (action) => action.id,
+  ),
+);
 const SOUND_TARGETS = [
   { value: "phone", label: "📱 Phone" },
   { value: "pc", label: "🖥️ PC" },
@@ -288,6 +273,14 @@ export default function DesktopApp({
         toggle_action_type: btn.toggle_action_type || "keystroke",
         toggle_action_value: btn.toggle_action_value || "",
         actions: btn.actions || null,
+        button_mode:
+          btn.button_mode ||
+          (btn.switch_actions_a?.length || btn.switch_actions_b?.length
+            ? "multi_switch"
+            : "single"),
+        switch_actions_a: btn.switch_actions_a || [],
+        switch_actions_b: btn.switch_actions_b || [],
+        switch_state: btn.switch_state || 0,
         sound_file: btn.sound_file || null,
         sound_target: btn.sound_target || "phone",
         audio_device: btn.audio_device || null,
@@ -1413,7 +1406,7 @@ function VolChip({ volume, muted }) {
           style={{
             height: "100%",
             width: `${muted ? 0 : volume}%`,
-            background: muted ? "#f87171" : volume > 80 ? "#fb923c" : "#4ade80",
+            background: muted ? "#f87171" : volume > 95 ? "#fb923c" : "#4ade80",
             borderRadius: 2,
             transition: "width 0.15s",
           }}
@@ -1862,14 +1855,7 @@ function AutoSwitchRuleEditor({
                   ? "workspace"
                   : "C:\\Path\\App.exe"
             }
-            onChange={(e) => {
-              const op = e.target.value;
-              patchCondition(index, {
-                operator: op,
-                // Clear value when switching to exists — it's unused and misleading
-                ...(op === "exists" ? { value: "" } : {}),
-              });
-            }}
+            onChange={(e) => patchCondition(index, { value: e.target.value })}
           />
           {/* Per-condition app picker button */}
           <button
@@ -2210,11 +2196,11 @@ function ButtonTile({
               width: "100%",
               height: `${muted ? 0 : volume}%`,
               background: muted
-                ? "rgba(248,113,113,0.2)"
-                : volume > 80
-                  ? "rgba(251,146,60,0.18)"
-                  : "rgba(52,211,153,0.12)",
-              transition: "height 0.12s",
+                ? "rgba(248,113,113,0.25)"
+                : volume > 95
+                  ? "rgba(251,146,60,0.2)"
+                  : "rgba(74,222,128,0.15)",
+              transition: "height 0.12s ease",
             }}
           />
           <div
@@ -2314,8 +2300,6 @@ function PropertyPanel({
     );
   }
 
-  const showActionValue = !VOLUME_NO_VALUE.has(form.action_type);
-
   return (
     <div style={styles.panel}>
       <div style={styles.panelInner}>
@@ -2361,7 +2345,7 @@ function PropertyPanel({
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={styles.previewLabel}>{form.label || "Untitled"}</div>
             <div style={styles.previewAction}>
-              {ACTION_LABELS[form.action_type] || form.action_type}
+              {actionTypeLabel(form.action_type)}
             </div>
           </div>
         </div>
@@ -2474,83 +2458,18 @@ function PropertyPanel({
 
         <div style={styles.panelDivider} />
 
-        {/* Action type */}
-        <Field label="Action">
-          <select
-            value={form.action_type || "keystroke"}
-            onChange={(e) =>
-              onPatch({ action_type: e.target.value, action_value: "" })
-            }
-          >
-            {ACTION_GROUPS.map((g) => (
-              <optgroup key={g.label} label={g.label}>
-                {g.types.map((t) => (
-                  <option key={t} value={t}>
-                    {ACTION_LABELS[t]}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
-        </Field>
-
-        {/* Action value */}
-        {showActionValue && (
-          <Field
-            label={
-              form.action_type === "audio_switch_device" ? "Device" : "Value"
-            }
-          >
-            {form.action_type === "audio_switch_device" ? (
-              <select
-                value={form.action_value || ""}
-                onChange={(e) => onPatch({ action_value: e.target.value })}
-              >
-                <option value="">— select device —</option>
-                {audioDevices.map((d) => (
-                  <option key={d.id} value={d.name}>
-                    {d.name}
-                    {d.isDefault ? " ✓" : ""}
-                  </option>
-                ))}
-              </select>
-            ) : form.action_type === "launch" ? (
-              <div style={{ display: "flex", gap: 6 }}>
-                <input
-                  value={form.action_value || ""}
-                  onChange={(e) => onPatch({ action_value: e.target.value })}
-                  placeholder="C:\path\to\app.exe"
-                  style={{ flex: 1 }}
-                />
-                <button
-                  style={styles.iconUploadBtn}
-                  onClick={async () => {
-                    try {
-                      const path = await window.electronAPI?.system.pickFile();
-                      if (path) onPatch({ action_value: path });
-                    } catch {
-                      /* ignore */
-                    }
-                  }}
-                >
-                  📁
-                </button>
-              </div>
-            ) : (
-              <input
-                value={form.action_value || ""}
-                onChange={(e) => onPatch({ action_value: e.target.value })}
-                placeholder={
-                  form.action_type === "volume_set"
-                    ? "0–100"
-                    : form.action_type === "url"
-                      ? "https://..."
-                      : "value"
-                }
-              />
-            )}
-          </Field>
-        )}
+        {form.button_mode !== "multi" &&
+        form.button_mode !== "multi_switch" &&
+        !(form.actions?.length > 0) ? (
+          <ActionEditor
+            action={{
+              action_type: form.action_type || "keystroke",
+              action_value: form.action_value || "",
+            }}
+            onChange={onPatch}
+            audioDevices={audioDevices}
+          />
+        ) : null}
 
         {/* Toggle */}
         <Field label="Toggle mode">
@@ -2566,13 +2485,120 @@ function PropertyPanel({
         </Field>
 
         {form.is_toggle ? (
-          <Field label="Toggle OFF action">
-            <input
-              value={form.toggle_action_value || ""}
-              onChange={(e) => onPatch({ toggle_action_value: e.target.value })}
-              placeholder="Action when toggling off"
+          <ActionEditor
+            title="Toggle OFF action"
+            action={{
+              action_type: form.toggle_action_type || "keystroke",
+              action_value: form.toggle_action_value || "",
+            }}
+            onChange={(patch) =>
+              onPatch({
+                ...(patch.action_type !== undefined
+                  ? { toggle_action_type: patch.action_type }
+                  : {}),
+                ...(patch.action_value !== undefined
+                  ? { toggle_action_value: patch.action_value }
+                  : {}),
+              })
+            }
+            audioDevices={audioDevices}
+          />
+        ) : null}
+
+        <Field label="Multi-action">
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Toggle
+              value={
+                form.button_mode === "multi" ||
+                (form.actions?.length > 0 &&
+                  form.button_mode !== "multi_switch")
+              }
+              onChange={(v) =>
+                onPatch({
+                  button_mode: v ? "multi" : "single",
+                  is_toggle: 0,
+                  actions: v
+                    ? form.actions?.length > 0
+                      ? form.actions
+                      : [
+                          {
+                            action_type: "keystroke",
+                            action_value: "",
+                            delay_ms: 0,
+                          },
+                        ]
+                    : null,
+                })
+              }
             />
-          </Field>
+            <span style={{ fontSize: 11, color: "#666" }}>
+              Run a sequence of actions
+            </span>
+          </div>
+        </Field>
+
+        {form.button_mode === "multi" || form.actions?.length > 0 ? (
+          <ActionStackEditor
+            title="Steps"
+            actions={form.actions || []}
+            onChange={(actions) => onPatch({ actions, button_mode: "multi" })}
+            audioDevices={audioDevices}
+          />
+        ) : null}
+
+        <Field label="Multi-action switch">
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Toggle
+              value={form.button_mode === "multi_switch"}
+              onChange={(v) =>
+                onPatch({
+                  button_mode: v ? "multi_switch" : "single",
+                  is_toggle: 0,
+                  actions: null,
+                  switch_actions_a:
+                    form.switch_actions_a?.length > 0
+                      ? form.switch_actions_a
+                      : [
+                          {
+                            action_type: "keystroke",
+                            action_value: "",
+                            delay_ms: 0,
+                          },
+                        ],
+                  switch_actions_b:
+                    form.switch_actions_b?.length > 0
+                      ? form.switch_actions_b
+                      : [
+                          {
+                            action_type: "keystroke",
+                            action_value: "",
+                            delay_ms: 0,
+                          },
+                        ],
+                })
+              }
+            />
+            <span style={{ fontSize: 11, color: "#666" }}>
+              Alternate between two stacks
+            </span>
+          </div>
+        </Field>
+
+        {form.button_mode === "multi_switch" ? (
+          <>
+            <ActionStackEditor
+              title="Stack A"
+              actions={form.switch_actions_a || []}
+              onChange={(actions) => onPatch({ switch_actions_a: actions })}
+              audioDevices={audioDevices}
+            />
+            <ActionStackEditor
+              title="Stack B"
+              actions={form.switch_actions_b || []}
+              onChange={(actions) => onPatch({ switch_actions_b: actions })}
+              audioDevices={audioDevices}
+            />
+          </>
         ) : null}
 
         <div style={styles.panelDivider} />
@@ -2654,6 +2680,253 @@ function Field({ label, children }) {
       <label style={styles.fieldLabel}>{label}</label>
       {children}
     </div>
+  );
+}
+
+function ActionTypeSelect({ value, onChange }) {
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)}>
+      {ACTION_CATEGORIES.map((group) => (
+        <optgroup key={group.label} label={group.label}>
+          {group.actions.map((action) => (
+            <option key={action.id} value={action.id}>
+              {action.name}
+            </option>
+          ))}
+        </optgroup>
+      ))}
+    </select>
+  );
+}
+
+function ActionEditor({ title = "Action", action, onChange, audioDevices }) {
+  return (
+    <>
+      <Field label={title}>
+        <ActionTypeSelect
+          value={action.action_type || "keystroke"}
+          onChange={(type) => onChange(applyActionTypeDefaults(action, type))}
+        />
+      </Field>
+      <ActionFields
+        action={action}
+        onChange={onChange}
+        audioDevices={audioDevices}
+      />
+    </>
+  );
+}
+
+function ActionFields({ action, onChange, audioDevices }) {
+  const meta = ACTION_BY_ID[action.action_type] || ACTION_BY_ID.keystroke;
+  return (
+    <>
+      {(meta.fields || []).map((field, index) => (
+        <ActionField
+          key={`${field.key || field.type}-${index}`}
+          field={field}
+          action={action}
+          onChange={onChange}
+          audioDevices={audioDevices}
+        />
+      ))}
+    </>
+  );
+}
+
+function ActionField({ field, action, onChange, audioDevices }) {
+  const value = action[field.key] || "";
+
+  if (field.type === "info") {
+    return (
+      <Field label="Details">
+        <div style={{ fontSize: 11, color: "#666" }}>{field.text}</div>
+      </Field>
+    );
+  }
+
+  if (field.type === "range") {
+    const current = parseInt(value) || Number(field.min || 0);
+    return (
+      <Field label={field.label}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            type="range"
+            min={field.min}
+            max={field.max}
+            value={current}
+            onChange={(e) => onChange({ [field.key]: e.target.value })}
+          />
+          <span style={{ minWidth: 34, fontSize: 11, color: "#7aafff" }}>
+            {current}
+            {field.suffix || ""}
+          </span>
+        </div>
+      </Field>
+    );
+  }
+
+  if (field.type === "number") {
+    return (
+      <Field label={field.label}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <input
+            type="number"
+            min={field.min}
+            step={field.step}
+            value={value}
+            onChange={(e) => onChange({ [field.key]: e.target.value })}
+          />
+          {field.suffix && (
+            <span style={{ fontSize: 11, color: "#666" }}>{field.suffix}</span>
+          )}
+        </div>
+      </Field>
+    );
+  }
+
+  if (field.type === "audio_device") {
+    return (
+      <Field label={field.label}>
+        <select
+          value={value}
+          onChange={(e) => onChange({ [field.key]: e.target.value })}
+        >
+          <option value="">— select device —</option>
+          {audioDevices.map((d) => (
+            <option key={d.id} value={d.name}>
+              {d.name}
+              {d.isDefault ? " ✓" : ""}
+            </option>
+          ))}
+        </select>
+      </Field>
+    );
+  }
+
+  if (field.type === "file") {
+    return (
+      <Field label={field.label}>
+        <div style={{ display: "flex", gap: 6 }}>
+          <input
+            value={value}
+            onChange={(e) => onChange({ [field.key]: e.target.value })}
+            placeholder={field.placeholder}
+            style={{ flex: 1 }}
+          />
+          <button
+            style={styles.iconUploadBtn}
+            onClick={async () => {
+              try {
+                const path = await window.electronAPI?.system.pickFile();
+                if (path) onChange({ [field.key]: path });
+              } catch {
+                /* ignore */
+              }
+            }}
+          >
+            📁
+          </button>
+        </div>
+      </Field>
+    );
+  }
+
+  return (
+    <Field label={field.label}>
+      <input
+        value={value}
+        onChange={(e) => onChange({ [field.key]: e.target.value })}
+        placeholder={field.placeholder}
+      />
+    </Field>
+  );
+}
+
+function ActionStackEditor({ title, actions, onChange, audioDevices }) {
+  const safeActions = actions || [];
+
+  function patchStep(index, patch) {
+    onChange(
+      safeActions.map((step, i) =>
+        i === index ? { ...step, ...patch } : step,
+      ),
+    );
+  }
+
+  return (
+    <Field label={title}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {safeActions.map((step, index) => (
+          <div
+            key={index}
+            style={{
+              background: "#111118",
+              border: "1px solid #252530",
+              borderRadius: 8,
+              padding: 8,
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                marginBottom: 6,
+              }}
+            >
+              <span style={{ fontSize: 10, color: "#55556a" }}>
+                Step {index + 1} · {actionTypeLabel(step.action_type)}
+              </span>
+              <button
+                style={{ ...styles.iconUploadBtn, width: 24, height: 24 }}
+                onClick={() =>
+                  onChange(safeActions.filter((_, i) => i !== index))
+                }
+              >
+                ✕
+              </button>
+            </div>
+            <ActionTypeSelect
+              value={step.action_type || "keystroke"}
+              onChange={(type) =>
+                patchStep(index, applyActionTypeDefaults(step, type))
+              }
+            />
+            <div style={{ height: 6 }} />
+            <ActionFields
+              action={step}
+              onChange={(patch) => patchStep(index, patch)}
+              audioDevices={audioDevices}
+            />
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 10, color: "#55556a" }}>Wait after</span>
+              <input
+                type="number"
+                min="0"
+                step="50"
+                value={step.delay_ms || 0}
+                onChange={(e) =>
+                  patchStep(index, { delay_ms: parseInt(e.target.value) || 0 })
+                }
+              />
+              <span style={{ fontSize: 10, color: "#55556a" }}>ms</span>
+            </div>
+          </div>
+        ))}
+        <button
+          style={styles.uploadBtn}
+          onClick={() =>
+            onChange([
+              ...safeActions,
+              { action_type: "keystroke", action_value: "", delay_ms: 0 },
+            ])
+          }
+        >
+          + Add step
+        </button>
+      </div>
+    </Field>
   );
 }
 

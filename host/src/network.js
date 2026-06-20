@@ -20,22 +20,26 @@ const PORT = 9001;
  */
 function getLanIp() {
   const ifaces = os.networkInterfaces();
+  const candidates = [];
 
   for (const name of Object.keys(ifaces)) {
     for (const iface of ifaces[name]) {
       if (iface.family !== "IPv4" || iface.internal) continue;
       if (iface.address.startsWith("169.254.")) continue;
-      if (
-        iface.address.startsWith("192.168.") ||
-        iface.address.startsWith("10.") ||
-        iface.address.startsWith("172.")
-      ) {
-        return iface.address;
+
+      if (iface.address.startsWith("192.168.")) {
+        candidates.push({ priority: 0, address: iface.address });
+      } else if (iface.address.startsWith("10.")) {
+        candidates.push({ priority: 1, address: iface.address });
+      } else if (/^172\.(1[6-9]|2\d|3[01])\./.test(iface.address)) {
+        // Only real private 172.16–172.31, skip Docker/Hyper-V
+        candidates.push({ priority: 2, address: iface.address });
       }
     }
   }
 
-  return "localhost";
+  candidates.sort((a, b) => a.priority - b.priority);
+  return candidates[0]?.address ?? "localhost";
 }
 
 // Resolved once at process startup — consistent for the entire session.

@@ -38,6 +38,10 @@ db.exec(`
     toggle_action_type TEXT DEFAULT 'keystroke',
     toggle_action_value TEXT DEFAULT '',
     actions TEXT DEFAULT NULL,
+    button_mode TEXT DEFAULT 'single',
+    switch_actions_a TEXT DEFAULT NULL,
+    switch_actions_b TEXT DEFAULT NULL,
+    switch_state INTEGER DEFAULT 0,
     sound_file TEXT DEFAULT NULL,
     -- FEATURE: Soundboard routing — 'phone' | 'pc' | 'both'
     sound_target TEXT DEFAULT 'phone',
@@ -80,6 +84,14 @@ if (!existingCols.includes("toggle_action_value"))
   db.exec(`ALTER TABLE buttons ADD COLUMN toggle_action_value TEXT DEFAULT ''`);
 if (!existingCols.includes("actions"))
   db.exec(`ALTER TABLE buttons ADD COLUMN actions TEXT DEFAULT NULL`);
+if (!existingCols.includes("button_mode"))
+  db.exec(`ALTER TABLE buttons ADD COLUMN button_mode TEXT DEFAULT 'single'`);
+if (!existingCols.includes("switch_actions_a"))
+  db.exec(`ALTER TABLE buttons ADD COLUMN switch_actions_a TEXT DEFAULT NULL`);
+if (!existingCols.includes("switch_actions_b"))
+  db.exec(`ALTER TABLE buttons ADD COLUMN switch_actions_b TEXT DEFAULT NULL`);
+if (!existingCols.includes("switch_state"))
+  db.exec(`ALTER TABLE buttons ADD COLUMN switch_state INTEGER DEFAULT 0`);
 if (!existingCols.includes("sound_file"))
   db.exec(`ALTER TABLE buttons ADD COLUMN sound_file TEXT DEFAULT NULL`);
 if (!existingCols.includes("sound_target"))
@@ -105,8 +117,9 @@ if (pageCount === 0) {
       id, page_id, label, icon, icon_data, color, position,
       action_type, action_value, size,
       is_toggle, toggle_state, toggle_action_type, toggle_action_value,
-      actions, sound_file, sound_target, audio_device
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      actions, button_mode, switch_actions_a, switch_actions_b, switch_state,
+      sound_file, sound_target, audio_device
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `);
 
   [
@@ -126,6 +139,10 @@ if (pageCount === 0) {
       "keystroke",
       "",
       null,
+      "single",
+      null,
+      null,
+      0,
       null,
       "phone",
       null,
@@ -146,6 +163,10 @@ if (pageCount === 0) {
       "keystroke",
       "",
       null,
+      "single",
+      null,
+      null,
+      0,
       null,
       "phone",
       null,
@@ -166,6 +187,10 @@ if (pageCount === 0) {
       "keystroke",
       "",
       null,
+      "single",
+      null,
+      null,
+      0,
       null,
       "phone",
       null,
@@ -186,6 +211,10 @@ if (pageCount === 0) {
       "keystroke",
       "",
       null,
+      "single",
+      null,
+      null,
+      0,
       null,
       "phone",
       null,
@@ -206,6 +235,10 @@ if (pageCount === 0) {
       "keystroke",
       "",
       null,
+      "single",
+      null,
+      null,
+      0,
       null,
       "phone",
       null,
@@ -226,6 +259,10 @@ if (pageCount === 0) {
       "keystroke",
       "",
       null,
+      "single",
+      null,
+      null,
+      0,
       null,
       "phone",
       null,
@@ -367,7 +404,12 @@ function getButton(id) {
   return btn ? deserializeButton(btn) : null;
 }
 function deserializeButton(btn) {
-  return { ...btn, actions: btn.actions ? JSON.parse(btn.actions) : null };
+  return {
+    ...btn,
+    actions: safeJsonArray(btn.actions),
+    switch_actions_a: safeJsonArray(btn.switch_actions_a),
+    switch_actions_b: safeJsonArray(btn.switch_actions_b),
+  };
 }
 
 function createButton(btn) {
@@ -377,8 +419,9 @@ function createButton(btn) {
       id, page_id, label, icon, icon_data, color, position,
       action_type, action_value, size,
       is_toggle, toggle_state, toggle_action_type, toggle_action_value,
-      actions, sound_file, sound_target, audio_device
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      actions, button_mode, switch_actions_a, switch_actions_b, switch_state,
+      sound_file, sound_target, audio_device
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `,
   ).run(
     btn.id,
@@ -396,6 +439,10 @@ function createButton(btn) {
     btn.toggle_action_type || "keystroke",
     btn.toggle_action_value || "",
     btn.actions ? JSON.stringify(btn.actions) : null,
+    btn.button_mode || "single",
+    btn.switch_actions_a ? JSON.stringify(btn.switch_actions_a) : null,
+    btn.switch_actions_b ? JSON.stringify(btn.switch_actions_b) : null,
+    btn.switch_state ? 1 : 0,
     btn.sound_file || null,
     btn.sound_target || "phone",
     btn.audio_device || null,
@@ -418,6 +465,10 @@ function updateButton(id, fields) {
     "toggle_action_type",
     "toggle_action_value",
     "actions",
+    "button_mode",
+    "switch_actions_a",
+    "switch_actions_b",
+    "switch_state",
     "sound_file",
     "sound_target",
     "audio_device",
@@ -425,6 +476,14 @@ function updateButton(id, fields) {
   const toSave = { ...fields };
   if (toSave.actions !== undefined)
     toSave.actions = toSave.actions ? JSON.stringify(toSave.actions) : null;
+  if (toSave.switch_actions_a !== undefined)
+    toSave.switch_actions_a = toSave.switch_actions_a
+      ? JSON.stringify(toSave.switch_actions_a)
+      : null;
+  if (toSave.switch_actions_b !== undefined)
+    toSave.switch_actions_b = toSave.switch_actions_b
+      ? JSON.stringify(toSave.switch_actions_b)
+      : null;
 
   const keys = Object.keys(toSave).filter((k) => allowed.includes(k));
   if (!keys.length) return getButton(id);

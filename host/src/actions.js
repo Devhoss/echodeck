@@ -42,7 +42,9 @@ let lastVoicemeeterError = "";
 let voicemeeterInitPromise = null;
 let voicemeeterDisabled = !hasVoicemeeterRemoteRegistry();
 if (voicemeeterDisabled) {
-  console.warn("⚠️  VoiceMeeter not installed — using Windows volume fallback.");
+  console.warn(
+    "⚠️  VoiceMeeter not installed — using Windows volume fallback.",
+  );
 } else {
   try {
     voicemeeter = require("voicemeeter-connector");
@@ -602,6 +604,12 @@ async function playAudioOnDevice(dataUrl, deviceName) {
 // ---------------------------------------------------------------------------
 function executeAction(type, value) {
   return new Promise((resolve) => {
+    if (type === "delay") {
+      const duration = Math.max(0, Math.min(60_000, parseInt(value) || 1000));
+      setTimeout(resolve, duration);
+      return;
+    }
+
     if (type === "audio_switch_device") {
       switchAudioDevice(value)
         .then(resolve)
@@ -758,9 +766,9 @@ function executeAction(type, value) {
 
 async function executeSequence(actions) {
   for (const step of actions) {
+    await executeAction(step.action_type, step.action_value);
     if (step.delay_ms && step.delay_ms > 0)
       await new Promise((r) => setTimeout(r, step.delay_ms));
-    await executeAction(step.action_type, step.action_value);
   }
 }
 

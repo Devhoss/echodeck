@@ -21,7 +21,7 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({
   server,
-  perMessageDeflate: false, // no compression — faster handshake on mobile
+  perMessageDeflate: false,
 });
 
 const PING_INTERVAL = 15_000;
@@ -94,8 +94,6 @@ app.post("/api/settings", (req, res) => {
   res.json({ ok: true });
 });
 
-// ── Connected devices ─────────────────────────────────────────────────────────
-// GET /api/clients  → list all connected WebSocket clients with metadata
 app.get("/api/clients", (req, res) => {
   const list = [];
   clients.forEach((ws) => {
@@ -112,7 +110,6 @@ app.get("/api/clients", (req, res) => {
   res.json(list);
 });
 
-// DELETE /api/clients/:id  → disconnect a specific client
 app.delete("/api/clients/:id", (req, res) => {
   let found = false;
   clients.forEach((ws) => {
@@ -250,6 +247,10 @@ app.post("/api/buttons", (req, res) => {
     toggle_action_type: "keystroke",
     toggle_action_value: "",
     actions: null,
+    button_mode: "single",
+    switch_actions_a: null,
+    switch_actions_b: null,
+    switch_state: 0,
     sound_file: null,
     sound_target: "phone",
     audio_device: null,
@@ -271,15 +272,37 @@ app.delete("/api/buttons/:id", (req, res) => {
 });
 
 // --- WebSocket ---
-// Tracks every connected client with metadata for the devices panel
 const clients = new Set();
 let lastCpuTimes = os.cpus().map((c) => c.times);
 let activeWindow = null;
 let autoPageId = null;
 let activeRuleId = null;
 let manualSwitchPausedUntil = 0;
-// Debounce timer for auto-switch delay
 let autoSwitchDebounceTimer = null;
+
+// Debounced broadcastState — batches rapid desktop edits into a single
+// push so the phone isn't flooded with back-to-back full-state messages.
+let broadcastStateTimer = null;
+function broadcastState(delayMs = 50) {
+  clearTimeout(broadcastStateTimer);
+  broadcastStateTimer = setTimeout(() => {
+    clients.forEach((ws) => {
+      if (ws.readyState !== 1) return;
+      trySend(ws, () => sendState(ws, ws.currentPage));
+    });
+  }, delayMs);
+}
+
+// Safe send helper — never terminates the socket on serialisation errors.
+// Only hard-closes if the socket itself is already in a broken state.
+function trySend(ws, buildFn) {
+  try {
+    buildFn();
+  } catch (err) {
+    console.warn(`[trySend] error for client ${ws.clientId}:`, err.message);
+    // Don't terminate — a serialisation glitch shouldn't kill the phone session.
+  }
+}
 
 function getCpuPercent() {
   const current = os.cpus().map((c) => c.times);
@@ -305,7 +328,6 @@ function getCpuPercent() {
     : Math.round(((totalTick - totalIdle) / totalTick) * 100);
 }
 
-// Broadcast connected clients list to the Electron desktop window
 function broadcastClients() {
   const list = [];
   clients.forEach((ws) => {
@@ -315,23 +337,31 @@ function broadcastClients() {
         ip: ws.clientIp,
         connectedAt: ws.connectedAt,
         currentPage: ws.currentPage || null,
-        userAgent: ws.userAgent || null, // ← was missing here
+        userAgent: ws.userAgent || null,
       });
     }
   });
 
   const msg = JSON.stringify({ t: "clients", clients: list });
   clients.forEach((ws) => {
-    // Only send to Electron desktop clients, not phone clients
     if (ws.readyState === 1 && ws.isDesktop) ws.send(msg);
   });
 }
 
 const statsInterval = setInterval(async () => {
   if (clients.size === 0) return;
+  let volume, muted;
+  try {
+    [volume, muted] = await Promise.all([getVolume(), getMuted()]);
+  } catch (e) {
+    console.error(
+      "[statsInterval] getVolume/getMuted threw — skipping this tick:",
+      e.message,
+    );
+    return; // previously this would have silently aborted before reaching clients.forEach
+  }
   const totalMem = os.totalmem();
   const usedMem = totalMem - os.freemem();
-  const [volume, muted] = await Promise.all([getVolume(), getMuted()]);
   const msg = JSON.stringify({
     t: "stats",
     cpu: getCpuPercent(),
@@ -345,7 +375,21 @@ const statsInterval = setInterval(async () => {
     muted: muted ?? null,
   });
   clients.forEach((ws) => {
-    if (ws.readyState === 1) ws.send(msg);
+    if (ws.readyState !== 1) {
+      console.log(
+        `[statsInterval] skipping client ${ws.clientId} (${ws.clientIp}) — readyState ${ws.readyState}`,
+      );
+      return;
+    }
+    try {
+      ws.send(msg);
+      console.log(`[statsInterval] sent to ${ws.clientId} (${ws.clientIp})`);
+    } catch (e) {
+      console.error(
+        `[statsInterval] send FAILED for ${ws.clientId} (${ws.clientIp}):`,
+        e.message,
+      );
+    }
   });
 }, 3000);
 
@@ -360,19 +404,32 @@ wss.on("connection", (ws, req) => {
     ws.clientIp === "127.0.0.1" ||
     ws.clientIp === "::1" ||
     ws.clientIp === "localhost";
-  ws.isAlive = true; // ← for heartbeat
+  ws.isAlive = true;
+
+  // Heartbeat: ping every PING_INTERVAL ms.
+  // If no pong arrives within PONG_TIMEOUT ms, terminate.
+  // Using an explicit pong-deadline timer instead of the simple boolean
+  // flag prevents a race where isAlive gets reset before the check fires.
+  let pongDeadlineTimer = null;
 
   const pingTimer = setInterval(() => {
-    if (!ws.isAlive) {
+    if (ws.readyState !== 1) return;
+
+    // Set a hard deadline — if pong doesn't arrive in time, close.
+    pongDeadlineTimer = setTimeout(() => {
+      console.warn(
+        `[heartbeat] no pong from ${ws.clientId} within ${PONG_TIMEOUT}ms — terminating`,
+      );
       ws.terminate();
-      return;
-    }
-    ws.isAlive = false;
+    }, PONG_TIMEOUT);
+
     ws.ping();
   }, PING_INTERVAL);
 
   ws.on("pong", () => {
-    ws.isAlive = true;
+    // Cancel the deadline — connection is still alive.
+    clearTimeout(pongDeadlineTimer);
+    pongDeadlineTimer = null;
   });
 
   clients.add(ws);
@@ -380,14 +437,10 @@ wss.on("connection", (ws, req) => {
     `Client connected [${ws.clientId}] from ${ws.clientIp}. Total: ${clients.size}`,
   );
 
-  // ✅ 300ms delay — more forgiving for slow mobile connections
+  // Initial state push — guard against the socket already being gone.
   setTimeout(() => {
     if (ws.readyState === 1) {
-      try {
-        sendState(ws);
-      } catch {
-        ws.terminate();
-      }
+      trySend(ws, () => sendState(ws));
     }
   }, 300);
 
@@ -422,9 +475,21 @@ wss.on("connection", (ws, req) => {
         }
       }
 
+      if (btn.button_mode === "multi_switch") {
+        const nextState = btn.switch_state ? 0 : 1;
+        const stack = nextState ? btn.switch_actions_a : btn.switch_actions_b;
+        db.updateButton(btn.id, { switch_state: nextState });
+        broadcastUpdate(btn.id, { switch_state: nextState });
+        console.log(
+          `Multi-action switch: ${btn.label} → ${nextState ? "A" : "B"} (${stack.length} steps)`,
+        );
+        executeSequence(stack).then(() => broadcastVolumeNow());
+        return;
+      }
+
       if (btn.actions && btn.actions.length > 0) {
         console.log(`Multi-action: ${btn.label} (${btn.actions.length} steps)`);
-        executeSequence(btn.actions);
+        executeSequence(btn.actions).then(() => broadcastVolumeNow());
         return;
       }
 
@@ -485,6 +550,7 @@ wss.on("connection", (ws, req) => {
 
   const cleanup = () => {
     clearInterval(pingTimer);
+    clearTimeout(pongDeadlineTimer);
     const interval = holdIntervals.get(ws);
     if (interval) {
       clearInterval(interval);
@@ -531,18 +597,6 @@ function toDeckButton(btn) {
   return { ...btn, sound_file: !!btn.sound_file };
 }
 
-function broadcastState() {
-  clients.forEach((ws) => {
-    if (ws.readyState === 1) {
-      try {
-        sendState(ws, ws.currentPage);
-      } catch {
-        ws.terminate();
-      }
-    }
-  });
-}
-
 function broadcastRules() {
   const msg = JSON.stringify({
     t: "profile_rules",
@@ -568,7 +622,6 @@ async function evaluateAutoSwitch() {
 
   activeWindow = nextWindow;
 
-  // Single rule lookup — reused for both delay and the switch itself
   const pages = db.getPages();
   if (!pages.length) return;
   const rule = findMatchingRule(db.getProfileRules(), activeWindow);
@@ -580,10 +633,6 @@ async function evaluateAutoSwitch() {
     performSwitch(pages, rule);
   } else {
     autoSwitchDebounceTimer = setTimeout(() => {
-      // No second getActiveWindow call — the change-detection guard above
-      // already confirmed the window changed; if they switched again
-      // during the delay, evaluateAutoSwitch will have cancelled this
-      // timer and started a new one with the newer window/rule.
       performSwitch(pages, rule);
     }, delayMs);
   }

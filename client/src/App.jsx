@@ -4,6 +4,7 @@ import { DndContext, closestCenter } from "@dnd-kit/core";
 import { Haptics, ImpactStyle } from "@capacitor/haptics";
 import { useSortable } from "@dnd-kit/sortable";
 import deck from "/deck-icon.png";
+import disconnect from "/disconnect.svg";
 import DesktopApp from "./desktop/DesktopApp.jsx";
 import { CSS } from "@dnd-kit/utilities";
 import {
@@ -20,7 +21,6 @@ import {
   rectSortingStrategy,
   arrayMove,
 } from "@dnd-kit/sortable";
-import ConfigUI from "./ConfigUI.jsx";
 
 const globalStyles = `
   @keyframes pulse {
@@ -98,12 +98,13 @@ export default function App() {
   const [currentPage, setCurrentPage] = useState(null);
   const [status, setStatus] = useState("connecting");
   const [pressing, setPressing] = useState(null);
-  const [view, setView] = useState("deck");
   // FEATURE: System stats
   const [stats, setStats] = useState(null);
   // FEATURE: Volume controls — live volume + mute state
   const [volume, setVolume] = useState(null);
   const [muted, setMuted] = useState(false);
+
+  const [disconnectActive, setDisconnectActive] = useState(false);
 
   const wsRef = useRef(null);
   const lastMessageAtRef = useRef(0);
@@ -132,6 +133,7 @@ export default function App() {
 
     const onOpen = () => {
       console.log("WS open", getWsUrl());
+      lastMessageAtRef.current = Date.now(); // reset staleness clock — a fresh open is not "silence"
       setStatus("connected");
     };
     const onClose = (e) => {
@@ -143,6 +145,12 @@ export default function App() {
       setStatus("disconnected");
     };
     const onMessage = (e) => {
+      console.log(
+        "[WS] message received:",
+        JSON.parse(e.data).t,
+        "at",
+        Date.now(),
+      );
       lastMessageAtRef.current = Date.now();
       const msg = JSON.parse(e.data);
       if (msg.t === "state") {
@@ -188,11 +196,43 @@ export default function App() {
     ws.addEventListener("message", onMessage);
     wsRef.current = ws;
 
+    // Tracks whether a reconnect is already underway so the interval/focus/
+    // visibility/pageshow handlers can't pile on top of each other and tear
+    // down a socket that's still in the middle of opening.
+    let reconnectInFlightUntil = 0;
+
     const reconnectIfStale = () => {
-      const quietFor = Date.now() - lastMessageAtRef.current;
       if (document.visibilityState === "hidden") return;
-      if (ws.readyState !== WebSocket.OPEN || quietFor > 8000) {
+
+      const now = Date.now();
+      if (now < reconnectInFlightUntil) {
+        console.log("[reconnectIfStale] SKIPPED — reconnect already in flight");
+        return;
+      }
+
+      const isClosedOrClosing =
+        ws.readyState === WebSocket.CLOSING ||
+        ws.readyState === WebSocket.CLOSED;
+
+      const quietFor = now - lastMessageAtRef.current;
+      const isSilentWhileOpen =
+        ws.readyState === WebSocket.OPEN && quietFor > 8000;
+
+      console.log(
+        "[reconnectIfStale] called, readyState:",
+        ws.readyState,
+        "quietFor:",
+        quietFor,
+        "isClosedOrClosing:",
+        isClosedOrClosing,
+        "isSilentWhileOpen:",
+        isSilentWhileOpen,
+      );
+
+      if (isClosedOrClosing || isSilentWhileOpen) {
+        console.log("[reconnectIfStale] TRIGGERING RECONNECT");
         setStatus("connecting");
+        reconnectInFlightUntil = now + 5000;
         try {
           ws.reconnect?.(4000, "app resumed");
         } catch {
@@ -350,8 +390,6 @@ export default function App() {
     );
   }
 
-  if (view === "config") return <ConfigUI onBack={() => setView("deck")} />;
-
   const isConnected = status === "connected";
 
   if (!paired) {
@@ -371,10 +409,10 @@ export default function App() {
       style={{
         display: "flex",
         flexDirection: "column",
-        height: "100dvh",
+        height: "100%",
         paddingTop: "env(safe-area-inset-top)",
-        paddingBottom: "env(safe-area-inset-bottom)",
-        paddingLeft: "env(safe-area-inset-left)",
+        // paddingBottom: "env(safe-area-inset-bottom)",
+        // paddingLeft: "env(safe-area-inset-left)",
         paddingRight: "env(safe-area-inset-right)",
         background: "radial-gradient(circle at top left, #1f2230, #090909 70%)",
         fontFamily: "'SF Pro Display', 'Segoe UI', sans-serif",
@@ -387,11 +425,15 @@ export default function App() {
         style={{
           display: "flex",
           alignItems: "center",
-          padding: "6px 16px",
-          gap: 8,
+          paddingLeft: "max(env(safe-area-inset-left), 16px)",
+          paddingRight: "max(env(safe-area-inset-right), 16px)",
+          paddingTop: 0,
+          paddingBottom: 0,
+          gap: 6,
+          height: 44,
+          flexShrink: 0,
           background: "linear-gradient(180deg, #1c1c1f 0%, #161618 100%)",
           borderBottom: "1px solid #2a2a2e",
-          flexShrink: 0,
         }}
       >
         <div
@@ -413,8 +455,8 @@ export default function App() {
         >
           <img
             src={deck}
-            width={28}
-            height={28}
+            width={24}
+            height={24}
             style={{
               borderRadius: 8,
               flexShrink: 0,
@@ -468,6 +510,8 @@ export default function App() {
             display: "flex",
             alignItems: "center",
             gap: 5,
+            height: 24,
+            boxSizing: "border-box",
             background: isConnected ? "#0d2e1a" : "#2e0d0d",
             border: `1px solid ${isConnected ? "#1a5c32" : "#5c1a1a"}`,
             borderRadius: 20,
@@ -495,41 +539,35 @@ export default function App() {
         </div>
 
         <button
-          onMouseDown={(e) => {
+          title="Disconnect"
+          onPointerDown={(e) => {
             e.preventDefault();
+            setDisconnectActive(true);
             handleDisconnect();
           }}
+          onPointerUp={() => setDisconnectActive(false)}
+          onPointerCancel={() => setDisconnectActive(false)}
           style={{
-            background: "none",
-            border: "1px solid #3a1a1a",
+            background: disconnectActive ? "#c42d2d" : "#ed5656",
+            border: "none",
             borderRadius: 8,
-            color: "#f87171",
             cursor: "pointer",
-            padding: "5px 12px",
-            fontSize: 12,
-            fontWeight: 500,
+            transition: "background 0.15s ease",
+            flexShrink: 0,
+            height: 24,
+            boxSizing: "border-box",
+            padding: "0 8px", // horizontal only, vertical handled by height
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
           }}
         >
-          ⏏ Disconnect
-        </button>
-
-        <button
-          onMouseDown={(e) => {
-            e.preventDefault();
-            setView("config");
-          }}
-          style={{
-            background: "none",
-            border: "1px solid #333",
-            borderRadius: 8,
-            color: "#888",
-            cursor: "pointer",
-            padding: "5px 12px",
-            fontSize: 12,
-            fontWeight: 500,
-          }}
-        >
-          ⚙ Config
+          <img
+            src={disconnect}
+            width={14}
+            height={14}
+            style={{ display: "block" }}
+          />
         </button>
       </div>
 
@@ -540,11 +578,13 @@ export default function App() {
             display: "flex",
             alignItems: "center",
             gap: 2,
-            padding: "4px 12px 0",
+            paddingLeft: "max(env(safe-area-inset-left), 12px)",
+            paddingRight: "max(env(safe-area-inset-right), 12px)",
+            paddingTop: 0,
+            paddingBottom: 0,
             background: "#161618",
             flexShrink: 0,
-            height: 26,
-            minHeight: 32,
+            height: 32,
             overflowX: "auto",
           }}
         >
@@ -567,7 +607,9 @@ export default function App() {
                     : "2px solid transparent",
                 color: currentPage === p.id ? "#fff" : "#666",
                 cursor: "pointer",
-                padding: "6px 16px",
+                padding: "0 14px",
+                height: "100%",
+                boxSizing: "border-box",
                 fontSize: 12,
                 fontWeight: 600,
                 borderRadius: "6px 6px 0 0",
@@ -584,18 +626,20 @@ export default function App() {
       {/* FEATURE: Custom button size — 2x2 buttons use gridColumn/gridRow span 2 */}
       <DndContext collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
         <SortableContext items={buttonIds} strategy={rectSortingStrategy}>
+          {/* Container */}
           <div
             style={{
               flex: 1,
               minHeight: 0,
-              overflowY: "auto",
-              padding: 14,
+              overflow: "hidden",
+              paddingLeft: "max(env(safe-area-inset-left), 10px)", // ← here
+              paddingRight: "max(env(safe-area-inset-right), 10px)", // ← here
+              paddingTop: 6,
+              paddingBottom: 6,
               display: "grid",
-              gridTemplateColumns: "repeat(auto-fill, minmax(100px, 1fr))",
-              gridAutoRows:
-                "minmax(100px, calc((100cqw - 28px - 12px * 4) / 5))",
-              gap: 12,
-              alignContent: "start",
+              gridTemplateColumns: "repeat(7, 1fr)",
+              gridTemplateRows: "repeat(3, 1fr)",
+              gap: 8,
             }}
           >
             {buttons.length === 0 && status === "connected" && <SkeletonGrid />}
@@ -713,7 +757,7 @@ function StatPill({ label, value, warn }) {
         border: `1px solid ${warn ? "#5c3a1a" : "#2a2a35"}`,
         borderRadius: 12,
         padding: "2px 7px",
-        fontSize: 10,
+        fontSize: 9,
         fontVariantNumeric: "tabular-nums",
         transition: "all 0.5s ease",
       }}
@@ -756,7 +800,7 @@ function VolumePill({ volume, muted }) {
           style={{
             height: "100%",
             width: `${muted ? 0 : volume}%`,
-            background: muted ? "#f87171" : volume > 80 ? "#fb923c" : "#4ade80",
+            background: muted ? "#f87171" : volume > 95 ? "#fb923c" : "#4ade80",
             borderRadius: 2,
             transition: "width 0.15s ease",
           }}
@@ -892,8 +936,9 @@ const SortableButton = memo(function SortableButton({
             .join(" ") || undefined,
         transition: mergedTransition,
         zIndex: isDragging ? 999 : "auto",
-        aspectRatio: "1 / 1",
-        borderRadius: 22,
+        width: "100%",
+        height: "100%",
+        borderRadius: 18,
         cursor: "pointer",
         position: "relative",
         overflow: "hidden",
@@ -1079,7 +1124,7 @@ const SortableButton = memo(function SortableButton({
               height: `${muted ? 0 : volume}%`,
               background: muted
                 ? "rgba(248,113,113,0.25)"
-                : volume > 80
+                : volume > 95
                   ? "rgba(251,146,60,0.2)"
                   : "rgba(74,222,128,0.15)",
               transition: "height 0.12s ease",
