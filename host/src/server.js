@@ -43,22 +43,43 @@ app.use((req, res, next) => {
 
 // --- REST ---
 
-// QR pairing is the only way a non-local client receives this token. Keep it
-// in memory so restarting EchoDeck invalidates previously captured QR codes.
+// The pairing code shown in the QR, and nothing more. Deliberately in memory,
+// so a restart expires any QR screenshot floating around. Devices that already
+// paired are unaffected: they hold their own persisted token in paired_devices,
+// which is what lets them reconnect across restarts.
 const PAIR_TOKEN = randomBytes(24).toString("hex");
 
 function isLocalAddress(address) {
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 }
 
+function constantTimeEquals(a, b) {
+  const supplied = Buffer.from(a);
+  const expected = Buffer.from(b);
+  return (
+    supplied.length === expected.length && timingSafeEqual(supplied, expected)
+  );
+}
+
+// The rotating code shown in the QR. Only valid for the pairing handshake.
 function hasValidPairToken(token) {
   if (typeof token !== "string") return false;
-  const supplied = Buffer.from(token);
-  const expected = Buffer.from(PAIR_TOKEN);
-  return (
-    supplied.length === expected.length &&
-    timingSafeEqual(supplied, expected)
-  );
+  return constantTimeEquals(token, PAIR_TOKEN);
+}
+
+// A credential minted when a device paired. Persisted, so restarting EchoDeck
+// no longer kicks every paired phone into a reconnect loop.
+function isKnownDeviceToken(token) {
+  if (typeof token !== "string") return false;
+  return db
+    .getPairedDeviceTokens()
+    .some((known) => constantTimeEquals(token, known));
+}
+
+// Either credential authorises a device: the pairing code covers the brief
+// window during the handshake, the device token covers everything after.
+function isAuthorizedToken(token) {
+  return hasValidPairToken(token) || isKnownDeviceToken(token);
 }
 
 // Express only applies `app.use` to routes registered AFTER it, so every /api
@@ -67,7 +88,7 @@ function hasValidPairToken(token) {
 app.use("/api", (req, res, next) => {
   if (isLocalAddress(req.socket.remoteAddress)) return next();
   if (req.path === "/pair/verify") return next();
-  if (!hasValidPairToken(req.get("X-EchoDeck-Token"))) {
+  if (!isAuthorizedToken(req.get("X-EchoDeck-Token"))) {
     return res.status(401).json({ error: "Pair this device with EchoDeck first" });
   }
   next();
@@ -91,7 +112,28 @@ app.post("/api/pair/verify", (req, res) => {
   if (!hasValidPairToken(req.body?.token)) {
     return res.status(401).json({ error: "Invalid pairing code" });
   }
-  res.json({ ok: true });
+  // Hand back a credential of the device's own so it survives restarts. The
+  // pairing code it used stays short-lived and dies with this process.
+  const device_token = randomBytes(32).toString("hex");
+  db.createPairedDevice({
+    id: uuid(),
+    token: device_token,
+    name: req.body?.name || req.get("user-agent") || "Paired device",
+  });
+  res.json({ ok: true, device_token });
+});
+
+app.get("/api/paired-devices", (req, res) => {
+  res.json(db.listPairedDevices());
+});
+
+app.delete("/api/paired-devices/:id", (req, res) => {
+  const removed = db.deletePairedDevice(req.params.id);
+  // Drop any socket still using the revoked credential.
+  clients.forEach((ws) => {
+    if (ws.pairedDeviceId === req.params.id) ws.close(1008, "Device revoked");
+  });
+  res.json({ ok: removed });
 });
 
 app.get("/api/audio-devices", async (req, res) => {
@@ -448,9 +490,20 @@ const holdGenerations = new Map();
 wss.on("connection", (ws, req) => {
   const requestUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const isLocalClient = isLocalAddress(req.socket.remoteAddress);
-  if (!isLocalClient && !hasValidPairToken(requestUrl.searchParams.get("token"))) {
+  const suppliedToken = requestUrl.searchParams.get("token");
+  if (!isLocalClient && !isAuthorizedToken(suppliedToken)) {
     ws.close(1008, "Pair this device with EchoDeck first");
     return;
+  }
+  if (!isLocalClient && suppliedToken) {
+    try {
+      // Remember which credential this socket used so revoking that device can
+      // drop it immediately instead of waiting for it to reconnect.
+      ws.pairedDeviceId = db.getPairedDeviceIdByToken(suppliedToken);
+      db.touchPairedDevice(suppliedToken);
+    } catch {
+      /* last_seen is informational only */
+    }
   }
 
   ws.clientId = uuid();

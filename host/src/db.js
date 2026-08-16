@@ -58,6 +58,17 @@ db.exec(`
     value TEXT NOT NULL
   );
 
+  -- FEATURE: Pairing — long-lived per-device credentials. The pairing code in
+  -- the QR still rotates every launch so old screenshots expire, but a device
+  -- that has already paired keeps its own token and survives restarts.
+  CREATE TABLE IF NOT EXISTS paired_devices (
+    id TEXT PRIMARY KEY,
+    token TEXT NOT NULL UNIQUE,
+    name TEXT,
+    created_at TEXT NOT NULL,
+    last_seen TEXT
+  );
+
   CREATE TABLE IF NOT EXISTS profile_rules (
     id TEXT PRIMARY KEY,
     page_id TEXT NOT NULL,
@@ -397,6 +408,51 @@ function deleteProfileRule(id) {
   db.prepare("DELETE FROM profile_rules WHERE id=?").run(id);
 }
 
+// --- Paired devices ---
+// Tokens are never handed back out of here in bulk except for the auth check
+// itself; listPairedDevices deliberately omits the token so the UI can show
+// devices without exposing credentials.
+function createPairedDevice({ id, token, name }) {
+  db.prepare(
+    `INSERT INTO paired_devices (id, token, name, created_at, last_seen)
+     VALUES (?,?,?,?,?)`,
+  ).run(id, token, name || null, new Date().toISOString(), null);
+}
+
+function getPairedDeviceTokens() {
+  return db
+    .prepare("SELECT token FROM paired_devices")
+    .all()
+    .map((r) => r.token);
+}
+
+function listPairedDevices() {
+  return db
+    .prepare(
+      "SELECT id, name, created_at, last_seen FROM paired_devices ORDER BY created_at",
+    )
+    .all();
+}
+
+function getPairedDeviceIdByToken(token) {
+  return (
+    db.prepare("SELECT id FROM paired_devices WHERE token=?").get(token)?.id ??
+    null
+  );
+}
+
+function touchPairedDevice(token) {
+  db.prepare("UPDATE paired_devices SET last_seen=? WHERE token=?").run(
+    new Date().toISOString(),
+    token,
+  );
+}
+
+function deletePairedDevice(id) {
+  const info = db.prepare("DELETE FROM paired_devices WHERE id=?").run(id);
+  return info.changes > 0;
+}
+
 // --- Buttons ---
 function getButtons(page_id) {
   return db
@@ -518,6 +574,12 @@ module.exports = {
   createPage,
   getPage,
   deletePage,
+  createPairedDevice,
+  getPairedDeviceTokens,
+  getPairedDeviceIdByToken,
+  listPairedDevices,
+  touchPairedDevice,
+  deletePairedDevice,
   getButtons,
   getButton,
   createButton,

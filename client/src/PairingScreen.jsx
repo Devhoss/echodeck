@@ -103,7 +103,11 @@ export default function PairingScreen({ onPaired }) {
         setTesting(false);
         return;
       }
-      onPaired(host, port, token);
+      // The server hands back a credential of our own, which outlives the
+      // pairing code in the QR. Falling back to the code keeps this working
+      // against an older host that does not issue one yet.
+      const { device_token } = await res.json().catch(() => ({}));
+      onPaired(host, port, device_token || token);
     } catch {
       setError(
         `Could not reach EchoDeck at ${host}:${port}. Make sure your PC is on the same network.`,
