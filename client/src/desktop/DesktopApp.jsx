@@ -209,6 +209,10 @@ export default function DesktopApp({
   // FEATURE: Pairing — devices that hold a persisted credential. Distinct from
   // connectedDevices, which is only the sockets open right now.
   const [pairedDevices, setPairedDevices] = useState([]);
+  // FEATURE: Editor — snapshot of the form as last loaded or saved, so the
+  // panel can tell you there is something unsaved rather than letting a
+  // toggle look like it applied instantly.
+  const [savedForm, setSavedForm] = useState(null);
 
   // Derive button counts from the cache ref + live buttons for current page
   const pageButtonCounts = useMemo(() => {
@@ -304,7 +308,7 @@ export default function DesktopApp({
     (btn) => {
       setSelectedBtn(btn.id);
       setSelectedPage(currentPage);
-      setForm({
+      const nextForm = {
         label: btn.label,
         icon: btn.icon,
         icon_data: btn.icon_data || null,
@@ -328,7 +332,9 @@ export default function DesktopApp({
         sound_target: btn.sound_target || "phone",
         audio_device: btn.audio_device || null,
         require_confirm: btn.require_confirm || 0,
-      });
+      };
+      setForm(nextForm);
+      setSavedForm(nextForm);
       setSaved(false);
     },
     [currentPage],
@@ -356,7 +362,19 @@ export default function DesktopApp({
   // and derive nullification instead of calling setState inside an effect
 
   const resolvedSelected = selectedPage === currentPage ? selectedBtn : null;
-  const resolvedForm = selectedPage === currentPage ? form : {};
+  const resolvedForm = useMemo(
+    () => (selectedPage === currentPage ? form : {}),
+    [selectedPage, currentPage, form],
+  );
+
+  // FEATURE: Editor — is there anything to save? Compared key-order
+  // independently so a patch that reorders keys does not read as a change.
+  const isDirty = useMemo(() => {
+    if (!savedForm || !resolvedSelected) return false;
+    const norm = (o) =>
+      JSON.stringify(Object.keys(o).sort().map((k) => [k, o[k]]));
+    return norm(resolvedForm) !== norm(savedForm);
+  }, [resolvedForm, savedForm, resolvedSelected]);
 
   // ── CRUD ──────────────────────────────────────────────────────────────────
 
@@ -419,6 +437,7 @@ export default function DesktopApp({
     });
     setSaving(false);
     setSaved(true);
+    setSavedForm(resolvedForm);
     setTimeout(() => setSaved(false), 2000);
     const data = await reloadPages();
     const page = data.find((p) => p.id === currentPage);
@@ -426,7 +445,10 @@ export default function DesktopApp({
     const updated = (page?.buttons || []).find(
       (b) => b.id === resolvedSelected,
     );
-    if (updated) setForm((f) => ({ ...f, icon_data: updated.icon_data }));
+    if (updated) {
+      setForm((f) => ({ ...f, icon_data: updated.icon_data }));
+      setSavedForm((f) => (f ? { ...f, icon_data: updated.icon_data } : f));
+    }
   }
 
   async function deleteButton() {
@@ -671,7 +693,9 @@ export default function DesktopApp({
     const rows = pairedDevices.map((device) => ({
       key: device.id,
       pairedId: device.id,
-      name: device.name,
+      // Stored name is the raw user-agent, so shorten it the same way the
+      // live-socket rows do rather than printing the whole string.
+      name: parseDeviceName(device.name),
       pairedAt: device.created_at,
       lastSeen: device.last_seen,
       session: phoneDevices.find((c) => c.pairedDeviceId === device.id) || null,
@@ -833,6 +857,7 @@ export default function DesktopApp({
           form={resolvedForm}
           saving={saving}
           saved={saved}
+          dirty={isDirty}
           audioDevices={audioDevices}
           onPatch={patchForm}
           onSave={saveButton}
@@ -2476,6 +2501,7 @@ function PropertyPanel({
   form,
   saving,
   saved,
+  dirty,
   audioDevices,
   onPatch,
   onSave,
@@ -2893,10 +2919,63 @@ function PropertyPanel({
 
         <div style={styles.panelDivider} />
 
+        {/* FEATURE: Editor — nothing in this panel applies until it is saved,
+            which is easy to miss on toggles and segmented controls that look
+            like they act immediately. Say so rather than relying on the
+            button's colour alone. */}
+        {dirty && !saving ? (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              margin: "0 0 8px",
+              padding: "7px 10px",
+              borderRadius: 8,
+              background: "rgba(251,191,36,0.10)",
+              border: "1px solid rgba(251,191,36,0.30)",
+              color: "#fbbf24",
+              fontSize: 11,
+              fontWeight: 600,
+            }}
+          >
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: "#fbbf24",
+                flexShrink: 0,
+              }}
+            />
+            Unsaved changes
+          </div>
+        ) : null}
+
         {/* Save / Delete */}
         <div style={styles.panelActions}>
-          <button style={styles.saveBtn} onClick={onSave} disabled={saving}>
-            {saving ? "Saving…" : saved ? "✓ Saved" : "Save Changes"}
+          <button
+            style={{
+              ...styles.saveBtn,
+              ...(dirty || saving
+                ? {}
+                : {
+                    background: "#16161e",
+                    border: "1px solid #2a2a38",
+                    color: "#44445a",
+                    cursor: "default",
+                  }),
+            }}
+            onClick={onSave}
+            disabled={saving || !dirty}
+          >
+            {saving
+              ? "Saving…"
+              : saved
+                ? "✓ Saved"
+                : dirty
+                  ? "Save Changes"
+                  : "No changes"}
           </button>
           <button style={styles.deleteBtn} onClick={onDelete}>
             Delete
