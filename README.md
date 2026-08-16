@@ -22,6 +22,39 @@ into a customizable desktop command center.
 
 # Features
 
+## Hold to Confirm
+
+Buttons that do something you cannot undo — restart, shutdown, ending a stream —
+can be set to require a deliberate press instead of a tap.
+
+Turn on **Confirm before running** in the button editor. On the phone, a tap
+then does nothing: the button has to be held for about three quarters of a
+second, with a ring filling around the tile edge where your thumb does not
+cover it. Letting go early cancels and leaves nothing armed, so there is never
+a primed button waiting to fire on a later tap. Guarded buttons show a small
+🔒 badge on both the phone and the desktop layout.
+
+This is an accident guard in the interface, not a security control — the host
+still runs any well-formed press it receives.
+
+## Pairing
+
+Phones pair by scanning a QR code from **Add Phone** in the top bar.
+
+The code in the QR is short-lived and is replaced every time EchoDeck starts,
+so an old screenshot stops working. On a successful pair the host issues that
+phone its own credential, which is stored and survives restarts — pair once and
+the phone reconnects on its own from then on.
+
+**Paired Devices** in the top bar lists every phone that has paired, offline
+ones included, with when it last connected:
+
+- **Disconnect** ends the current session; the phone reconnects on its own
+- **Revoke** removes the pairing entirely — that phone must scan a new QR code
+
+The API and WebSocket both refuse unpaired devices, and requests from the
+machine EchoDeck is running on are always trusted.
+
 ## Smart Auto Profile Switching
 
 Automatically switch profiles depending on the active application on your PC.
@@ -134,9 +167,10 @@ Trigger:
 - keyboard shortcuts
 - applications & URLs
 - shell commands
-- media & volume controls
+- media & volume controls (hold a volume button to ramp; step size is configurable)
 - audio device switching
 - soundboard (phone-only, PC-only, or both)
+- multi-action sequences and two-stack switches
 
 ---
 
@@ -144,13 +178,35 @@ Trigger:
 
 Each button can play a sound file with three routing modes:
 
-| Mode | Who hears it |
+| Mode | Where it plays |
 |---|---|
-| 📱 Phone only | You hear it |
-| 🖥️ PC only | Your call/stream hears it (via Voicemeeter) |
-| 📱+🖥️ Both | Everyone hears it |
+| 📱 Phone only | Out of the phone |
+| 🖥️ PC only | Out of the PC, on the device you choose |
+| 📱+🖥️ Both | Both at once |
 
-Configure the PC output device under **Audio Settings** in the top bar.
+Routing is a property of the button, so remember to hit **Save Changes** — an
+"Unsaved changes" banner appears whenever the panel has edits pending.
+
+### Choosing the output
+
+**Audio Settings** in the top bar lists your real playback devices. Pick any
+one; no Voicemeeter, no virtual audio software required for ordinary playback.
+
+### Letting a call hear it
+
+To get soundboard audio into Discord, OBS or any other app that captures a
+microphone, you need a virtual audio device — Windows has no way to feed audio
+into a mic input on its own, and Stream Deck has the same requirement.
+
+1. Install a virtual cable ([VB-CABLE](https://vb-audio.com/Cable/) is free)
+2. Set **PC output device** to `CABLE Input`
+3. Set Discord's input device to `CABLE Output`
+
+### Hearing it yourself at the same time
+
+A virtual cable is not a speaker, so routing sounds into one means you stop
+hearing them. Set **Also play on (monitor)** to your headset and each sound
+plays to both at once — the cable for the call, your headphones for you.
 
 ---
 
@@ -176,7 +232,7 @@ Configure the PC output device under **Audio Settings** in the top bar.
 ## Electron Desktop Integration
 
 - **System tray** — runs silently in the background; single-click to toggle the window
-- **Startup launch** — registers with Windows at install, opens hidden to tray on boot
+- **Startup launch** — opt-in from the tray menu; when enabled, opens hidden to tray on boot
 - **Active window detection** — powers auto profile switching
 - **Native notifications** — startup confirmation, tray hints
 - **Process monitoring** — real-time running app list for rule capture
@@ -231,6 +287,8 @@ echodeck/
 │   └── package.json
 │
 ├── host/                         ← Electron main process + Express backend
+│   ├── scripts/
+│   │   └── fetch-tools.mjs       ← downloads bundled binaries at build time
 │   ├── src/
 │   │   ├── server.js
 │   │   ├── actions.js
@@ -291,6 +349,12 @@ cd client && npm run build
 # Build the Windows installer (also runs the client build via predist)
 cd host && npm run dist
 ```
+
+`npm run dist` first runs `npm run fetch:tools`, which downloads `ffplay` into
+`host/assets/tools/`. That binary is ~112 MB, so it is fetched at build time
+rather than committed, and skipped on later builds once present. It is only
+used to play soundboard audio when the desktop app is not running — for example
+under `npm run dev`, which starts the server without Electron.
 
 ---
 
@@ -371,6 +435,10 @@ If you want to build the APK locally without pushing a tag:
 - Electron tray integration (single-click toggle, startup launch, hidden-on-boot)
 - Volume controls & audio device switching
 - Soundboard with 3-way routing (phone / PC / both)
+- Soundboard output device selection, no Voicemeeter required
+- Monitor output — hear a sound while it also goes to a virtual cable
+- Hold-to-confirm guard for destructive buttons
+- Persistent device pairing with per-device revocation
 - Active window detection & running app picker
 - Delayed app capture (3-second countdown)
 - Full Electron desktop UI (Elgato-style layout)
@@ -380,7 +448,7 @@ If you want to build the APK locally without pushing a tag:
 - QR code phone pairing
 - Config UI (mobile-friendly)
 - Audio settings panel
-- Windows startup registration
+- Windows startup registration (opt-in from the tray)
 - Android companion app
 - Automated GitHub releases (APK + EXE via CI)
 
