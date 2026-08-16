@@ -39,6 +39,11 @@ android/.gradle/
 android/build/
 android/app/build/
 android/local.properties
+# Unanchored so it matches client/android/keystore.properties — a leading
+# path segment here would anchor the pattern to the repo root and miss it.
+keystore.properties
+*.jks
+*.keystore
 android/captures/
 android/.cxx/
 
