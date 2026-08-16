@@ -124,7 +124,9 @@ export function isPaired() {
 export function getWsUrl() {
   const host = resolveHost();
   if (!host) return null;
-  return `ws://${host}:${resolvePort()}`;
+  const token = getPairedToken();
+  const suffix = token ? `?token=${encodeURIComponent(token)}` : "";
+  return `ws://${host}:${resolvePort()}${suffix}`;
 }
 
 export function getApiUrl() {

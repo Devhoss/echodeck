@@ -7,6 +7,7 @@ import {
 export default function PairingScreen({ onPaired }) {
   const [manualHost, setManualHost] = useState("");
   const [manualPort, setManualPort] = useState("9001");
+  const [manualToken, setManualToken] = useState("");
   const [error, setError] = useState(null);
   const [testing, setTesting] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -72,7 +73,7 @@ export default function PairingScreen({ onPaired }) {
       const token = params.get("token");
 
       console.log("PAIR PARAMS:", { host, port, token });
-      if (!host) throw new Error("No host param in QR");
+      if (!host || !token) throw new Error("No host or pairing code in QR");
       connectAndPair(host, port, token);
     } catch (err) {
       console.error("PARSE ERROR:", err, cleaned);
@@ -86,16 +87,23 @@ export default function PairingScreen({ onPaired }) {
     setTesting(true);
     setError(null);
     try {
-      const res = await fetch(`http://${host}:${port}/api/pair-info`, {
-        signal: AbortSignal.timeout(4000),
-      });
-      const data = await res.json();
-      if (token && data.token !== token) {
-        setError("Token mismatch — make sure you scan the current QR code.");
+      if (!token) {
+        setError("Enter the pairing code shown in EchoDeck on your PC.");
         setTesting(false);
         return;
       }
-      onPaired(host, port, data.token);
+      const res = await fetch(`http://${host}:${port}/api/pair/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+        signal: AbortSignal.timeout(4000),
+      });
+      if (!res.ok) {
+        setError("Pairing code rejected — scan a fresh QR code from EchoDeck.");
+        setTesting(false);
+        return;
+      }
+      onPaired(host, port, token);
     } catch {
       setError(
         `Could not reach EchoDeck at ${host}:${port}. Make sure your PC is on the same network.`,
@@ -106,7 +114,7 @@ export default function PairingScreen({ onPaired }) {
 
   async function connectManual() {
     if (!manualHost.trim()) return;
-    connectAndPair(manualHost.trim(), parseInt(manualPort, 10) || 9001, null);
+    connectAndPair(manualHost.trim(), parseInt(manualPort, 10) || 9001, manualToken.trim());
   }
 
   return (
@@ -156,6 +164,15 @@ export default function PairingScreen({ onPaired }) {
           autoComplete="off"
           autoCapitalize="none"
         />
+        <label style={styles.label}>Pairing code</label>
+        <input
+          style={styles.input}
+          value={manualToken}
+          onChange={(e) => setManualToken(e.target.value)}
+          placeholder="Shown in the EchoDeck QR code"
+          autoComplete="off"
+          autoCapitalize="none"
+        />
         <label style={styles.label}>Port</label>
         <input
           style={styles.input}
@@ -167,10 +184,10 @@ export default function PairingScreen({ onPaired }) {
         <button
           style={{
             ...styles.secondaryBtn,
-            opacity: testing || !manualHost.trim() ? 0.5 : 1,
+            opacity: testing || !manualHost.trim() || !manualToken.trim() ? 0.5 : 1,
           }}
           onClick={connectManual}
-          disabled={testing || !manualHost.trim()}
+          disabled={testing || !manualHost.trim() || !manualToken.trim()}
         >
           {testing ? "Connecting…" : "Connect"}
         </button>

@@ -33,6 +33,7 @@ let tray = null;
 let mainWindow = null;
 let serverStarted = false;
 let serverError = null;
+let launchAtLogin = false;
 
 // ─── Error guards ─────────────────────────────────────────────────────────────
 process.on("uncaughtException", (err) => {
@@ -187,6 +188,20 @@ function buildTrayMenu() {
       },
     },
 
+    {
+      label: "Launch EchoDeck at login",
+      type: "checkbox",
+      checked: launchAtLogin,
+      click: (item) => {
+        launchAtLogin = item.checked;
+        app.setLoginItemSettings({
+          openAtLogin: launchAtLogin,
+          openAsHidden: true,
+        });
+        buildTrayMenu();
+      },
+    },
+
     { type: "separator" },
 
     {
@@ -216,14 +231,10 @@ function buildTrayMenu() {
 // ─── App ready ────────────────────────────────────────────────────────────────
 app.whenReady().then(() => {
   // ── Windows startup registration ──────────────────────────────────────────
-  // Registers EchoDeck in HKCU Run so Windows launches it at login.
-  // openAsHidden=true passes --hidden to the process, which we read below
-  // to keep the window suppressed on boot (only the tray + notification show).
+  // Launch at login is a user choice from the tray menu; never force-enable it
+  // merely because the app was opened once.
   if (process.platform === "win32") {
-    app.setLoginItemSettings({
-      openAtLogin: true,
-      openAsHidden: true,
-    });
+    launchAtLogin = app.getLoginItemSettings().openAtLogin;
   }
 
   // Detect whether this is a Windows startup launch (--hidden flag)

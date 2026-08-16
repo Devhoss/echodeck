@@ -1,4 +1,4 @@
-package com.streamdesk.app;
+package com.echodeck.app;
 
 import android.os.Build;
 import android.os.Bundle;

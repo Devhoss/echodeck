@@ -284,6 +284,7 @@ export default function DesktopApp({
         sound_file: btn.sound_file || null,
         sound_target: btn.sound_target || "phone",
         audio_device: btn.audio_device || null,
+        require_confirm: btn.require_confirm || 0,
       });
       setSaved(false);
     },
@@ -1405,10 +1406,12 @@ function VolChip({ volume, muted }) {
         <div
           style={{
             height: "100%",
-            width: `${muted ? 0 : volume}%`,
+            width: "100%",
+            transformOrigin: "left center",
+            transform: `scaleX(${(muted ? 0 : volume) / 100})`,
             background: muted ? "#f87171" : volume > 95 ? "#fb923c" : "#4ade80",
             borderRadius: 2,
-            transition: "width 0.15s",
+            transition: "transform 0.15s",
           }}
         />
       </div>
@@ -2126,6 +2129,23 @@ function ButtonTile({
         </div>
       )}
 
+      {/* FEATURE: Hold to confirm — mirrors the phone's guard badge so you can
+          see which buttons are protected while laying out the deck. */}
+      {Number(btn.require_confirm) === 1 && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: 8,
+            right: 7,
+            fontSize: 8,
+            opacity: 0.45,
+            zIndex: 3,
+          }}
+        >
+          🔒
+        </div>
+      )}
+
       {/* Icon */}
       <div
         style={{
@@ -2194,13 +2214,16 @@ function ButtonTile({
           <div
             style={{
               width: "100%",
-              height: `${muted ? 0 : volume}%`,
+              height: "100%",
+              flexShrink: 0,
+              transformOrigin: "bottom center",
+              transform: `scaleY(${(muted ? 0 : volume) / 100})`,
               background: muted
                 ? "rgba(248,113,113,0.25)"
                 : volume > 95
                   ? "rgba(251,146,60,0.2)"
                   : "rgba(74,222,128,0.15)",
-              transition: "height 0.12s ease",
+              transition: "transform 0.12s ease",
             }}
           />
           <div
@@ -2453,6 +2476,20 @@ function PropertyPanel({
                 {s}
               </button>
             ))}
+          </div>
+        </Field>
+
+        {/* FEATURE: Hold to confirm — property of the button, not of its actions,
+            so it sits with Size rather than down in the action editors. */}
+        <Field label="Confirm before running">
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Toggle
+              value={!!form.require_confirm}
+              onChange={(v) => onPatch({ require_confirm: v ? 1 : 0 })}
+            />
+            <span style={{ fontSize: 11, color: "#666" }}>
+              Phone must hold the button to fire it
+            </span>
           </div>
         </Field>
 

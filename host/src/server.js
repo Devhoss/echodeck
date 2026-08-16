@@ -3,6 +3,7 @@ const { WebSocketServer } = require("ws");
 const http = require("http");
 const path = require("path");
 const { v4: uuid } = require("uuid");
+const { randomBytes, timingSafeEqual } = require("crypto");
 const os = require("os");
 const db = require("./db");
 const { getActiveWindow, listOpenWindows } = require("./activeWindow");
@@ -42,16 +43,55 @@ app.use((req, res, next) => {
 
 // --- REST ---
 
+// QR pairing is the only way a non-local client receives this token. Keep it
+// in memory so restarting EchoDeck invalidates previously captured QR codes.
+const PAIR_TOKEN = randomBytes(24).toString("hex");
+
+function isLocalAddress(address) {
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+function hasValidPairToken(token) {
+  if (typeof token !== "string") return false;
+  const supplied = Buffer.from(token);
+  const expected = Buffer.from(PAIR_TOKEN);
+  return (
+    supplied.length === expected.length &&
+    timingSafeEqual(supplied, expected)
+  );
+}
+
+// Express only applies `app.use` to routes registered AFTER it, so every /api
+// route must be declared below this gate. Declaring one above it silently
+// publishes that route to the whole LAN with no token check.
+app.use("/api", (req, res, next) => {
+  if (isLocalAddress(req.socket.remoteAddress)) return next();
+  if (req.path === "/pair/verify") return next();
+  if (!hasValidPairToken(req.get("X-EchoDeck-Token"))) {
+    return res.status(401).json({ error: "Pair this device with EchoDeck first" });
+  }
+  next();
+});
+
 app.get("/api/pages", (req, res) => {
   const pages = db.getPages();
   res.json(pages.map((p) => ({ ...p, buttons: db.getButtons(p.id) })));
 });
 
-const { randomBytes } = require("crypto");
-const PAIR_TOKEN = randomBytes(4).toString("hex");
-
+// Hands out the pairing token itself, so it must never answer a remote caller —
+// the only legitimate consumer is the Electron UI drawing the QR code.
 app.get("/api/pair-info", (req, res) => {
+  if (!isLocalAddress(req.socket.remoteAddress)) {
+    return res.status(403).json({ error: "Local requests only" });
+  }
   res.json({ host: LAN_IP, port: PORT, token: PAIR_TOKEN });
+});
+
+app.post("/api/pair/verify", (req, res) => {
+  if (!hasValidPairToken(req.body?.token)) {
+    return res.status(401).json({ error: "Invalid pairing code" });
+  }
+  res.json({ ok: true });
 });
 
 app.get("/api/audio-devices", async (req, res) => {
@@ -394,16 +434,25 @@ const statsInterval = setInterval(async () => {
 }, 3000);
 
 const holdIntervals = new Map();
+// FEATURE: Volume controls — generation counter per client. volume_hold_start
+// awaits a real volume read before it can install its interval, and a release
+// arriving during that await would otherwise find an empty holdIntervals map
+// and leave the interval running with no handle to stop it.
+const holdGenerations = new Map();
 
 wss.on("connection", (ws, req) => {
+  const requestUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  const isLocalClient = isLocalAddress(req.socket.remoteAddress);
+  if (!isLocalClient && !hasValidPairToken(requestUrl.searchParams.get("token"))) {
+    ws.close(1008, "Pair this device with EchoDeck first");
+    return;
+  }
+
   ws.clientId = uuid();
   ws.clientIp = req.socket.remoteAddress?.replace("::ffff:", "") || "unknown";
   ws.connectedAt = new Date().toISOString();
   ws.userAgent = req.headers["user-agent"] || null;
-  ws.isDesktop =
-    ws.clientIp === "127.0.0.1" ||
-    ws.clientIp === "::1" ||
-    ws.clientIp === "localhost";
+  ws.isDesktop = isLocalClient;
   ws.isAlive = true;
 
   // Heartbeat: ping every PING_INTERVAL ms.
@@ -446,7 +495,7 @@ wss.on("connection", (ws, req) => {
 
   broadcastClients();
 
-  ws.on("message", (raw) => {
+  ws.on("message", async (raw) => {
     let msg;
     try {
       msg = JSON.parse(raw);
@@ -468,10 +517,24 @@ wss.on("connection", (ws, req) => {
           }
         }
         if (target === "pc" || target === "both") {
-          const pcDevice = db.getSetting("pc_sound_device") ?? "";
-          playAudioOnDevice(btn.sound_file, pcDevice).catch((e) =>
-            console.error("PC sound error:", e.message),
+          // The Electron renderer is always connected locally and can play
+          // sound through Chromium without requiring a machine-wide ffplay.
+          // Keep ffplay as a fallback for headless/server-only operation.
+          const desktopClients = [...clients].filter(
+            (client) => client.isDesktop && client.readyState === 1,
           );
+          if (desktopClients.length) {
+            const soundMessage = JSON.stringify({
+              t: "play_sound",
+              sound_file: btn.sound_file,
+            });
+            desktopClients.forEach((client) => client.send(soundMessage));
+          } else {
+            const pcDevice = db.getSetting("pc_sound_device") ?? "";
+            playAudioOnDevice(btn.sound_file, pcDevice).catch((e) =>
+              console.error("PC sound error:", e.message),
+            );
+          }
         }
       }
 
@@ -516,23 +579,51 @@ wss.on("connection", (ws, req) => {
     if (msg.t === "volume_hold_start") {
       const existing = holdIntervals.get(ws);
       if (existing) clearInterval(existing);
+
+      // Claim this hold before the await below. A stop (or another start)
+      // arriving mid-await bumps the generation, telling us to abandon.
+      const generation = (holdGenerations.get(ws) ?? 0) + 1;
+      holdGenerations.set(ws, generation);
+
       const { direction, step = 2 } = msg;
       const actionType = direction === "up" ? "volume_up" : "volume_down";
-      executeAction(actionType, String(step)).then(() => broadcastVolumeNow());
-      const interval = setInterval(() => {
-        executeAction(actionType, String(step)).then(() =>
-          broadcastVolumeNow(),
-        );
-      }, 80);
+
+      // One real OS read to seed our local estimate
+      let localVolume = (await getVolume()) ?? 50;
+
+      // Released or restarted while that read was in flight — installing the
+      // interval now would strand it, so leave without starting anything.
+      if (holdGenerations.get(ws) !== generation) return;
+
+      const tick = () => {
+        executeAction(actionType, String(step)); // fire-and-forget, no await/broadcast
+        localVolume =
+          direction === "up"
+            ? Math.min(100, localVolume + step)
+            : Math.max(0, localVolume - step);
+        const msgOut = JSON.stringify({
+          t: "volume",
+          volume: localVolume,
+          muted: false,
+        });
+        if (ws.readyState === 1) ws.send(msgOut); // only this client, optimistic
+      };
+
+      tick(); // immediate first step
+      const interval = setInterval(tick, 80);
       holdIntervals.set(ws, interval);
     }
 
     if (msg.t === "volume_hold_stop") {
+      // Invalidate any start still waiting on its seeding read.
+      holdGenerations.set(ws, (holdGenerations.get(ws) ?? 0) + 1);
       const interval = holdIntervals.get(ws);
       if (interval) {
         clearInterval(interval);
         holdIntervals.delete(ws);
       }
+      // One real OS read to resync everyone (other clients, desktop UI, etc.)
+      broadcastVolumeNow();
     }
 
     if (msg.t === "switch_page") {
@@ -556,6 +647,7 @@ wss.on("connection", (ws, req) => {
       clearInterval(interval);
       holdIntervals.delete(ws);
     }
+    holdGenerations.delete(ws);
     clients.delete(ws);
     console.log(`Client disconnected [${ws.clientId}]. Total: ${clients.size}`);
     broadcastClients();

@@ -51,6 +51,10 @@ const VOLUME_ACTIONS = new Set([
 ]);
 const VOLUME_HOLD_ACTIONS = new Set(["volume_up", "volume_down"]);
 
+// FEATURE: Hold to confirm — how long a guarded button must be held before it fires.
+// Long enough that a stray brush can't complete it, short enough not to feel stuck.
+const HOLD_CONFIRM_MS = 700;
+
 // FEATURE: Soundboard — reusable audio player
 // Keeps a single AudioContext alive for the session (avoids mobile autoplay blocks).
 // On iOS/Android WebView the AudioContext must be resumed after a user gesture —
@@ -88,6 +92,15 @@ async function playSound(dataUrl) {
     } catch (e2) {
       console.warn("Sound playback failed:", e2.message);
     }
+  }
+}
+
+function unlockAudio() {
+  try {
+    const ctx = getAudioContext();
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
+  } catch (error) {
+    console.warn("Could not unlock audio:", error);
   }
 }
 
@@ -145,14 +158,17 @@ export default function App() {
       setStatus("disconnected");
     };
     const onMessage = (e) => {
-      console.log(
-        "[WS] message received:",
-        JSON.parse(e.data).t,
-        "at",
-        Date.now(),
-      );
       lastMessageAtRef.current = Date.now();
-      const msg = JSON.parse(e.data);
+      // Parse once and guard it: `state` payloads carry base64 icon data, and
+      // a malformed frame used to throw straight out of the listener.
+      let msg;
+      try {
+        msg = JSON.parse(e.data);
+      } catch {
+        console.warn("[WS] dropped unparseable frame");
+        return;
+      }
+      console.log("[WS] message received:", msg.t, "at", Date.now());
       if (msg.t === "state") {
         setPages(msg.pages);
         setCurrentPage(msg.current_page);
@@ -269,6 +285,9 @@ export default function App() {
       wsRef.current?.reconnect?.(4000, "button press");
       return;
     }
+    // Must happen synchronously inside the tap handler. Waiting for the server
+    // response first loses the browser's user-gesture permission on mobile.
+    unlockAudio();
     try {
       await Haptics.impact({ style: ImpactStyle.Heavy });
     } catch {
@@ -277,6 +296,19 @@ export default function App() {
     setPressing(id);
     wsRef.current.send(JSON.stringify({ v: 1, t: "press", id }));
     setTimeout(() => setPressing(null), 150);
+  }, []);
+
+  // FEATURE: Hold to confirm — finger went down on a guarded button.
+  // The press itself fires from a timer, which is NOT a user gesture, so the
+  // audio unlock has to happen here or mobile revokes playback permission
+  // for any sound attached to the button.
+  const beginConfirmHold = useCallback(async () => {
+    unlockAudio();
+    try {
+      await Haptics.impact({ style: ImpactStyle.Light });
+    } catch {
+      navigator.vibrate?.(5);
+    }
   }, []);
 
   // FEATURE: Volume controls — send hold_start when finger goes down on a vol button
@@ -653,6 +685,7 @@ export default function App() {
                 muted={muted}
                 onVolumeHoldStart={startVolumeHold}
                 onVolumeHoldStop={stopVolumeHold}
+                onConfirmHoldStart={beginConfirmHold}
               />
             ))}
           </div>
@@ -799,10 +832,12 @@ function VolumePill({ volume, muted }) {
         <div
           style={{
             height: "100%",
-            width: `${muted ? 0 : volume}%`,
+            width: "100%",
+            transformOrigin: "left center",
+            transform: `scaleX(${(muted ? 0 : volume) / 100})`,
             background: muted ? "#f87171" : volume > 95 ? "#fb923c" : "#4ade80",
             borderRadius: 2,
-            transition: "width 0.15s ease",
+            transition: "transform 0.15s ease",
           }}
         />
       </div>
@@ -845,6 +880,7 @@ const SortableButton = memo(function SortableButton({
   muted,
   onVolumeHoldStart,
   onVolumeHoldStop,
+  onConfirmHoldStart,
 }) {
   const {
     attributes,
@@ -856,6 +892,9 @@ const SortableButton = memo(function SortableButton({
   } = useSortable({ id: btn.id });
 
   const [ripple, setRipple] = useState(null);
+  // FEATURE: Hold to confirm — local to the tile; nothing above needs to know.
+  const [holding, setHolding] = useState(false);
+  const holdTimerRef = useRef(null);
 
   const sizeStyle =
     btn.size === "2x2" ? { gridColumn: "span 2", gridRow: "span 2" } : {};
@@ -868,6 +907,11 @@ const SortableButton = memo(function SortableButton({
 
   const isVolumeBtn = VOLUME_ACTIONS.has(btn.action_type);
   const isVolumeHoldBtn = VOLUME_HOLD_ACTIONS.has(btn.action_type);
+
+  // FEATURE: Hold to confirm — volume buttons own the pointer-hold gesture
+  // already, so the two are mutually exclusive by construction.
+  const requiresConfirm =
+    Number(btn.require_confirm) === 1 && !isVolumeHoldBtn;
 
   // FEATURE: Soundboard — show a small speaker indicator if the button has a sound
   const hasSound = !!btn.sound_file;
@@ -882,10 +926,22 @@ const SortableButton = memo(function SortableButton({
     .filter(Boolean)
     .join(", ");
 
+  // FEATURE: Hold to confirm — abandoning the hold leaves no state behind,
+  // so there is never an "armed" button waiting to fire on a later tap.
+  const cancelHold = useCallback(() => {
+    clearTimeout(holdTimerRef.current);
+    holdTimerRef.current = null;
+    setHolding(false);
+  }, []);
+
+  useEffect(() => () => clearTimeout(holdTimerRef.current), []);
+
   const handleClick = useCallback(
     (e) => {
       if (isDragging) return;
       if (isVolumeHoldBtn) return;
+      // Guarded buttons fire from the hold timer, never from a tap.
+      if (requiresConfirm) return;
       const rect = e.currentTarget.getBoundingClientRect();
       const x = ((e.clientX - rect.left) / rect.width) * 100;
       const y = ((e.clientY - rect.top) / rect.height) * 100;
@@ -893,29 +949,55 @@ const SortableButton = memo(function SortableButton({
       setTimeout(() => setRipple(null), 600);
       onPress(btn.id);
     },
-    [isDragging, onPress, btn.id, isVolumeHoldBtn],
+    [isDragging, onPress, btn.id, isVolumeHoldBtn, requiresConfirm],
   );
 
   const handlePointerDown = useCallback(
     (e) => {
-      if (isDragging || !isVolumeHoldBtn) return;
+      if (isDragging) return;
+      if (!isVolumeHoldBtn && !requiresConfirm) return;
       e.currentTarget.setPointerCapture(e.pointerId);
       const rect = e.currentTarget.getBoundingClientRect();
-      setRipple({
-        x: ((e.clientX - rect.left) / rect.width) * 100,
-        y: ((e.clientY - rect.top) / rect.height) * 100,
-        id: Date.now(),
-      });
+      const x = ((e.clientX - rect.left) / rect.width) * 100;
+      const y = ((e.clientY - rect.top) / rect.height) * 100;
+
+      if (requiresConfirm) {
+        setHolding(true);
+        onConfirmHoldStart();
+        holdTimerRef.current = setTimeout(() => {
+          holdTimerRef.current = null;
+          setHolding(false);
+          setRipple({ x, y, id: Date.now() });
+          setTimeout(() => setRipple(null), 600);
+          onPress(btn.id);
+        }, HOLD_CONFIRM_MS);
+        return;
+      }
+
+      setRipple({ x, y, id: Date.now() });
       onVolumeHoldStart(btn.action_type === "volume_up" ? "up" : "down");
     },
-    [isDragging, isVolumeHoldBtn, btn.action_type, onVolumeHoldStart],
+    [
+      isDragging,
+      isVolumeHoldBtn,
+      requiresConfirm,
+      btn.id,
+      btn.action_type,
+      onPress,
+      onConfirmHoldStart,
+      onVolumeHoldStart,
+    ],
   );
 
   const handlePointerUp = useCallback(() => {
+    if (requiresConfirm) {
+      cancelHold();
+      return;
+    }
     if (!isVolumeHoldBtn) return;
     setRipple(null);
     onVolumeHoldStop();
-  }, [isVolumeHoldBtn, onVolumeHoldStop]);
+  }, [requiresConfirm, cancelHold, isVolumeHoldBtn, onVolumeHoldStop]);
 
   return (
     <div
@@ -1121,13 +1203,16 @@ const SortableButton = memo(function SortableButton({
           <div
             style={{
               width: "100%",
-              height: `${muted ? 0 : volume}%`,
+              height: "100%",
+              flexShrink: 0,
+              transformOrigin: "bottom center",
+              transform: `scaleY(${(muted ? 0 : volume) / 100})`,
               background: muted
                 ? "rgba(248,113,113,0.25)"
                 : volume > 95
                   ? "rgba(251,146,60,0.2)"
                   : "rgba(74,222,128,0.15)",
-              transition: "height 0.12s ease",
+              transition: "transform 0.12s ease",
             }}
           />
           <div
@@ -1147,6 +1232,78 @@ const SortableButton = memo(function SortableButton({
             {muted ? "MUTE" : `${volume}%`}
           </div>
         </div>
+      )}
+
+      {/* FEATURE: Hold to confirm — caution tint plus a progress ring that
+          tracks the tile edge, so it stays readable around the fingertip
+          covering the middle of the button. */}
+      {requiresConfirm && (
+        <>
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              background: "rgba(251,191,36,0.16)",
+              opacity: holding ? 1 : 0,
+              transition: "opacity 0.12s ease",
+              pointerEvents: "none",
+              zIndex: 4,
+            }}
+          />
+          <svg
+            viewBox="0 0 100 100"
+            preserveAspectRatio="none"
+            style={{
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              opacity: holding ? 1 : 0,
+              transition: "opacity 0.12s ease",
+              pointerEvents: "none",
+              zIndex: 5,
+            }}
+          >
+            <rect
+              x="1"
+              y="1"
+              width="98"
+              height="98"
+              rx="7"
+              ry="7"
+              fill="none"
+              stroke="#fbbf24"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+              pathLength="100"
+              strokeDasharray="100"
+              strokeDashoffset={holding ? 0 : 100}
+              style={{
+                transition: holding
+                  ? `stroke-dashoffset ${HOLD_CONFIRM_MS}ms linear`
+                  : "stroke-dashoffset 0.15s ease",
+              }}
+            />
+          </svg>
+          {/* Resting hint — tells you the button is guarded before you touch it */}
+          <div
+            style={{
+              position: "absolute",
+              bottom: 7,
+              right: 8,
+              fontSize: 9,
+              lineHeight: 1,
+              opacity: holding ? 0 : 0.5,
+              transition: "opacity 0.12s ease",
+              pointerEvents: "none",
+              zIndex: 6,
+              userSelect: "none",
+            }}
+          >
+            🔒
+          </div>
+        </>
       )}
 
       <style>{`div:hover > .drag-handle { opacity: 0.35 !important; } div:active > .drag-handle { opacity: 0 !important; }`}</style>
