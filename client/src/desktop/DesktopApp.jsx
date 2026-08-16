@@ -198,6 +198,11 @@ export default function DesktopApp({
   });
   const [showAudioSettings, setShowAudioSettings] = useState(false);
   const [pcSoundDevice, setPcSoundDevice] = useState("");
+  // FEATURE: Soundboard — real output devices as Chromium sees them. These are
+  // what setSinkId can actually route to, so the picker has to come from here
+  // rather than from the PowerShell device list used by audio_switch_device.
+  const [outputDevices, setOutputDevices] = useState([]);
+  const [pcMonitorDevice, setPcMonitorDevice] = useState("");
   const [audioSettingsSaved, setAudioSettingsSaved] = useState(false);
   const [showDevices, setShowDevices] = useState(false);
   const [connectedDevices, setConnectedDevices] = useState([]);
@@ -219,6 +224,35 @@ export default function DesktopApp({
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   );
 
+  // FEATURE: Soundboard — enumerate playback devices, refreshing when the user
+  // plugs in or removes hardware. Labels are only populated once the media
+  // permission is granted, which main.js does for our own renderer.
+  useEffect(() => {
+    const media = navigator.mediaDevices;
+    if (!media?.enumerateDevices) return;
+
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const devices = await media.enumerateDevices();
+        if (cancelled) return;
+        const labels = devices
+          .filter((d) => d.kind === "audiooutput" && d.label)
+          .map((d) => d.label);
+        setOutputDevices([...new Set(labels)]);
+      } catch {
+        /* leave the list empty; the picker keeps whatever is saved */
+      }
+    };
+
+    load();
+    media.addEventListener?.("devicechange", load);
+    return () => {
+      cancelled = true;
+      media.removeEventListener?.("devicechange", load);
+    };
+  }, []);
+
   // Load supporting data once
   useEffect(() => {
     fetch(`${api()}/audio-devices`)
@@ -234,6 +268,7 @@ export default function DesktopApp({
       .then((d) => {
         setAutoSwitch(d.auto_profile_switching !== false);
         setPcSoundDevice(d.pc_sound_device ?? "");
+        setPcMonitorDevice(d.pc_monitor_device ?? "");
       })
       .catch(() => {});
 
@@ -446,6 +481,14 @@ export default function DesktopApp({
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key: "pc_sound_device", value: pcSoundDevice }),
+    });
+    await fetch(`${api()}/settings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        key: "pc_monitor_device",
+        value: pcMonitorDevice,
+      }),
     });
     setAudioSettingsSaved(true);
     setTimeout(() => setAudioSettingsSaved(false), 2000);
@@ -1099,17 +1142,14 @@ export default function DesktopApp({
                     lineHeight: 1.6,
                   }}
                 >
-                  The audio device ffplay uses when playing sounds to your PC.
-                  Set it to your{" "}
-                  <strong style={{ color: "#a855f7" }}>
-                    Voicemeeter Input
-                  </strong>{" "}
-                  so Discord can hear the soundboard.
+                  Where PC sounds play. Pick your speakers to hear them
+                  yourself, or a virtual cable such as{" "}
+                  <strong style={{ color: "#a855f7" }}>VB-CABLE</strong> (set as
+                  Discord&apos;s input) so a call hears them too.
                 </div>
-                <input
+                <select
                   value={pcSoundDevice}
                   onChange={(e) => setPcSoundDevice(e.target.value)}
-                  placeholder="Voicemeeter Input (VB-Audio Voicemeeter VAIO)"
                   style={{
                     width: "100%",
                     background: "#0f0f1a",
@@ -1122,7 +1162,68 @@ export default function DesktopApp({
                     boxSizing: "border-box",
                     outline: "none",
                   }}
-                />
+                >
+                  <option value="">System default</option>
+                  {/* Keep a saved-but-missing device selectable so upgrading
+                      from the old free-text field never silently drops it. */}
+                  {pcSoundDevice && !outputDevices.includes(pcSoundDevice) ? (
+                    <option value={pcSoundDevice}>
+                      {pcSoundDevice} (not found — using default)
+                    </option>
+                  ) : null}
+                  {outputDevices.map((label) => (
+                    <option key={label} value={label}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+
+                {/* FEATURE: Soundboard — monitor output. Routing sounds into a
+                    virtual cable means you stop hearing them yourself; this
+                    plays them on a second device at the same time. */}
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: "#6b3fa0",
+                    marginBottom: 6,
+                    lineHeight: 1.6,
+                  }}
+                >
+                  Also play on <strong style={{ color: "#a855f7" }}>
+                    monitor
+                  </strong>{" "}
+                  — pick your headset here when the output above is a virtual
+                  cable, so you hear the sound too.
+                </div>
+                <select
+                  value={pcMonitorDevice}
+                  onChange={(e) => setPcMonitorDevice(e.target.value)}
+                  style={{
+                    width: "100%",
+                    background: "#0f0f1a",
+                    border: "1px solid #3b1a5c",
+                    borderRadius: 8,
+                    color: "#e0e0ec",
+                    padding: "8px 10px",
+                    fontSize: 12,
+                    marginBottom: 12,
+                    boxSizing: "border-box",
+                    outline: "none",
+                  }}
+                >
+                  <option value="">Off — don&apos;t monitor</option>
+                  {pcMonitorDevice &&
+                  !outputDevices.includes(pcMonitorDevice) ? (
+                    <option value={pcMonitorDevice}>
+                      {pcMonitorDevice} (not found)
+                    </option>
+                  ) : null}
+                  {outputDevices.map((label) => (
+                    <option key={label} value={label}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
                 <button
                   onClick={saveAudioSettings}
                   style={{

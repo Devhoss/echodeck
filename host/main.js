@@ -21,6 +21,7 @@ const {
   Notification,
   nativeImage,
   ipcMain,
+  session,
 } = require("electron");
 const path = require("path");
 
@@ -50,6 +51,14 @@ app.disableHardwareAcceleration();
 app.commandLine.appendSwitch("disable-renderer-backgrounding");
 app.commandLine.appendSwitch("disable-background-timer-throttling");
 app.commandLine.appendSwitch("disable-http-cache");
+
+// FEATURE: Soundboard — button presses arrive over the network from the phone,
+// so the renderer never sees a click of its own. Chromium's default
+// user-gesture-required policy therefore blocked every PC sound: both
+// AudioContext.resume() and the <audio> fallback failed silently. The window
+// only ever plays audio EchoDeck itself triggers, so lifting the gate here
+// does not expose us to autoplay from untrusted content.
+app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
 // ─── Single instance ──────────────────────────────────────────────────────────
 if (!app.requestSingleInstanceLock()) {
@@ -230,6 +239,19 @@ function buildTrayMenu() {
 
 // ─── App ready ────────────────────────────────────────────────────────────────
 app.whenReady().then(() => {
+  // FEATURE: Soundboard — picking a PC output device needs two things from
+  // Chromium: enumerateDevices() must return real labels (gated behind media
+  // permission) and setSinkId() must be allowed (speaker-selection). Both are
+  // granted only to our own renderer; everything else is refused.
+  const allowedMediaPermissions = new Set(["media", "speaker-selection"]);
+  session.defaultSession.setPermissionRequestHandler(
+    (_wc, permission, callback) =>
+      callback(allowedMediaPermissions.has(permission)),
+  );
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) =>
+    allowedMediaPermissions.has(permission),
+  );
+
   // ── Windows startup registration ──────────────────────────────────────────
   // Launch at login is a user choice from the tray menu; never force-enable it
   // merely because the app was opened once.

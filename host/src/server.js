@@ -105,10 +105,14 @@ app.get("/api/audio-devices", async (req, res) => {
 
 app.get("/api/settings", (req, res) => {
   const pc_sound_device = db.getSetting("pc_sound_device") ?? "";
+  // FEATURE: Soundboard — optional second output so you can hear a sound that
+  // is also being routed into a virtual cable for a call.
+  const pc_monitor_device = db.getSetting("pc_monitor_device") ?? "";
   const auto_profile_switching = db.getSetting("auto_profile_switching") ?? "1";
   const auto_switch_delay = db.getSetting("auto_switch_delay") ?? "0";
   res.json({
     pc_sound_device,
+    pc_monitor_device,
     auto_profile_switching: auto_profile_switching === "1",
     auto_switch_delay: Number(auto_switch_delay),
   });
@@ -118,6 +122,7 @@ app.post("/api/settings", (req, res) => {
   const { key, value } = req.body;
   const allowed = [
     "pc_sound_device",
+    "pc_monitor_device",
     "auto_profile_switching",
     "auto_switch_delay",
   ];
@@ -512,7 +517,11 @@ wss.on("connection", (ws, req) => {
         if (target === "phone" || target === "both") {
           if (ws.readyState === 1) {
             ws.send(
-              JSON.stringify({ t: "play_sound", sound_file: btn.sound_file }),
+              JSON.stringify({
+                t: "play_sound",
+                id: btn.id,
+                sound_file: btn.sound_file,
+              }),
             );
           }
         }
@@ -523,14 +532,20 @@ wss.on("connection", (ws, req) => {
           const desktopClients = [...clients].filter(
             (client) => client.isDesktop && client.readyState === 1,
           );
+          const pcDevice =
+            btn.audio_device || db.getSetting("pc_sound_device") || "";
           if (desktopClients.length) {
+            // The renderer routes this with setSinkId. An unknown device name
+            // falls back to the default output rather than going silent.
             const soundMessage = JSON.stringify({
               t: "play_sound",
+              id: btn.id,
               sound_file: btn.sound_file,
+              device: pcDevice,
+              monitor: db.getSetting("pc_monitor_device") || "",
             });
             desktopClients.forEach((client) => client.send(soundMessage));
           } else {
-            const pcDevice = db.getSetting("pc_sound_device") ?? "";
             playAudioOnDevice(btn.sound_file, pcDevice).catch((e) =>
               console.error("PC sound error:", e.message),
             );
@@ -585,7 +600,13 @@ wss.on("connection", (ws, req) => {
       const generation = (holdGenerations.get(ws) ?? 0) + 1;
       holdGenerations.set(ws, generation);
 
-      const { direction, step = 2 } = msg;
+      const { direction } = msg;
+      // Clamp to the same range the editor offers. Older phone builds send a
+      // hardcoded 2 and omit nothing, so a missing step still needs a default.
+      const step = Math.min(
+        20,
+        Math.max(1, parseInt(msg.step, 10) || 5),
+      );
       const actionType = direction === "up" ? "volume_up" : "volume_down";
 
       // One real OS read to seed our local estimate

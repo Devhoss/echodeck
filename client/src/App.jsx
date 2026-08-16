@@ -51,6 +51,18 @@ const VOLUME_ACTIONS = new Set([
 ]);
 const VOLUME_HOLD_ACTIONS = new Set(["volume_up", "volume_down"]);
 
+// FEATURE: Volume controls — the step size the user picked in the desktop
+// editor lives in action_value. Range mirrors actionRegistry.js.
+const VOLUME_STEP_MIN = 1;
+const VOLUME_STEP_MAX = 20;
+const VOLUME_STEP_DEFAULT = 5;
+
+function volumeStepFor(btn) {
+  const parsed = parseInt(btn.action_value, 10);
+  if (!Number.isFinite(parsed)) return VOLUME_STEP_DEFAULT;
+  return Math.min(VOLUME_STEP_MAX, Math.max(VOLUME_STEP_MIN, parsed));
+}
+
 // FEATURE: Hold to confirm — how long a guarded button must be held before it fires.
 // Long enough that a stray brush can't complete it, short enough not to feel stuck.
 const HOLD_CONFIRM_MS = 700;
@@ -67,22 +79,126 @@ function getAudioContext() {
   return _audioCtx;
 }
 
-async function playSound(dataUrl) {
+// FEATURE: Soundboard — a second context so one sound can reach two devices at
+// once (a virtual cable for the call, plus your headset so you hear it too).
+// A context can only target one sink, hence the second one. It is created at
+// the main context's sample rate so a buffer decoded once plays on both.
+let _monitorCtx = null;
+function getMonitorContext() {
+  if (!_monitorCtx) {
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    try {
+      _monitorCtx = new Ctor({ sampleRate: getAudioContext().sampleRate });
+    } catch {
+      _monitorCtx = new Ctor();
+    }
+  }
+  return _monitorCtx;
+}
+
+// FEATURE: Soundboard — decoding a base64 data URL costs a fetch plus a full
+// PCM decode, which is wasteful for a soundboard pressed over and over. Keep
+// the decoded buffers around, keyed by button id plus payload length so
+// replacing a button's sound invalidates its entry.
+const MAX_CACHED_BUFFERS = 16;
+const decodedBuffers = new Map();
+
+function cacheBuffer(key, buffer) {
+  if (decodedBuffers.size >= MAX_CACHED_BUFFERS) {
+    // Map preserves insertion order, so the first key is the oldest.
+    decodedBuffers.delete(decodedBuffers.keys().next().value);
+  }
+  decodedBuffers.set(key, buffer);
+}
+
+// FEATURE: Soundboard — resolving a device label to a Chromium deviceId means
+// enumerating devices, so cache it and drop the cache when devices change.
+const sinkIdByLabel = new Map();
+// Which sink each context is currently pointed at, so repeat presses skip the
+// setSinkId round-trip. Keyed by context; there are only ever two.
+const appliedSinks = new Map();
+
+if (typeof navigator !== "undefined" && navigator.mediaDevices?.addEventListener) {
+  navigator.mediaDevices.addEventListener("devicechange", () => {
+    sinkIdByLabel.clear();
+    appliedSinks.clear();
+  });
+}
+
+async function resolveSinkId(label) {
+  if (!label) return null;
+  if (sinkIdByLabel.has(label)) return sinkIdByLabel.get(label);
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const match = devices.find(
+      (d) => d.kind === "audiooutput" && d.label === label,
+    );
+    const id = match?.deviceId ?? null;
+    sinkIdByLabel.set(label, id);
+    return id;
+  } catch {
+    return null;
+  }
+}
+
+// Routes the shared context at a specific output device. Failing to route is
+// never fatal — playing on the default device beats playing nothing.
+async function applySink(ctx, label) {
+  if (!label || typeof ctx.setSinkId !== "function") return;
+  const sinkId = await resolveSinkId(label);
+  if (!sinkId || appliedSinks.get(ctx) === sinkId) return;
+  try {
+    await ctx.setSinkId(sinkId);
+    appliedSinks.set(ctx, sinkId);
+  } catch (e) {
+    console.warn("Could not route sound to", label, "—", e.message);
+  }
+}
+
+function playBuffer(ctx, buffer) {
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(ctx.destination);
+  source.start(0);
+}
+
+// FEATURE: Soundboard — mirror a sound onto the monitor device. Never allowed
+// to disturb the primary output, so failures here are logged and swallowed.
+async function playOnMonitor(buffer, label) {
+  try {
+    const ctx = getMonitorContext();
+    if (ctx.state === "suspended") await ctx.resume();
+    await applySink(ctx, label);
+    playBuffer(ctx, buffer);
+  } catch (e) {
+    console.warn("Monitor playback failed:", e.message);
+  }
+}
+
+async function playSound(dataUrl, { id, device, monitor } = {}) {
   if (!dataUrl) return;
   try {
     const ctx = getAudioContext();
     // Resume in case the context was suspended (required on iOS)
     if (ctx.state === "suspended") await ctx.resume();
 
-    // Fetch the base64 data URL as an ArrayBuffer and decode it
-    const response = await fetch(dataUrl);
-    const arrayBuffer = await response.arrayBuffer();
-    const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+    await applySink(ctx, device);
 
-    const source = ctx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(ctx.destination);
-    source.start(0);
+    const cacheKey = id ? `${id}:${dataUrl.length}` : null;
+    let audioBuffer = cacheKey ? decodedBuffers.get(cacheKey) : null;
+
+    if (!audioBuffer) {
+      // Fetch the base64 data URL as an ArrayBuffer and decode it
+      const response = await fetch(dataUrl);
+      const arrayBuffer = await response.arrayBuffer();
+      audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+      if (cacheKey) cacheBuffer(cacheKey, audioBuffer);
+    }
+
+    playBuffer(ctx, audioBuffer);
+
+    // Mirror to the monitor device, unless it is the one already playing.
+    if (monitor && monitor !== device) playOnMonitor(audioBuffer, monitor);
   } catch {
     // Fallback: plain <audio> element (works for mp3/wav on most Android WebViews)
     try {
@@ -202,7 +318,11 @@ export default function App() {
       // The server only sends this to the client that pressed the button,
       // so sound plays on the phone, not on every connected device.
       if (msg.t === "play_sound" && msg.sound_file) {
-        playSound(msg.sound_file);
+        playSound(msg.sound_file, {
+          id: msg.id,
+          device: msg.device,
+          monitor: msg.monitor,
+        });
       }
     };
 
@@ -312,14 +432,14 @@ export default function App() {
   }, []);
 
   // FEATURE: Volume controls — send hold_start when finger goes down on a vol button
-  const startVolumeHold = useCallback((direction) => {
+  const startVolumeHold = useCallback((direction, step) => {
     if (wsRef.current?.readyState !== WebSocket.OPEN) {
       setStatus("connecting");
       wsRef.current?.reconnect?.(4000, "volume hold");
       return;
     }
     wsRef.current.send(
-      JSON.stringify({ t: "volume_hold_start", direction, step: 2 }),
+      JSON.stringify({ t: "volume_hold_start", direction, step }),
     );
   }, []);
 
@@ -907,6 +1027,7 @@ const SortableButton = memo(function SortableButton({
 
   const isVolumeBtn = VOLUME_ACTIONS.has(btn.action_type);
   const isVolumeHoldBtn = VOLUME_HOLD_ACTIONS.has(btn.action_type);
+  const volumeStep = volumeStepFor(btn);
 
   // FEATURE: Hold to confirm — volume buttons own the pointer-hold gesture
   // already, so the two are mutually exclusive by construction.
@@ -975,12 +1096,16 @@ const SortableButton = memo(function SortableButton({
       }
 
       setRipple({ x, y, id: Date.now() });
-      onVolumeHoldStart(btn.action_type === "volume_up" ? "up" : "down");
+      onVolumeHoldStart(
+        btn.action_type === "volume_up" ? "up" : "down",
+        volumeStep,
+      );
     },
     [
       isDragging,
       isVolumeHoldBtn,
       requiresConfirm,
+      volumeStep,
       btn.id,
       btn.action_type,
       onPress,
