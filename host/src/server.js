@@ -191,6 +191,9 @@ app.get("/api/clients", (req, res) => {
         connectedAt: ws.connectedAt,
         currentPage: ws.currentPage || null,
         userAgent: ws.userAgent || null,
+        // Lets the UI line a live socket up with the credential it used, so
+        // one row can offer both "kick this session" and "revoke this device".
+        pairedDeviceId: ws.pairedDeviceId || null,
       });
     }
   });
@@ -425,6 +428,9 @@ function broadcastClients() {
         connectedAt: ws.connectedAt,
         currentPage: ws.currentPage || null,
         userAgent: ws.userAgent || null,
+        // Lets the UI line a live socket up with the credential it used, so
+        // one row can offer both "kick this session" and "revoke this device".
+        pairedDeviceId: ws.pairedDeviceId || null,
       });
     }
   });

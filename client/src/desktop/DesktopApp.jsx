@@ -206,6 +206,9 @@ export default function DesktopApp({
   const [audioSettingsSaved, setAudioSettingsSaved] = useState(false);
   const [showDevices, setShowDevices] = useState(false);
   const [connectedDevices, setConnectedDevices] = useState([]);
+  // FEATURE: Pairing — devices that hold a persisted credential. Distinct from
+  // connectedDevices, which is only the sockets open right now.
+  const [pairedDevices, setPairedDevices] = useState([]);
 
   // Derive button counts from the cache ref + live buttons for current page
   const pageButtonCounts = useMemo(() => {
@@ -273,11 +276,16 @@ export default function DesktopApp({
       .catch(() => {});
 
     // Load connected devices and refresh every 5s
-    const refreshDevices = () =>
+    const refreshDevices = () => {
       fetch(`${api()}/clients`)
         .then((r) => r.json())
         .then(setConnectedDevices)
         .catch(() => {});
+      fetch(`${api()}/paired-devices`)
+        .then((r) => r.json())
+        .then(setPairedDevices)
+        .catch(() => {});
+    };
     refreshDevices();
     const devicesInterval = setInterval(refreshDevices, 5000);
     return () => {
@@ -499,6 +507,16 @@ export default function DesktopApp({
     setConnectedDevices((prev) => prev.filter((d) => d.id !== clientId));
   }
 
+  // FEATURE: Pairing — unlike Disconnect, this drops the stored credential, so
+  // the device cannot return without scanning a fresh QR code.
+  async function revokeDevice(deviceId) {
+    await fetch(`${api()}/paired-devices/${deviceId}`, { method: "DELETE" });
+    setPairedDevices((prev) => prev.filter((d) => d.id !== deviceId));
+    setConnectedDevices((prev) =>
+      prev.filter((c) => c.pairedDeviceId !== deviceId),
+    );
+  }
+
   // ── Profile rule management ───────────────────────────────────────────────
 
   async function reloadProfileRules() {
@@ -644,6 +662,34 @@ export default function DesktopApp({
       ),
     [connectedDevices],
   );
+
+  // FEATURE: Pairing — one row per known device. A paired device shows even
+  // while offline, so it can be revoked without waiting for it to reconnect.
+  // Live sockets with no stored credential (paired before this existed) still
+  // appear, so nothing silently vanishes from the list.
+  const deviceRows = useMemo(() => {
+    const rows = pairedDevices.map((device) => ({
+      key: device.id,
+      pairedId: device.id,
+      name: device.name,
+      pairedAt: device.created_at,
+      lastSeen: device.last_seen,
+      session: phoneDevices.find((c) => c.pairedDeviceId === device.id) || null,
+    }));
+
+    const orphans = phoneDevices
+      .filter((c) => !c.pairedDeviceId)
+      .map((c) => ({
+        key: c.id,
+        pairedId: null,
+        name: parseDeviceName(c.userAgent),
+        pairedAt: null,
+        lastSeen: null,
+        session: c,
+      }));
+
+    return [...rows, ...orphans];
+  }, [pairedDevices, phoneDevices]);
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -923,7 +969,7 @@ export default function DesktopApp({
                 <span
                   style={{ fontWeight: 700, fontSize: 14, color: "#e0e0ec" }}
                 >
-                  Connected Devices
+                  Paired Devices
                 </span>
                 <span
                   style={{
@@ -935,7 +981,7 @@ export default function DesktopApp({
                     color: "#6060a0",
                   }}
                 >
-                  {phoneDevices.length}
+                  {phoneDevices.length} online
                 </span>
               </div>
               <button
@@ -959,7 +1005,7 @@ export default function DesktopApp({
                 overflowY: "auto",
               }}
             >
-              {phoneDevices.length === 0 ? (
+              {deviceRows.length === 0 ? (
                 <div
                   style={{
                     textAlign: "center",
@@ -968,21 +1014,23 @@ export default function DesktopApp({
                     fontSize: 13,
                   }}
                 >
-                  No devices connected
+                  No devices paired yet
                 </div>
               ) : (
                 <div
                   style={{ display: "flex", flexDirection: "column", gap: 8 }}
                 >
-                  {phoneDevices.map((device) => {
-                    const connectedAgo = device.connectedAt
+                  {deviceRows.map((row) => {
+                    const online = !!row.session;
+                    const connectedAgo = row.session?.connectedAt
                       ? Math.floor(
-                          (Date.now() - new Date(device.connectedAt)) / 60000,
+                          (Date.now() - new Date(row.session.connectedAt)) /
+                            60000,
                         )
                       : null;
                     return (
                       <div
-                        key={device.id}
+                        key={row.key}
                         style={{
                           background: "#1a1a26",
                           border: "1px solid #2a2a38",
@@ -991,6 +1039,7 @@ export default function DesktopApp({
                           display: "flex",
                           alignItems: "center",
                           gap: 12,
+                          opacity: online ? 1 : 0.65,
                         }}
                       >
                         <div style={{ fontSize: 22, flexShrink: 0 }}>📱</div>
@@ -1001,39 +1050,85 @@ export default function DesktopApp({
                               fontSize: 13,
                               color: "#c0c0d8",
                               marginBottom: 2,
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 6,
                             }}
                           >
-                            {`${parseDeviceName(device.userAgent)} — ${device.ip}`}
+                            <span
+                              style={{
+                                width: 6,
+                                height: 6,
+                                borderRadius: "50%",
+                                flexShrink: 0,
+                                background: online ? "#4ade80" : "#44445a",
+                                boxShadow: online ? "0 0 6px #4ade80" : "none",
+                              }}
+                            />
+                            {online
+                              ? `${row.name} — ${row.session.ip}`
+                              : row.name}
                           </div>
                           <div style={{ fontSize: 11, color: "#44445a" }}>
-                            {connectedAgo !== null
-                              ? connectedAgo === 0
-                                ? "Connected just now"
-                                : `Connected ${connectedAgo}m ago`
-                              : "Connected"}
-                            {device.currentPage && ` · page active`}
+                            {online
+                              ? `${
+                                  connectedAgo === 0
+                                    ? "Connected just now"
+                                    : `Connected ${connectedAgo}m ago`
+                                }${row.session.currentPage ? " · page active" : ""}`
+                              : row.lastSeen
+                                ? `Offline · last seen ${new Date(row.lastSeen).toLocaleString()}`
+                                : row.pairedId
+                                  ? "Offline · never connected"
+                                  : "Connected"}
                           </div>
                         </div>
-                        <button
-                          onClick={() =>
-                            askConfirm(`Disconnect Phone (${device.ip})?`, () =>
-                              disconnectDevice(device.id),
-                            )
-                          }
-                          style={{
-                            background: "#2a1010",
-                            border: "1px solid #4a1a1a",
-                            borderRadius: 8,
-                            color: "#f87171",
-                            cursor: "pointer",
-                            fontSize: 11,
-                            padding: "5px 10px",
-                            fontWeight: 600,
-                            flexShrink: 0,
-                          }}
-                        >
-                          Disconnect
-                        </button>
+                        {online ? (
+                          <button
+                            onClick={() =>
+                              askConfirm(
+                                `Disconnect ${row.name}? It will reconnect on its own — use Revoke to remove it for good.`,
+                                () => disconnectDevice(row.session.id),
+                              )
+                            }
+                            style={{
+                              background: "#16161e",
+                              border: "1px solid #2a2a38",
+                              borderRadius: 8,
+                              color: "#8080a0",
+                              cursor: "pointer",
+                              fontSize: 11,
+                              padding: "5px 10px",
+                              fontWeight: 600,
+                              flexShrink: 0,
+                            }}
+                          >
+                            Disconnect
+                          </button>
+                        ) : null}
+                        {row.pairedId ? (
+                          <button
+                            onClick={() =>
+                              askConfirm(
+                                `Revoke ${row.name}? It will need to scan a new QR code to connect again.`,
+                                () => revokeDevice(row.pairedId),
+                              )
+                            }
+                            style={{
+                              background: "#2a1010",
+                              border: "1px solid #4a1a1a",
+                              borderRadius: 8,
+                              color: "#f87171",
+                              cursor: "pointer",
+                              fontSize: 11,
+                              padding: "5px 10px",
+                              fontWeight: 600,
+                              flexShrink: 0,
+                            }}
+                          >
+                            Revoke
+                          </button>
+                        ) : null}
                       </div>
                     );
                   })}
@@ -1047,8 +1142,8 @@ export default function DesktopApp({
                   textAlign: "center",
                 }}
               >
-                Multiple phones can connect simultaneously. Each gets its own
-                session.
+                Disconnect ends the current session; the device reconnects on
+                its own. Revoke removes its pairing entirely.
               </div>
             </div>
           </div>
