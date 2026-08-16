@@ -180,18 +180,6 @@ async function getMuted() {
 // HELPERS
 // ---------------------------------------------------------------------------
 
-function getNircmdPath() {
-  const candidates = [
-    path.join(__dirname, "nircmd.exe"),
-    path.join(path.dirname(process.execPath), "nircmd.exe"),
-    path.join(path.dirname(process.execPath), "resources", "nircmd.exe"),
-  ];
-  for (const c of candidates) {
-    if (fs.existsSync(c)) return `"${c}"`;
-  }
-  return "nircmd";
-}
-
 function psImportBlock() {
   return `
 $_paths = @(

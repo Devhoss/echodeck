@@ -245,6 +245,23 @@ export default function App() {
     return getWsUrl(); // non-null if already paired
   });
 
+  // Forget this host and fall back to the pairing screen. Used both when the
+  // user disconnects deliberately and when the host rejects our credential.
+  // Clearing pairedHost tears down the socket via the effect's cleanup, which
+  // is what stops a rejected client from reconnecting forever.
+  const setUnpaired = useCallback(() => {
+    clearPairConfig();
+    setPaired(false);
+    setPairedHost(null);
+    setStatus("connecting");
+    setButtons([]);
+    setPages([]);
+    setCurrentPage(null);
+    setStats(null);
+    setVolume(null);
+    setMuted(false);
+  }, []);
+
   useEffect(() => {
     const wsUrl = getWsUrl();
     if (!wsUrl) return;
@@ -268,6 +285,14 @@ export default function App() {
     const onClose = (e) => {
       console.log("WS close", e.code, e.reason);
       setStatus("disconnected");
+      // 1008 means the host refused our credential — revoked from the Devices
+      // panel, or paired against an EchoDeck install that no longer knows us.
+      // Retrying cannot fix that, so drop the pairing and ask for a new QR
+      // instead of looping on a token the host will never accept.
+      if (e.code === 1008) {
+        console.warn("Pairing rejected by host — returning to pairing screen");
+        setUnpaired();
+      }
     };
     const onError = (e) => {
       console.log("WS error", e);
@@ -397,7 +422,7 @@ export default function App() {
       ws.removeEventListener("message", onMessage);
       ws.close();
     };
-  }, [pairedHost]);
+  }, [pairedHost, setUnpaired]);
 
   const pressButton = useCallback(async (id) => {
     if (wsRef.current?.readyState !== WebSocket.OPEN) {
@@ -457,17 +482,8 @@ export default function App() {
     setShowDisconnectConfirm(false);
     wsRef.current?.close();
     wsRef.current = null;
-    clearPairConfig();
-    setPaired(false);
-    setPairedHost(null);
-    setStatus("connecting");
-    setButtons([]);
-    setPages([]);
-    setCurrentPage(null);
-    setStats(null);
-    setVolume(null);
-    setMuted(false);
-  }, []);
+    setUnpaired();
+  }, [setUnpaired]);
 
   const switchPage = useCallback((page_id) => {
     if (wsRef.current?.readyState !== WebSocket.OPEN) {
