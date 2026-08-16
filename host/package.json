@@ -11,10 +11,11 @@
     "start": "electron .",
     "rebuild:electron": "npx @electron/rebuild -f",
     "rebuild": "electron-builder install-app-deps",
-    "predist": "npx @electron/rebuild -f && cd ../client && npm run build",
+    "predist": "npm run fetch:tools && npx @electron/rebuild -f && cd ../client && npm run build",
     "dist": "electron-builder",
     "dist:portable": "electron-builder --win portable",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "electron-builder install-app-deps",
+    "fetch:tools": "node scripts/fetch-tools.mjs"
   },
   "build": {
     "appId": "com.hoss.echodeck",
@@ -26,12 +27,17 @@
       "main.js",
       "preload.js",
       "src/**/*",
-      "assets/**/*"
+      "assets/**/*",
+      "!assets/tools/**"
     ],
     "extraResources": [
       {
         "from": "../client/dist",
         "to": "client/dist"
+      },
+      {
+        "from": "assets/tools",
+        "to": "tools"
       }
     ],
     "win": {

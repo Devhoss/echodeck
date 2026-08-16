@@ -62,3 +62,6 @@ host/dist/
 
 # Local Android build output — released via GitHub Actions, not committed
 *.apk
+
+# Fetched at build time by host/scripts/fetch-tools.mjs (~112MB), never committed
+host/assets/tools/
