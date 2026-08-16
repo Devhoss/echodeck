@@ -46,6 +46,9 @@ db.exec(`
     -- FEATURE: Soundboard routing — 'phone' | 'pc' | 'both'
     sound_target TEXT DEFAULT 'phone',
     audio_device TEXT DEFAULT NULL,
+    -- FEATURE: Hold to confirm — guard destructive buttons (shutdown, restart)
+    -- behind a sustained press instead of a single tap.
+    require_confirm INTEGER DEFAULT 0,
     FOREIGN KEY (page_id) REFERENCES pages(id)
   );
 
@@ -98,6 +101,8 @@ if (!existingCols.includes("sound_target"))
   db.exec(`ALTER TABLE buttons ADD COLUMN sound_target TEXT DEFAULT 'phone'`);
 if (!existingCols.includes("audio_device"))
   db.exec(`ALTER TABLE buttons ADD COLUMN audio_device TEXT DEFAULT NULL`);
+if (!existingCols.includes("require_confirm"))
+  db.exec(`ALTER TABLE buttons ADD COLUMN require_confirm INTEGER DEFAULT 0`);
 
 const existingRuleCols = db
   .pragma("table_info(profile_rules)")
@@ -472,6 +477,7 @@ function updateButton(id, fields) {
     "sound_file",
     "sound_target",
     "audio_device",
+    "require_confirm",
   ];
   const toSave = { ...fields };
   if (toSave.actions !== undefined)
