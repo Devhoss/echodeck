@@ -79,6 +79,23 @@ function getAudioContext() {
   return _audioCtx;
 }
 
+// FEATURE: Soundboard — a second context so one sound can reach two devices at
+// once (a virtual cable for the call, plus your headset so you hear it too).
+// A context can only target one sink, hence the second one. It is created at
+// the main context's sample rate so a buffer decoded once plays on both.
+let _monitorCtx = null;
+function getMonitorContext() {
+  if (!_monitorCtx) {
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    try {
+      _monitorCtx = new Ctor({ sampleRate: getAudioContext().sampleRate });
+    } catch {
+      _monitorCtx = new Ctor();
+    }
+  }
+  return _monitorCtx;
+}
+
 // FEATURE: Soundboard — decoding a base64 data URL costs a fetch plus a full
 // PCM decode, which is wasteful for a soundboard pressed over and over. Keep
 // the decoded buffers around, keyed by button id plus payload length so
@@ -97,12 +114,14 @@ function cacheBuffer(key, buffer) {
 // FEATURE: Soundboard — resolving a device label to a Chromium deviceId means
 // enumerating devices, so cache it and drop the cache when devices change.
 const sinkIdByLabel = new Map();
-let appliedSinkId = null;
+// Which sink each context is currently pointed at, so repeat presses skip the
+// setSinkId round-trip. Keyed by context; there are only ever two.
+const appliedSinks = new Map();
 
 if (typeof navigator !== "undefined" && navigator.mediaDevices?.addEventListener) {
   navigator.mediaDevices.addEventListener("devicechange", () => {
     sinkIdByLabel.clear();
-    appliedSinkId = null;
+    appliedSinks.clear();
   });
 }
 
@@ -127,16 +146,36 @@ async function resolveSinkId(label) {
 async function applySink(ctx, label) {
   if (!label || typeof ctx.setSinkId !== "function") return;
   const sinkId = await resolveSinkId(label);
-  if (!sinkId || sinkId === appliedSinkId) return;
+  if (!sinkId || appliedSinks.get(ctx) === sinkId) return;
   try {
     await ctx.setSinkId(sinkId);
-    appliedSinkId = sinkId;
+    appliedSinks.set(ctx, sinkId);
   } catch (e) {
     console.warn("Could not route sound to", label, "—", e.message);
   }
 }
 
-async function playSound(dataUrl, { id, device } = {}) {
+function playBuffer(ctx, buffer) {
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(ctx.destination);
+  source.start(0);
+}
+
+// FEATURE: Soundboard — mirror a sound onto the monitor device. Never allowed
+// to disturb the primary output, so failures here are logged and swallowed.
+async function playOnMonitor(buffer, label) {
+  try {
+    const ctx = getMonitorContext();
+    if (ctx.state === "suspended") await ctx.resume();
+    await applySink(ctx, label);
+    playBuffer(ctx, buffer);
+  } catch (e) {
+    console.warn("Monitor playback failed:", e.message);
+  }
+}
+
+async function playSound(dataUrl, { id, device, monitor } = {}) {
   if (!dataUrl) return;
   try {
     const ctx = getAudioContext();
@@ -156,10 +195,10 @@ async function playSound(dataUrl, { id, device } = {}) {
       if (cacheKey) cacheBuffer(cacheKey, audioBuffer);
     }
 
-    const source = ctx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(ctx.destination);
-    source.start(0);
+    playBuffer(ctx, audioBuffer);
+
+    // Mirror to the monitor device, unless it is the one already playing.
+    if (monitor && monitor !== device) playOnMonitor(audioBuffer, monitor);
   } catch {
     // Fallback: plain <audio> element (works for mp3/wav on most Android WebViews)
     try {
@@ -279,7 +318,11 @@ export default function App() {
       // The server only sends this to the client that pressed the button,
       // so sound plays on the phone, not on every connected device.
       if (msg.t === "play_sound" && msg.sound_file) {
-        playSound(msg.sound_file, { id: msg.id, device: msg.device });
+        playSound(msg.sound_file, {
+          id: msg.id,
+          device: msg.device,
+          monitor: msg.monitor,
+        });
       }
     };
 

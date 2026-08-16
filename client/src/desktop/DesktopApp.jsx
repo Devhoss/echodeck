@@ -202,6 +202,7 @@ export default function DesktopApp({
   // what setSinkId can actually route to, so the picker has to come from here
   // rather than from the PowerShell device list used by audio_switch_device.
   const [outputDevices, setOutputDevices] = useState([]);
+  const [pcMonitorDevice, setPcMonitorDevice] = useState("");
   const [audioSettingsSaved, setAudioSettingsSaved] = useState(false);
   const [showDevices, setShowDevices] = useState(false);
   const [connectedDevices, setConnectedDevices] = useState([]);
@@ -267,6 +268,7 @@ export default function DesktopApp({
       .then((d) => {
         setAutoSwitch(d.auto_profile_switching !== false);
         setPcSoundDevice(d.pc_sound_device ?? "");
+        setPcMonitorDevice(d.pc_monitor_device ?? "");
       })
       .catch(() => {});
 
@@ -479,6 +481,14 @@ export default function DesktopApp({
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key: "pc_sound_device", value: pcSoundDevice }),
+    });
+    await fetch(`${api()}/settings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        key: "pc_monitor_device",
+        value: pcMonitorDevice,
+      }),
     });
     setAudioSettingsSaved(true);
     setTimeout(() => setAudioSettingsSaved(false), 2000);
@@ -1159,6 +1169,53 @@ export default function DesktopApp({
                   {pcSoundDevice && !outputDevices.includes(pcSoundDevice) ? (
                     <option value={pcSoundDevice}>
                       {pcSoundDevice} (not found — using default)
+                    </option>
+                  ) : null}
+                  {outputDevices.map((label) => (
+                    <option key={label} value={label}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+
+                {/* FEATURE: Soundboard — monitor output. Routing sounds into a
+                    virtual cable means you stop hearing them yourself; this
+                    plays them on a second device at the same time. */}
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: "#6b3fa0",
+                    marginBottom: 6,
+                    lineHeight: 1.6,
+                  }}
+                >
+                  Also play on <strong style={{ color: "#a855f7" }}>
+                    monitor
+                  </strong>{" "}
+                  — pick your headset here when the output above is a virtual
+                  cable, so you hear the sound too.
+                </div>
+                <select
+                  value={pcMonitorDevice}
+                  onChange={(e) => setPcMonitorDevice(e.target.value)}
+                  style={{
+                    width: "100%",
+                    background: "#0f0f1a",
+                    border: "1px solid #3b1a5c",
+                    borderRadius: 8,
+                    color: "#e0e0ec",
+                    padding: "8px 10px",
+                    fontSize: 12,
+                    marginBottom: 12,
+                    boxSizing: "border-box",
+                    outline: "none",
+                  }}
+                >
+                  <option value="">Off — don&apos;t monitor</option>
+                  {pcMonitorDevice &&
+                  !outputDevices.includes(pcMonitorDevice) ? (
+                    <option value={pcMonitorDevice}>
+                      {pcMonitorDevice} (not found)
                     </option>
                   ) : null}
                   {outputDevices.map((label) => (

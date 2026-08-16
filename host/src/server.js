@@ -105,10 +105,14 @@ app.get("/api/audio-devices", async (req, res) => {
 
 app.get("/api/settings", (req, res) => {
   const pc_sound_device = db.getSetting("pc_sound_device") ?? "";
+  // FEATURE: Soundboard — optional second output so you can hear a sound that
+  // is also being routed into a virtual cable for a call.
+  const pc_monitor_device = db.getSetting("pc_monitor_device") ?? "";
   const auto_profile_switching = db.getSetting("auto_profile_switching") ?? "1";
   const auto_switch_delay = db.getSetting("auto_switch_delay") ?? "0";
   res.json({
     pc_sound_device,
+    pc_monitor_device,
     auto_profile_switching: auto_profile_switching === "1",
     auto_switch_delay: Number(auto_switch_delay),
   });
@@ -118,6 +122,7 @@ app.post("/api/settings", (req, res) => {
   const { key, value } = req.body;
   const allowed = [
     "pc_sound_device",
+    "pc_monitor_device",
     "auto_profile_switching",
     "auto_switch_delay",
   ];
@@ -537,6 +542,7 @@ wss.on("connection", (ws, req) => {
               id: btn.id,
               sound_file: btn.sound_file,
               device: pcDevice,
+              monitor: db.getSetting("pc_monitor_device") || "",
             });
             desktopClients.forEach((client) => client.send(soundMessage));
           } else {
