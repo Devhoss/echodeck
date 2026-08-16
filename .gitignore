@@ -59,3 +59,6 @@ temp/
 
 # Electron build output — released via GitHub Actions, not committed to repo
 host/dist/
+
+# Local Android build output — released via GitHub Actions, not committed
+*.apk

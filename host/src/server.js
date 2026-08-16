@@ -512,7 +512,11 @@ wss.on("connection", (ws, req) => {
         if (target === "phone" || target === "both") {
           if (ws.readyState === 1) {
             ws.send(
-              JSON.stringify({ t: "play_sound", sound_file: btn.sound_file }),
+              JSON.stringify({
+                t: "play_sound",
+                id: btn.id,
+                sound_file: btn.sound_file,
+              }),
             );
           }
         }
@@ -523,14 +527,19 @@ wss.on("connection", (ws, req) => {
           const desktopClients = [...clients].filter(
             (client) => client.isDesktop && client.readyState === 1,
           );
+          const pcDevice =
+            btn.audio_device || db.getSetting("pc_sound_device") || "";
           if (desktopClients.length) {
+            // The renderer routes this with setSinkId. An unknown device name
+            // falls back to the default output rather than going silent.
             const soundMessage = JSON.stringify({
               t: "play_sound",
+              id: btn.id,
               sound_file: btn.sound_file,
+              device: pcDevice,
             });
             desktopClients.forEach((client) => client.send(soundMessage));
           } else {
-            const pcDevice = db.getSetting("pc_sound_device") ?? "";
             playAudioOnDevice(btn.sound_file, pcDevice).catch((e) =>
               console.error("PC sound error:", e.message),
             );
@@ -585,7 +594,13 @@ wss.on("connection", (ws, req) => {
       const generation = (holdGenerations.get(ws) ?? 0) + 1;
       holdGenerations.set(ws, generation);
 
-      const { direction, step = 2 } = msg;
+      const { direction } = msg;
+      // Clamp to the same range the editor offers. Older phone builds send a
+      // hardcoded 2 and omit nothing, so a missing step still needs a default.
+      const step = Math.min(
+        20,
+        Math.max(1, parseInt(msg.step, 10) || 5),
+      );
       const actionType = direction === "up" ? "volume_up" : "volume_down";
 
       // One real OS read to seed our local estimate
