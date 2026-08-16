@@ -58,10 +58,10 @@
     "active-win": "^8.2.1",
     "better-sqlite3": "^12.10.0",
     "express": "^5.2.1",
-    "loudness": "^0.4.2",
     "robotjs": "^0.7.1",
     "uuid": "^8.3.2",
     "voicemeeter-connector": "^2.2.0",
+    "win-audio": "^3.0.5",
     "ws": "^8.20.1"
   }
 }

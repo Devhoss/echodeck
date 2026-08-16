@@ -22,19 +22,22 @@ function hasVoicemeeterRemoteRegistry() {
   }
 }
 
-// FEATURE: Volume controls — loudness (Windows Core Audio fallback)
-let loudness;
+// FEATURE: Volume controls — win-audio (Windows Core Audio fallback).
+// Native addon: reads/writes happen in-process. The previous `loudness`
+// package shelled out to a helper .exe per call, which piled up hundreds of
+// processes during a volume hold and made read-modify-write non-atomic.
+let speaker;
 try {
-  loudness = require("loudness");
+  ({ speaker } = require("win-audio"));
 } catch {
   console.warn(
-    "⚠️  loudness not installed — volume actions won't work. Run: npm install loudness",
+    "⚠️  win-audio not installed — volume actions won't work. Run: npm install win-audio",
   );
 }
 
 // FEATURE: Volume controls — Voicemeeter API (primary when Voicemeeter is running)
 // voicemeeter-connector talks directly to Voicemeeter's COM API
-// If Voicemeeter is not installed/running, all calls gracefully fall back to loudness
+// If Voicemeeter is not installed/running, all calls gracefully fall back to win-audio
 let voicemeeter;
 let Voicemeeter;
 let BusProperties;
@@ -52,7 +55,7 @@ if (voicemeeterDisabled) {
   } catch {
     voicemeeterDisabled = true;
     console.warn(
-      "⚠️  voicemeeter-connector not installed — will use loudness for volume. Run: npm install voicemeeter-connector",
+      "⚠️  voicemeeter-connector not installed — will use win-audio for volume. Run: npm install voicemeeter-connector",
     );
   }
 }
@@ -138,13 +141,11 @@ async function withVoicemeeter(fn) {
 }
 
 // ---------------------------------------------------------------------------
-// Exported volume functions — Voicemeeter-first, loudness fallback
+// Exported volume functions — Voicemeeter-first, win-audio fallback
 // ---------------------------------------------------------------------------
 
 async function getVolume() {
-  // Try Voicemeeter first
   const vol = await withVoicemeeter(async (vm) => {
-    // Bus[0] is the A1 master bus
     const gain = vm.getBusParameter(0, BusProperties.Gain);
     const muted = vm.getBusParameter(0, BusProperties.Mute);
     if (muted) return 0;
@@ -152,26 +153,24 @@ async function getVolume() {
   });
   if (vol !== null) return vol;
 
-  // Fallback: loudness (Windows Core Audio)
-  if (!loudness) return null;
+  // Fallback: win-audio (synchronous, no process spawn)
+  if (!speaker) return null;
   try {
-    return await loudness.getVolume();
+    return speaker.get();
   } catch {
     return null;
   }
 }
 
 async function getMuted() {
-  // Try Voicemeeter first
   const muted = await withVoicemeeter(async (vm) => {
     return !!vm.getBusParameter(0, BusProperties.Mute);
   });
   if (muted !== null) return muted;
 
-  // Fallback: loudness
-  if (!loudness) return null;
+  if (!speaker) return null;
   try {
-    return await loudness.getMuted();
+    return speaker.isMuted();
   } catch {
     return null;
   }
@@ -395,15 +394,6 @@ async function switchAudioDeviceFast(deviceName) {
   });
 }
 
-if (process.platform === "win32") {
-  const audioSwitchWarmup = setTimeout(() => {
-    getAudioSwitchHelper().catch((e) => {
-      console.warn("⚠️  Audio switch helper unavailable:", e.message);
-    });
-  }, 500);
-  audioSwitchWarmup.unref?.();
-}
-
 // ---------------------------------------------------------------------------
 // FEATURE: Audio output switching — list Windows playback devices
 // ---------------------------------------------------------------------------
@@ -578,17 +568,39 @@ async function playAudioOnDevice(dataUrl, deviceName) {
       env.AUDIODEV = deviceName.trim();
     }
 
+    // The release build can bundle ffplay in resources/tools. The PATH fallback
+    // keeps local development working, but logs a clear error if neither exists.
+    const bundledFfplay = process.resourcesPath
+      ? path.join(process.resourcesPath, "tools", "ffplay.exe")
+      : path.join(__dirname, "..", "assets", "tools", "ffplay.exe");
+    const ffplay = fs.existsSync(bundledFfplay) ? bundledFfplay : "ffplay";
+
     console.log(`🎵 Playing sound → ${deviceName || "system default"}`);
-    const proc = spawn("ffplay", args, {
+    const proc = spawn(ffplay, args, {
       env,
       detached: false,
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let errorOutput = "";
+    proc.stderr?.on("data", (chunk) => {
+      errorOutput += chunk.toString();
     });
     proc.on("error", (err) => {
-      console.error("ffplay error:", err.message);
+      console.error(
+        "Soundboard playback failed:",
+        err.code === "ENOENT"
+          ? "ffplay.exe is missing. Bundle it in resources/tools/ffplay.exe."
+          : err.message,
+      );
       resolve();
     });
-    proc.on("close", () => {
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        console.error(
+          "Soundboard playback failed:",
+          errorOutput.trim() || `ffplay exited with code ${code}`,
+        );
+      }
       try {
         fs.unlinkSync(tmpFile);
       } catch {
@@ -617,7 +629,7 @@ function executeAction(type, value) {
       return;
     }
 
-    // FEATURE: Volume controls — Voicemeeter-first, loudness fallback
+    // FEATURE: Volume controls — Voicemeeter-first, win-audio fallback
     if (type === "volume_set") {
       const level = Math.max(0, Math.min(100, parseInt(value) || 50));
       withVoicemeeter(async (vm) => {
@@ -626,13 +638,8 @@ function executeAction(type, value) {
         return true;
       }).then((ok) => {
         if (ok !== null) return resolve();
-        // fallback to loudness
-        return (
-          loudness
-            ?.setVolume(level)
-            .then(resolve)
-            .catch(() => resolve()) ?? resolve()
-        );
+        // fallback to win-audio
+        return speaker ? (speaker.set(level), resolve()) : resolve();
       });
       return;
     }
@@ -651,13 +658,9 @@ function executeAction(type, value) {
         return true;
       }).then((ok) => {
         if (ok !== null) return resolve();
-        return (
-          loudness
-            ?.getVolume()
-            .then((v) => loudness.setVolume(Math.min(100, v + step)))
-            .then(resolve)
-            .catch(() => resolve()) ?? resolve()
-        );
+        return speaker
+          ? (speaker.set(Math.min(100, speaker.get() + step)), resolve())
+          : resolve();
       });
       return;
     }
@@ -672,13 +675,9 @@ function executeAction(type, value) {
         return true;
       }).then((ok) => {
         if (ok !== null) return resolve();
-        return (
-          loudness
-            ?.getVolume()
-            .then((v) => loudness.setVolume(Math.max(0, v - step)))
-            .then(resolve)
-            .catch(() => resolve()) ?? resolve()
-        );
+        return speaker
+          ? (speaker.set(Math.max(0, speaker.get() - step)), resolve())
+          : resolve();
       });
       return;
     }
@@ -690,13 +689,9 @@ function executeAction(type, value) {
         return true;
       }).then((ok) => {
         if (ok !== null) return resolve();
-        return (
-          loudness
-            ?.getMuted()
-            .then((m) => loudness.setMuted(!m))
-            .then(resolve)
-            .catch(() => resolve()) ?? resolve()
-        );
+        return speaker
+          ? (speaker.isMuted() ? speaker.unmute() : speaker.mute(), resolve())
+          : resolve();
       });
       return;
     }
