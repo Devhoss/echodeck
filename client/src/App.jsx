@@ -1,12 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  memo,
+} from "react";
 import ReconnectingWebSocket from "reconnecting-websocket";
-import { DndContext, closestCenter } from "@dnd-kit/core";
 import { Haptics, ImpactStyle } from "@capacitor/haptics";
-import { useSortable } from "@dnd-kit/sortable";
 import deck from "/deck-icon.png";
 import disconnect from "/disconnect.svg";
 import DesktopApp from "./desktop/DesktopApp.jsx";
-import { CSS } from "@dnd-kit/utilities";
 import {
   isPaired,
   setPairConfig,
@@ -17,11 +22,6 @@ import {
 } from "./constants.js";
 import PairingScreen from "./PairingScreen.jsx";
 import { Icon } from "./icons.jsx";
-import {
-  SortableContext,
-  rectSortingStrategy,
-  arrayMove,
-} from "@dnd-kit/sortable";
 
 const globalStyles = `
   @keyframes pulse {
@@ -242,7 +242,6 @@ export default function App() {
   const wsRef = useRef(null);
   const lastMessageAtRef = useRef(0);
   const pageButtonsCacheRef = useRef(new Map());
-  const reorderTimer = useRef(null);
   const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
   const [pairedHost, setPairedHost] = useState(() => {
     loadPairConfig();
@@ -437,7 +436,10 @@ export default function App() {
     return { cols, rows: Math.ceil(count / cols) };
   }, [buttons.length]);
 
-  useEffect(() => {
+  // Layout effect, not effect: the column count changes the moment a profile
+  // switches, so the size has to be right before the browser paints or the deck
+  // draws one frame of new columns at the old page's key size.
+  useLayoutEffect(() => {
     const el = deckRef.current;
     if (!el) return;
     const measure = () => {
@@ -451,7 +453,10 @@ export default function App() {
       const box = el.getBoundingClientRect();
       const w = (box.width - padX - (layout.cols - 1) * gap) / layout.cols;
       const h = (box.height - padY - (layout.rows - 1) * gap) / layout.rows;
-      const next = Math.max(44, Math.floor(Math.min(w, h)));
+      // Cap as well as floor: a four-key profile should not blow its keys up to
+      // fill the screen. Real decks keep a consistent key size whatever the
+      // page holds.
+      const next = Math.min(132, Math.max(44, Math.floor(Math.min(w, h))));
       setKeySize((prev) => (Math.abs(prev - next) > 1 ? next : prev));
     };
     measure();
@@ -567,39 +572,7 @@ export default function App() {
   );
 
 
-  const handleDragEnd = useCallback(
-    (event) => {
-      const { active, over } = event;
-      if (!over || active.id === over.id) return;
-      setButtons((prev) => {
-        const oldIndex = prev.findIndex((b) => b.id === active.id);
-        const newIndex = prev.findIndex((b) => b.id === over.id);
-        const reordered = arrayMove(prev, oldIndex, newIndex).map((btn, i) => ({
-          ...btn,
-          position: i,
-        }));
-        if (currentPage)
-          pageButtonsCacheRef.current.set(currentPage, reordered);
-        clearTimeout(reorderTimer.current);
-        reorderTimer.current = setTimeout(() => {
-          wsRef.current?.send(
-            JSON.stringify({
-              v: 1,
-              t: "reorder_buttons",
-              buttons: reordered.map((b) => ({
-                id: b.id,
-                position: b.position,
-              })),
-            }),
-          );
-        }, 300);
-        return reordered;
-      });
-    },
-    [currentPage],
-  );
 
-  const buttonIds = useMemo(() => buttons.map((b) => b.id), [buttons]);
 
   const params = new URLSearchParams(window.location.search);
   const forceDesktop =
@@ -810,8 +783,6 @@ export default function App() {
       </div>
 
       {/* FEATURE: Custom button size — 2x2 buttons use gridColumn/gridRow span 2 */}
-      <DndContext collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-        <SortableContext items={buttonIds} strategy={rectSortingStrategy}>
           {/* Container */}
           <div
             ref={deckRef}
@@ -847,8 +818,6 @@ export default function App() {
               />
             ))}
           </div>
-        </SortableContext>
-      </DndContext>
 
       {/* FEATURE: Deck layout — swipe changes page; the dots do the same by tap,
           so the deck is never gesture-only. */}
@@ -1094,14 +1063,9 @@ const SortableButton = memo(function SortableButton({
   onVolumeHoldStop,
   onConfirmHoldStart,
 }) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id: btn.id });
+  // Reordering lives on the desktop; on the phone a key is only ever pressed,
+  // which leaves horizontal swipes free to page between profiles.
+  const isDragging = false;
 
   const [ripple, setRipple] = useState(null);
   // FEATURE: Hold to confirm — local to the tile; nothing above needs to know.
@@ -1130,7 +1094,6 @@ const SortableButton = memo(function SortableButton({
   const hasSound = !!btn.sound_file;
 
   const mergedTransition = [
-    transition,
     "box-shadow 0.15s ease",
     "background 0.15s ease",
     "scale 0.1s ease",
@@ -1218,21 +1181,13 @@ const SortableButton = memo(function SortableButton({
 
   return (
     <div
-      ref={setNodeRef}
-      {...attributes}
       onClick={handleClick}
       onPointerDown={handlePointerDown}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
       style={{
         ...sizeStyle,
-        transform:
-          [
-            transform ? CSS.Transform.toString(transform) : null,
-            isDragging ? "scale(1.06)" : pressing ? "scale(0.96)" : null,
-          ]
-            .filter(Boolean)
-            .join(" ") || undefined,
+        transform: pressing ? "scale(0.96)" : undefined,
         transition: mergedTransition,
         zIndex: isDragging ? 999 : "auto",
         width: "100%",
@@ -1329,27 +1284,6 @@ const SortableButton = memo(function SortableButton({
         </div>
       )}
 
-      {/* Drag handle */}
-      <div
-        {...listeners}
-        className="drag-handle"
-        style={{
-          position: "absolute",
-          top: 7,
-          right: 7,
-          width: 18,
-          height: 18,
-          zIndex: 10,
-          cursor: "grab",
-          borderRadius: 6,
-          background: isDragging
-            ? "rgba(255,255,255,0.14)"
-            : "rgba(255,255,255,0.04)",
-          border: "1px solid rgba(255,255,255,0.07)",
-          opacity: isDragging ? 1 : 0,
-          transition: "opacity 0.2s ease",
-        }}
-      />
 
       {/* Icon */}
       <div
