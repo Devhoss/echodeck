@@ -276,7 +276,6 @@ export default function App() {
     const wsUrl = getWsUrl();
     if (!wsUrl) return;
 
-
     lastMessageAtRef.current = Date.now();
     const ws = new ReconnectingWebSocket(getWsUrl(), [], {
       maxRetryTime: 10000,
@@ -658,36 +657,13 @@ export default function App() {
           borderBottom: "1px solid #2a2a2e",
         }}
       >
-        <div
-          style={{
-            width: 28,
-            height: 28,
-            borderRadius: 8,
-            background: "linear-gradient(135deg, #6c63ff, #3b82f6)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 14,
-            fontWeight: 900,
-            color: "#fff",
-            letterSpacing: -1,
-            boxShadow: "0 0 12px #6c63ff55",
-            flexShrink: 0,
-          }}
-        >
-          <img
-            src={deck}
-            width={24}
-            height={24}
-            style={{
-              borderRadius: 8,
-              flexShrink: 0,
-              display: "block",
-              boxShadow: "0 0 12px #6c63ff55",
-            }}
-            draggable={false}
-          />
-        </div>
+        <img
+          src={deck}
+          width={28}
+          height={28}
+          style={{ borderRadius: 8, flexShrink: 0, display: "block" }}
+          draggable={false}
+        />
 
         <span
           style={{
@@ -1014,9 +990,15 @@ function VolumePill({ volume, muted }) {
         transition: "all 0.3s ease",
       }}
     >
-      <span style={{ color: muted ? "#f87171" : "#888" }}>
-        <Icon name="sound" size={13} />
-      </span>
+      <Icon
+        name="sound"
+        size={13}
+        style={{
+          display: "block",
+          flexShrink: 0,
+          color: muted ? "#f87171" : "#888",
+        }}
+      />
       <div
         style={{
           width: 32,

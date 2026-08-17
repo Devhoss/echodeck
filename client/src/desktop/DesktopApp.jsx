@@ -145,7 +145,7 @@ const globalStyles = `
     border-radius: 7px;
     padding: 7px 10px;
     font-size: 12px;
-    font-family: 'DM Sans', system-ui, sans-serif;
+    font-family: var(--font-sans);
     width: 100%;
     outline: none;
     transition: border-color 0.15s, box-shadow 0.15s;
@@ -157,7 +157,7 @@ const globalStyles = `
   input[type=color] { padding:2px; height:26px; width:26px; cursor:pointer; border-radius:5px; }
   select option { background: #222222; }
 
-  button { font-family: 'DM Sans', system-ui, sans-serif; }
+  button { font-family: var(--font-sans); }
 `;
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -197,6 +197,36 @@ export default function DesktopApp({
   const [inputDevices, setInputDevices] = useState([]);
   const [audioSessions, setAudioSessions] = useState([]);
   const [applications, setApplications] = useState([]);
+  const [appIcons, setAppIcons] = useState({});
+  // Ids already asked for, so a re-render cannot queue the same request twice
+  // while the first is still in flight.
+  const iconsRequested = useRef(new Set());
+
+  // Called by whatever is rendering application rows, with the ids it is about
+  // to show. Extraction costs roughly 180ms an icon, so asking for the whole
+  // list would take half a minute for rows nobody is looking at.
+  const ensureAppIcons = useCallback((ids) => {
+    const missing = ids.filter((id) => id && !iconsRequested.current.has(id));
+    if (!missing.length) return;
+    missing.forEach((id) => iconsRequested.current.add(id));
+
+    fetch(`${api()}/applications/icons`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: missing }),
+    })
+      .then((r) => r.json())
+      .then((map) => {
+        if (map && typeof map === "object" && Object.keys(map).length) {
+          setAppIcons((prev) => ({ ...prev, ...map }));
+        }
+      })
+      .catch(() => {
+        // Let them be retried: a failed fetch should not permanently blank an
+        // icon for the rest of the session.
+        missing.forEach((id) => iconsRequested.current.delete(id));
+      });
+  }, []);
   // `refresh` rebuilds the host's cache, which costs a few seconds; the plain
   // call serves whatever is already there.
   const loadApplications = useCallback(
@@ -532,13 +562,16 @@ export default function DesktopApp({
     }
   }
 
-  async function reloadPages() {
+  // Memoised because two useCallbacks below depend on it. As a plain function
+  // in the component body it was a new reference every render, so those two
+  // memoised nothing at all — they were recreated on every keystroke in the
+  // property drawer along with everything that depended on them.
+  const reloadPages = useCallback(async () => {
     const res = await fetch(`${api()}/pages`);
     const data = await res.json();
     setPages(data);
-
     return data;
-  }
+  }, [setPages]);
 
   async function deletePage(id) {
     askConfirm("Delete this page and all its buttons?", async () => {
@@ -1126,6 +1159,8 @@ export default function DesktopApp({
               inputDevices={inputDevices}
               audioSessions={audioSessions}
               applications={applications}
+              appIcons={appIcons}
+              onNeedIcons={ensureAppIcons}
               onRefreshApplications={() => loadApplications(true)}
               onPatch={patchForm}
               onSave={saveButton}
@@ -1137,7 +1172,11 @@ export default function DesktopApp({
             />
           </div>
 
-          <ActionLibrary applications={applications} />
+          <ActionLibrary
+            applications={applications}
+            appIcons={appIcons}
+            onNeedIcons={ensureAppIcons}
+          />
         </DndContext>
       </div>
       {showQR && (
@@ -2029,7 +2068,7 @@ const ActionRow = memo(function ActionRow({ action }) {
 // Takes no props at all, so memo pins it to a single render. It was rebuilding
 // its whole list — every category and every draggable row — each time an
 // unrelated piece of DesktopApp state changed.
-const AppRow = memo(function AppRow({ app }) {
+const AppRow = memo(function AppRow({ app, icon }) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `app:${app.id}`,
   });
@@ -2044,7 +2083,13 @@ const AppRow = memo(function AppRow({ app }) {
       }}
       title={app.id}
     >
-      <ActionIcon name="rocket" size={15} />
+      {icon ? (
+        <img src={icon} width={16} height={16} alt="" style={styles.appIcon} />
+      ) : (
+        // The rocket holds the slot while the icon is still being extracted, so
+        // rows do not shift sideways as they arrive.
+        <ActionIcon name="rocket" size={15} />
+      )}
       <span style={styles.actionRowName}>{app.name}</span>
       {app.packaged ? <span style={styles.appTag}>Store</span> : null}
       <span style={styles.actionRowGrip}>
@@ -2058,7 +2103,11 @@ const AppRow = memo(function AppRow({ app }) {
 // scrolls, and the search field above is the way in.
 const APP_PREVIEW_LIMIT = 30;
 
-const ActionLibrary = memo(function ActionLibrary({ applications }) {
+const ActionLibrary = memo(function ActionLibrary({
+  applications,
+  appIcons,
+  onNeedIcons,
+}) {
   const [query, setQuery] = useState("");
   const [collapsed, setCollapsed] = useState(() => new Set());
   const [appsExpanded, setAppsExpanded] = useState(false);
@@ -2085,6 +2134,16 @@ const ActionLibrary = memo(function ActionLibrary({ applications }) {
     ? appMatches.slice(0, 60)
     : appMatches.slice(0, APP_PREVIEW_LIMIT);
   const appsOpen = q ? true : appsExpanded;
+
+  // Only what is on screen: closed group, no request; searching, just the
+  // matches. The ids are joined into the dependency so a changed *set* triggers
+  // a fetch but a re-render with the same set does not.
+  const shownIds = appsOpen ? appsShown.map((a) => a.id) : [];
+  const shownKey = shownIds.join("|");
+  useEffect(() => {
+    if (shownIds.length) onNeedIcons(shownIds);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shownKey, onNeedIcons]);
 
   const total =
     groups.reduce((n, g) => n + g.actions.length, 0) + appMatches.length;
@@ -2181,7 +2240,11 @@ const ActionLibrary = memo(function ActionLibrary({ applications }) {
             {appsOpen ? (
               <div style={styles.catItems}>
                 {appsShown.map((appItem) => (
-                  <AppRow key={appItem.id} app={appItem} />
+                  <AppRow
+                    key={appItem.id}
+                    app={appItem}
+                    icon={appIcons[appItem.id]}
+                  />
                 ))}
                 {appMatches.length > appsShown.length ? (
                   <div style={styles.appMore}>
@@ -3213,7 +3276,7 @@ function ButtonTile({
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
             borderRadius: "0 0 13px 13px",
-            fontFamily: "'DM Sans', system-ui, sans-serif",
+            fontFamily: "var(--font-sans)",
           }}
         >
           {btn.label}
@@ -3269,7 +3332,15 @@ function useCoalescedPatch(onPatch) {
  * cannot cover is an unregistered portable executable, which is why the manual
  * path stays underneath rather than being replaced.
  */
-function ApplicationField({ field, value, applications, onRefresh, onChange }) {
+function ApplicationField({
+  field,
+  value,
+  applications,
+  appIcons,
+  onNeedIcons,
+  onRefresh,
+  onChange,
+}) {
   const [query, setQuery] = useState("");
   const [refreshing, setRefreshing] = useState(false);
 
@@ -3285,6 +3356,13 @@ function ApplicationField({ field, value, applications, onRefresh, onChange }) {
       : applications;
     return pool.slice(0, q ? 60 : 40);
   }, [applications, query]);
+
+  const listedIds = matches.map((a) => a.id);
+  const listedKey = listedIds.join("|");
+  useEffect(() => {
+    if (listedIds.length) onNeedIcons(listedIds);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listedKey, onNeedIcons]);
 
   const refresh = async () => {
     setRefreshing(true);
@@ -3340,6 +3418,19 @@ function ApplicationField({ field, value, applications, onRefresh, onChange }) {
                   onClick={() => onChange({ [field.key]: appItem.id })}
                   title={appItem.id}
                 >
+                  {appIcons[appItem.id] ? (
+                    <img
+                      src={appIcons[appItem.id]}
+                      width={16}
+                      height={16}
+                      alt=""
+                      style={styles.appIcon}
+                    />
+                  ) : (
+                    // An empty box of the same size, so rows do not shift
+                    // sideways as icons arrive.
+                    <span style={styles.appIcon} />
+                  )}
                   <span style={styles.appName}>{appItem.name}</span>
                   {appItem.packaged && <span style={styles.appTag}>Store</span>}
                 </button>
@@ -3392,6 +3483,8 @@ function PropertyPanel({
   inputDevices,
   audioSessions,
   applications,
+  appIcons,
+  onNeedIcons,
   onRefreshApplications,
   onPatch,
   onSave,
@@ -3672,6 +3765,8 @@ function PropertyPanel({
             inputDevices={inputDevices}
             audioSessions={audioSessions}
             applications={applications}
+            appIcons={appIcons}
+            onNeedIcons={onNeedIcons}
             onRefreshApplications={onRefreshApplications}
           />
         ) : null}
@@ -3727,6 +3822,8 @@ function PropertyPanel({
                 inputDevices={inputDevices}
                 audioSessions={audioSessions}
                 applications={applications}
+                appIcons={appIcons}
+                onNeedIcons={onNeedIcons}
                 onRefreshApplications={onRefreshApplications}
               />
             ) : null}
@@ -3774,6 +3871,8 @@ function PropertyPanel({
                 inputDevices={inputDevices}
                 audioSessions={audioSessions}
                 applications={applications}
+                appIcons={appIcons}
+                onNeedIcons={onNeedIcons}
                 onRefreshApplications={onRefreshApplications}
               />
             ) : null}
@@ -3826,6 +3925,8 @@ function PropertyPanel({
                   inputDevices={inputDevices}
                   audioSessions={audioSessions}
                   applications={applications}
+                  appIcons={appIcons}
+                  onNeedIcons={onNeedIcons}
                   onRefreshApplications={onRefreshApplications}
                 />
                 <ActionStackEditor
@@ -3836,6 +3937,8 @@ function PropertyPanel({
                   inputDevices={inputDevices}
                   audioSessions={audioSessions}
                   applications={applications}
+                  appIcons={appIcons}
+                  onNeedIcons={onNeedIcons}
                   onRefreshApplications={onRefreshApplications}
                 />
               </>
@@ -3942,6 +4045,8 @@ function ActionEditor({
   inputDevices,
   audioSessions,
   applications,
+  appIcons,
+  onNeedIcons,
   onRefreshApplications,
 }) {
   return (
@@ -3959,6 +4064,8 @@ function ActionEditor({
         inputDevices={inputDevices}
         audioSessions={audioSessions}
         applications={applications}
+        appIcons={appIcons}
+        onNeedIcons={onNeedIcons}
         onRefreshApplications={onRefreshApplications}
       />
     </>
@@ -3972,6 +4079,8 @@ function ActionFields({
   inputDevices,
   audioSessions,
   applications,
+  appIcons,
+  onNeedIcons,
   onRefreshApplications,
 }) {
   const meta = ACTION_BY_ID[action.action_type] || ACTION_BY_ID.keystroke;
@@ -3987,6 +4096,8 @@ function ActionFields({
           inputDevices={inputDevices}
           audioSessions={audioSessions}
           applications={applications}
+          appIcons={appIcons}
+          onNeedIcons={onNeedIcons}
           onRefreshApplications={onRefreshApplications}
         />
       ))}
@@ -4002,6 +4113,8 @@ function ActionField({
   inputDevices,
   audioSessions,
   applications,
+  appIcons,
+  onNeedIcons,
   onRefreshApplications,
 }) {
   const value = action[field.key] || "";
@@ -4158,6 +4271,8 @@ function ActionField({
         field={field}
         value={value}
         applications={applications}
+        appIcons={appIcons}
+        onNeedIcons={onNeedIcons}
         onRefreshApplications={onRefreshApplications}
         onRefresh={onRefreshApplications}
         onChange={onChange}
@@ -4212,6 +4327,8 @@ function ActionStackEditor({
   inputDevices,
   audioSessions,
   applications,
+  appIcons,
+  onNeedIcons,
   onRefreshApplications,
 }) {
   const safeActions = actions || [];
@@ -4271,6 +4388,8 @@ function ActionStackEditor({
               inputDevices={inputDevices}
               audioSessions={audioSessions}
               applications={applications}
+              appIcons={appIcons}
+              onNeedIcons={onNeedIcons}
               onRefreshApplications={onRefreshApplications}
             />
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -4312,7 +4431,7 @@ const styles = {
     flexDirection: "column",
     height: "100dvh",
     background: "#161616",
-    fontFamily: "'DM Sans', system-ui, sans-serif",
+    fontFamily: "var(--font-sans)",
     color: "#cecece",
     overflow: "hidden",
   },
@@ -4655,6 +4774,14 @@ const styles = {
     borderRadius: 3,
     background: "var(--bg-hover)",
     color: "var(--text-muted)",
+  },
+  // A fixed box whether or not the image has arrived, so nothing reflows.
+  appIcon: {
+    width: 16,
+    height: 16,
+    flexShrink: 0,
+    objectFit: "contain",
+    display: "block",
   },
   appMore: {
     padding: "6px 9px",
@@ -5177,7 +5304,7 @@ const ruleStyles = {
     padding: "4px 8px",
     fontSize: 10,
     fontWeight: 600,
-    fontFamily: "'DM Sans', system-ui, sans-serif",
+    fontFamily: "var(--font-sans)",
   },
   dangerBtn: {
     background: "#1f0a0a",
@@ -5188,7 +5315,7 @@ const ruleStyles = {
     padding: "4px 8px",
     fontSize: 10,
     fontWeight: 600,
-    fontFamily: "'DM Sans', system-ui, sans-serif",
+    fontFamily: "var(--font-sans)",
   },
   settingsRow: {
     display: "grid",
@@ -5200,7 +5327,7 @@ const ruleStyles = {
     fontSize: 10,
     color: "#4f4f4f",
     fontWeight: 700,
-    fontFamily: "'DM Sans', system-ui, sans-serif",
+    fontFamily: "var(--font-sans)",
   },
   compactSelect: {
     background: "#202020",
@@ -5210,7 +5337,7 @@ const ruleStyles = {
     padding: "4px 6px",
     fontSize: 11,
     outline: "none",
-    fontFamily: "'DM Sans', system-ui, sans-serif",
+    fontFamily: "var(--font-sans)",
     boxSizing: "border-box",
   },
   compactInput: {
@@ -5223,7 +5350,7 @@ const ruleStyles = {
     outline: "none",
     width: 52,
     boxSizing: "border-box",
-    fontFamily: "'DM Sans', system-ui, sans-serif",
+    fontFamily: "var(--font-sans)",
   },
   condSelect: {
     background: "#202020",
@@ -5263,7 +5390,7 @@ const ruleStyles = {
     boxSizing: "border-box",
     width: "100%",
     minWidth: 0,
-    fontFamily: "DM Sans, system-ui, sans-serif",
+    fontFamily: "var(--font-sans)",
   },
   removeCondBtn: {
     width: 14,
@@ -5289,7 +5416,7 @@ const ruleStyles = {
     padding: "4px 8px",
     fontSize: 10,
     fontWeight: 600,
-    fontFamily: "'DM Sans', system-ui, sans-serif",
+    fontFamily: "var(--font-sans)",
   },
   delayRow: {
     background: "#181818",
@@ -5337,7 +5464,7 @@ const ruleStyles = {
     color: "#cecece",
     cursor: "pointer",
     padding: "7px 10px",
-    fontFamily: "'DM Sans', system-ui, sans-serif",
+    fontFamily: "var(--font-sans)",
   },
   pickerProcess: {
     fontSize: 11,
