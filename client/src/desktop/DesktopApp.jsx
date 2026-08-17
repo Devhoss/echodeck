@@ -175,6 +175,7 @@ export default function DesktopApp({
   micVolume,
   micMuted,
   sessions,
+  showLabels,
   wsRef,
   switchPage,
   pageButtonsCacheRef,
@@ -210,7 +211,6 @@ export default function DesktopApp({
   const [openWindows, setOpenWindows] = useState([]);
   const [showAppPicker, setShowAppPicker] = useState(false);
   const [captureCountdown, setCaptureCountdown] = useState(0);
-  const [showLabels, setShowLabels] = useState(false);
   const [showAudioSettings, setShowAudioSettings] = useState(false);
   const [pcSoundDevice, setPcSoundDevice] = useState("");
   // FEATURE: Soundboard — real output devices as Chromium sees them. These are
@@ -370,7 +370,6 @@ export default function DesktopApp({
         setAutoSwitch(d.auto_profile_switching !== false);
         setPcSoundDevice(d.pc_sound_device ?? "");
         setPcMonitorDevice(d.pc_monitor_device ?? "");
-        setShowLabels(d.deck_show_labels === true);
       })
       .catch(() => {});
 
@@ -980,18 +979,17 @@ export default function DesktopApp({
                 onOpenRules={() => setShowRules(true)}
                 showLabels={showLabels}
                 onToggleLabels={() => {
-                  // Optimistic locally, then persisted — the host broadcasts it
-                  // back so the phone picks it up on the same change.
-                  const next = !showLabels;
-                  setShowLabels(next);
+                  // No optimistic copy: the host broadcasts the change straight
+                  // back over the socket it is already holding open, so every
+                  // surface flips from the same message.
                   fetch(`${api()}/settings`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                       key: "deck_show_labels",
-                      value: next,
+                      value: !showLabels,
                     }),
-                  }).catch(() => setShowLabels(!next));
+                  }).catch(() => {});
                 }}
                 addingPage={addingPage}
                 setAddingPage={setAddingPage}

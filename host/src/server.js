@@ -176,6 +176,10 @@ app.get("/api/settings", (req, res) => {
   });
 });
 
+// Settings that change what a client renders, as opposed to how the host
+// behaves. These are broadcast; the rest are read on demand.
+const DECK_SETTINGS = new Set(["deck_show_labels"]);
+
 app.post("/api/settings", (req, res) => {
   const { key, value } = req.body;
   const allowed = [
@@ -195,6 +199,11 @@ app.post("/api/settings", (req, res) => {
         : "0"
       : String(value ?? ""),
   );
+  // Some settings describe the deck itself rather than the host, so every
+  // connected client needs to hear about them. Without this the phone only
+  // picked up a label change on the next button save, which is what made the
+  // toggle look like it did nothing.
+  if (DECK_SETTINGS.has(key)) broadcastState();
   res.json({ ok: true });
 });
 
