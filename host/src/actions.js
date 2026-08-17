@@ -670,14 +670,30 @@ function executeAction(type, value) {
           }
           case "launch": {
             const { spawn } = require("child_process");
-            const child = spawn(
-              "cmd.exe",
-              ["/c", "start", "", value.replace(/^"|"$/g, "").trim()],
-              {
-                detached: true,
-                stdio: "ignore",
-              },
-            );
+            const target = value.replace(/^"|"$/g, "").trim();
+            if (!target) break;
+
+            // Two shapes reach here. Buttons made before the app picker hold a
+            // filesystem path; buttons made with it hold an AppsFolder
+            // identifier, which may be an AUMID, a progID or a
+            // "{KNOWNFOLDERID}\relative" reference. Only a real absolute path
+            // can go through `start`; everything else has to be launched by the
+            // shell, which is the only thing that knows what those ids mean.
+            // Either separator: the manual path field is free text, and a
+            // pasted C:/tools/app.exe is still a path even though nothing on
+            // Windows writes it that way.
+            const isPath =
+              /^[a-zA-Z]:[\\/]/.test(target) || target.startsWith("\\\\");
+            const child = isPath
+              ? spawn("cmd.exe", ["/c", "start", "", target], {
+                  detached: true,
+                  stdio: "ignore",
+                })
+              : spawn("explorer.exe", [`shell:AppsFolder\\${target}`], {
+                  detached: true,
+                  stdio: "ignore",
+                });
+
             child.on("error", (err) =>
               console.error("Launch error:", err.message),
             );

@@ -69,12 +69,15 @@ export const ACTION_REGISTRY = [
     icon: "rocket",
     category: "System",
     defaults: { action_value: "" },
+    // The stored value is either an AppsFolder identifier from the picker or a
+    // path typed by hand. The editor resolves ids back to an application name
+    // where it can; anything unresolved is shown as-is rather than hidden.
     summary: (action) => action.action_value || "No app selected",
     fields: [
       {
-        type: "file",
+        type: "application",
         key: "action_value",
-        label: "Application path",
+        label: "Application",
         placeholder: "C:\\Path\\To\\App.exe",
       },
     ],
@@ -431,6 +434,17 @@ export function actionTypeLabel(type) {
  */
 export function actionIconFor(type) {
   return ACTION_BY_ID[type]?.icon ?? null;
+}
+
+/**
+ * A stored Launch App value is a filesystem path when it starts with a drive
+ * letter or a UNC prefix, and an AppsFolder identifier otherwise. The host makes
+ * the same distinction when launching; this exists so the editor can label the
+ * two differently without duplicating the rule.
+ */
+export function isFilesystemPath(value) {
+  const v = String(value ?? "").trim();
+  return /^[a-zA-Z]:[\\/]/.test(v) || v.startsWith("\\\\");
 }
 
 /** The icon a freshly created button carries until an action is assigned. */
