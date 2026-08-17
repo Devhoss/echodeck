@@ -872,16 +872,31 @@ export default function App() {
                 aria-label={p.name}
                 aria-current={active}
                 style={{
-                  width: active ? 18 : 7,
+                  // Fixed footprint: the pill inside scales, so growing the
+                  // active dot never reflows the row. Animating width here
+                  // would thrash layout on every page change.
+                  width: 18,
                   height: 7,
                   padding: 0,
                   border: 0,
-                  borderRadius: 999,
-                  background: active ? "#3b82f6" : "#303039",
+                  background: "transparent",
                   cursor: "pointer",
-                  transition: "width 0.16s ease, background 0.16s ease",
+                  display: "grid",
+                  placeItems: "center",
                 }}
-              />
+              >
+                <span
+                  style={{
+                    width: 18,
+                    height: 7,
+                    borderRadius: 999,
+                    background: active ? "#3b82f6" : "#303039",
+                    transform: `scaleX(${active ? 1 : 7 / 18})`,
+                    transition:
+                      "transform 0.16s ease, background 0.16s ease",
+                  }}
+                />
+              </button>
             );
           })}
         </div>
