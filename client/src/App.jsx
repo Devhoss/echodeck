@@ -22,6 +22,7 @@ import {
 } from "./constants.js";
 import PairingScreen from "./PairingScreen.jsx";
 import { Icon } from "./icons.jsx";
+import { HOLD_REPEAT_ACTIONS, levelTargetFor } from "./actionRegistry.js";
 
 const globalStyles = `
   @keyframes pulse {
@@ -43,14 +44,9 @@ const globalStyles = `
   }
 `;
 
-// FEATURE: Volume controls — which action types are volume-related
-const VOLUME_ACTIONS = new Set([
-  "volume_up",
-  "volume_down",
-  "volume_set",
-  "volume_mute",
-]);
-const VOLUME_HOLD_ACTIONS = new Set(["volume_up", "volume_down"]);
+// FEATURE: Volume controls — speaker and microphone keys behave identically,
+// so which ids show a level and which repeat while held now lives in the action
+// registry rather than being duplicated per surface.
 
 // FEATURE: Volume controls — the step size the user picked in the desktop
 // editor lives in action_value. Range mirrors actionRegistry.js.
@@ -119,7 +115,10 @@ const sinkIdByLabel = new Map();
 // setSinkId round-trip. Keyed by context; there are only ever two.
 const appliedSinks = new Map();
 
-if (typeof navigator !== "undefined" && navigator.mediaDevices?.addEventListener) {
+if (
+  typeof navigator !== "undefined" &&
+  navigator.mediaDevices?.addEventListener
+) {
   navigator.mediaDevices.addEventListener("devicechange", () => {
     sinkIdByLabel.clear();
     appliedSinks.clear();
@@ -232,6 +231,8 @@ export default function App() {
   const [stats, setStats] = useState(null);
   // FEATURE: Volume controls — live volume + mute state
   const [volume, setVolume] = useState(null);
+  const [micVolume, setMicVolume] = useState(null);
+  const [micMuted, setMicMuted] = useState(false);
   const [muted, setMuted] = useState(false);
 
   const [disconnectActive, setDisconnectActive] = useState(false);
@@ -301,6 +302,21 @@ export default function App() {
       console.log("WS error", e);
       setStatus("disconnected");
     };
+    // A hold sends optimistic updates for one target only, so each field is
+    // applied only when the message actually carries it — otherwise a speaker
+    // hold would blank the mic reading and vice versa. Declared here rather
+    // than as a component-level callback because both callers are in this
+    // handler, so it needs no hook dependency.
+    const applyLevels = (msg) => {
+      if (msg.volume !== null && msg.volume !== undefined)
+        setVolume(msg.volume);
+      if (msg.muted !== null && msg.muted !== undefined) setMuted(msg.muted);
+      if (msg.mic_volume !== null && msg.mic_volume !== undefined)
+        setMicVolume(msg.mic_volume);
+      if (msg.mic_muted !== null && msg.mic_muted !== undefined)
+        setMicMuted(msg.mic_muted);
+    };
+
     const onMessage = (e) => {
       lastMessageAtRef.current = Date.now();
       // Parse once and guard it: `state` payloads carry base64 icon data, and
@@ -332,15 +348,11 @@ export default function App() {
           ramTotal: msg.ram_total,
           time: msg.time,
         });
-        if (msg.volume !== null && msg.volume !== undefined)
-          setVolume(msg.volume);
-        if (msg.muted !== null && msg.muted !== undefined) setMuted(msg.muted);
+        applyLevels(msg);
       }
       // FEATURE: Volume controls — instant volume update
       if (msg.t === "volume") {
-        if (msg.volume !== null && msg.volume !== undefined)
-          setVolume(msg.volume);
-        if (msg.muted !== null && msg.muted !== undefined) setMuted(msg.muted);
+        applyLevels(msg);
       }
       // FEATURE: Soundboard — server tells this client to play a sound
       // The server only sends this to the client that pressed the button,
@@ -507,14 +519,14 @@ export default function App() {
   }, []);
 
   // FEATURE: Volume controls — send hold_start when finger goes down on a vol button
-  const startVolumeHold = useCallback((direction, step) => {
+  const startVolumeHold = useCallback((direction, step, target) => {
     if (wsRef.current?.readyState !== WebSocket.OPEN) {
       setStatus("connecting");
       wsRef.current?.reconnect?.(4000, "volume hold");
       return;
     }
     wsRef.current.send(
-      JSON.stringify({ t: "volume_hold_start", direction, step }),
+      JSON.stringify({ t: "volume_hold_start", direction, step, target }),
     );
   }, []);
 
@@ -575,9 +587,6 @@ export default function App() {
     [pages, currentPage, switchPage],
   );
 
-
-
-
   const params = new URLSearchParams(window.location.search);
   const forceDesktop =
     params.get("desktop") === "1" ||
@@ -598,6 +607,8 @@ export default function App() {
         stats={stats}
         volume={volume}
         muted={muted}
+        micVolume={micVolume}
+        micMuted={micMuted}
         wsRef={wsRef}
         switchPage={switchPage}
         pageButtonsCacheRef={pageButtonsCacheRef}
@@ -787,45 +798,47 @@ export default function App() {
       </div>
 
       {/* FEATURE: Custom button size — 2x2 buttons use gridColumn/gridRow span 2 */}
-          {/* Container */}
-          <div
-            ref={deckRef}
-            onPointerDown={onDeckPointerDown}
-            onPointerUp={onDeckPointerUp}
-            onPointerCancel={onDeckPointerCancel}
-            style={{
-              flex: 1,
-              minHeight: 0,
-              overflow: "hidden",
-              paddingLeft: "max(env(safe-area-inset-left), 10px)",
-              paddingRight: "max(env(safe-area-inset-right), 10px)",
-              paddingTop: 4,
-              paddingBottom: 4,
-              // The browser must not claim horizontal drags as scrolls: it
-              // cancels the pointer sequence and the swipe never completes.
-              touchAction: "none",
-              display: "grid",
-              placeContent: "center",
-              gridTemplateColumns: `repeat(${layout.cols}, ${keySize}px)`,
-              gridAutoRows: `${keySize}px`,
-              gap: 8,
-            }}
-          >
-            {buttons.length === 0 && status === "connected" && <SkeletonGrid />}
-            {buttons.map((btn) => (
-              <SortableButton
-                key={btn.id}
-                btn={btn}
-                pressing={pressing === btn.id}
-                onPress={pressButton}
-                volume={volume}
-                muted={muted}
-                onVolumeHoldStart={startVolumeHold}
-                onVolumeHoldStop={stopVolumeHold}
-                onConfirmHoldStart={beginConfirmHold}
-              />
-            ))}
-          </div>
+      {/* Container */}
+      <div
+        ref={deckRef}
+        onPointerDown={onDeckPointerDown}
+        onPointerUp={onDeckPointerUp}
+        onPointerCancel={onDeckPointerCancel}
+        style={{
+          flex: 1,
+          minHeight: 0,
+          overflow: "hidden",
+          paddingLeft: "max(env(safe-area-inset-left), 10px)",
+          paddingRight: "max(env(safe-area-inset-right), 10px)",
+          paddingTop: 4,
+          paddingBottom: 4,
+          // The browser must not claim horizontal drags as scrolls: it
+          // cancels the pointer sequence and the swipe never completes.
+          touchAction: "none",
+          display: "grid",
+          placeContent: "center",
+          gridTemplateColumns: `repeat(${layout.cols}, ${keySize}px)`,
+          gridAutoRows: `${keySize}px`,
+          gap: 8,
+        }}
+      >
+        {buttons.length === 0 && status === "connected" && <SkeletonGrid />}
+        {buttons.map((btn) => (
+          <SortableButton
+            key={btn.id}
+            btn={btn}
+            pressing={pressing === btn.id}
+            onPress={pressButton}
+            volume={volume}
+            muted={muted}
+            micVolume={micVolume}
+            micMuted={micMuted}
+            onVolumeHoldStart={startVolumeHold}
+            onVolumeHoldStop={stopVolumeHold}
+            onConfirmHoldStart={beginConfirmHold}
+          />
+        ))}
+      </div>
 
       {/* FEATURE: Deck layout — swipe changes page; the dots do the same by tap,
           so the deck is never gesture-only. */}
@@ -869,8 +882,7 @@ export default function App() {
                     borderRadius: 999,
                     background: active ? "#3b82f6" : "#303039",
                     transform: `scaleX(${active ? 1 : 7 / 18})`,
-                    transition:
-                      "transform 0.16s ease, background 0.16s ease",
+                    transition: "transform 0.16s ease, background 0.16s ease",
                   }}
                 />
               </button>
@@ -1023,8 +1035,8 @@ function VolumePill({ volume, muted }) {
             transformOrigin: "left center",
             transform: `scaleX(${(muted ? 0 : volume) / 100})`,
             // Level is a quantity, not a health status — neutral white, with red
-              // kept for muted, which is a state worth flagging.
-              background: muted ? "#f87171" : "rgba(255,255,255,0.85)",
+            // kept for muted, which is a state worth flagging.
+            background: muted ? "#f87171" : "rgba(255,255,255,0.85)",
             borderRadius: 2,
             transition: "transform 0.15s ease",
           }}
@@ -1067,6 +1079,8 @@ const SortableButton = memo(function SortableButton({
   onPress,
   volume,
   muted,
+  micVolume,
+  micMuted,
   onVolumeHoldStart,
   onVolumeHoldStop,
   onConfirmHoldStart,
@@ -1089,14 +1103,17 @@ const SortableButton = memo(function SortableButton({
 
   const isVideo = btn.icon_data?.startsWith("data:video/");
 
-  const isVolumeBtn = VOLUME_ACTIONS.has(btn.action_type);
-  const isVolumeHoldBtn = VOLUME_HOLD_ACTIONS.has(btn.action_type);
+  const levelTarget = levelTargetFor(btn.action_type);
+  const isMicBtn = levelTarget === "mic";
+  const isVolumeBtn = levelTarget !== null;
+  const isVolumeHoldBtn = HOLD_REPEAT_ACTIONS.has(btn.action_type);
+  const level = isMicBtn ? micVolume : volume;
+  const levelMuted = isMicBtn ? micMuted : muted;
   const volumeStep = volumeStepFor(btn);
 
   // FEATURE: Hold to confirm — volume buttons own the pointer-hold gesture
   // already, so the two are mutually exclusive by construction.
-  const requiresConfirm =
-    Number(btn.require_confirm) === 1 && !isVolumeHoldBtn;
+  const requiresConfirm = Number(btn.require_confirm) === 1 && !isVolumeHoldBtn;
 
   // FEATURE: Soundboard — show a small speaker indicator if the button has a sound
   const hasSound = !!btn.sound_file;
@@ -1160,8 +1177,9 @@ const SortableButton = memo(function SortableButton({
 
       setRipple({ x, y, id: Date.now() });
       onVolumeHoldStart(
-        btn.action_type === "volume_up" ? "up" : "down",
+        btn.action_type.endsWith("_up") ? "up" : "down",
         volumeStep,
+        levelTarget,
       );
     },
     [
@@ -1169,6 +1187,7 @@ const SortableButton = memo(function SortableButton({
       isVolumeHoldBtn,
       requiresConfirm,
       volumeStep,
+      levelTarget,
       btn.id,
       btn.action_type,
       onPress,
@@ -1292,7 +1311,6 @@ const SortableButton = memo(function SortableButton({
         </div>
       )}
 
-
       {/* Icon */}
       <div
         style={{
@@ -1345,7 +1363,7 @@ const SortableButton = memo(function SortableButton({
       </div>
 
       {/* FEATURE: Volume controls — live fill bar + % overlay */}
-      {isVolumeBtn && volume !== null && (
+      {isVolumeBtn && level !== null && (
         <div
           style={{
             position: "absolute",
@@ -1365,12 +1383,12 @@ const SortableButton = memo(function SortableButton({
               fontSize: 10,
               fontWeight: 700,
               letterSpacing: 0.4,
-              color: muted ? "#f87171" : "rgba(255,255,255,0.82)",
+              color: levelMuted ? "#f87171" : "rgba(255,255,255,0.82)",
               textShadow: "0 1px 3px rgba(0,0,0,0.7)",
               fontVariantNumeric: "tabular-nums",
             }}
           >
-            {muted ? "MUTED" : `${volume}%`}
+            {levelMuted ? "MUTED" : `${level}%`}
           </span>
           <span
             style={{
@@ -1388,8 +1406,8 @@ const SortableButton = memo(function SortableButton({
                 height: "100%",
                 borderRadius: 2,
                 transformOrigin: "left center",
-                transform: `scaleX(${(muted ? 0 : volume) / 100})`,
-                background: muted ? "#f87171" : "rgba(255,255,255,0.92)",
+                transform: `scaleX(${(levelMuted ? 0 : level) / 100})`,
+                background: levelMuted ? "#f87171" : "rgba(255,255,255,0.92)",
                 transition: "transform 0.12s ease, background 0.12s ease",
               }}
             />

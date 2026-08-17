@@ -14,6 +14,8 @@ const {
   executeSequence,
   getVolume,
   getMuted,
+  getMicVolume,
+  getMicMuted,
   getAudioDevices,
   playAudioOnDevice,
 } = require("./actions");
@@ -138,7 +140,8 @@ app.delete("/api/paired-devices/:id", (req, res) => {
 
 app.get("/api/audio-devices", async (req, res) => {
   try {
-    res.json(await getAudioDevices());
+    // Defaults to output so the existing callers keep working unchanged.
+    res.json(await getAudioDevices(req.query.direction === "input" ? "input" : "output"));
   } catch (e) {
     console.error("audio-devices error:", e.message);
     res.json([]);
@@ -466,6 +469,11 @@ const statsInterval = setInterval(async () => {
     }),
     volume: volume ?? null,
     muted: muted ?? null,
+    // Synchronous native reads, unlike the speaker pair above which may await
+    // Voicemeeter — so these need no try/catch of their own and cannot stall
+    // the tick.
+    mic_volume: getMicVolume(),
+    mic_muted: getMicMuted(),
   });
   clients.forEach((ws) => {
     if (ws.readyState !== 1) {
@@ -666,10 +674,19 @@ wss.on("connection", (ws, req) => {
         20,
         Math.max(1, parseInt(msg.step, 10) || 5),
       );
-      const actionType = direction === "up" ? "volume_up" : "volume_down";
+      // Older phone builds predate mic keys and send no target at all, so the
+      // speaker has to remain the default.
+      const isMic = msg.target === "mic";
+      const actionType = isMic
+        ? direction === "up"
+          ? "mic_volume_up"
+          : "mic_volume_down"
+        : direction === "up"
+          ? "volume_up"
+          : "volume_down";
 
       // One real OS read to seed our local estimate
-      let localVolume = (await getVolume()) ?? 50;
+      let localVolume = (isMic ? getMicVolume() : await getVolume()) ?? 50;
 
       // Released or restarted while that read was in flight — installing the
       // interval now would strand it, so leave without starting anything.
@@ -681,11 +698,11 @@ wss.on("connection", (ws, req) => {
           direction === "up"
             ? Math.min(100, localVolume + step)
             : Math.max(0, localVolume - step);
-        const msgOut = JSON.stringify({
-          t: "volume",
-          volume: localVolume,
-          muted: false,
-        });
+        const msgOut = JSON.stringify(
+          isMic
+            ? { t: "volume", mic_volume: localVolume, mic_muted: false }
+            : { t: "volume", volume: localVolume, muted: false },
+        );
         if (ws.readyState === 1) ws.send(msgOut); // only this client, optimistic
       };
 
@@ -739,7 +756,13 @@ wss.on("connection", (ws, req) => {
 async function broadcastVolumeNow() {
   if (clients.size === 0) return;
   const [volume, muted] = await Promise.all([getVolume(), getMuted()]);
-  const msg = JSON.stringify({ t: "volume", volume, muted });
+  const msg = JSON.stringify({
+    t: "volume",
+    volume,
+    muted,
+    mic_volume: getMicVolume(),
+    mic_muted: getMicMuted(),
+  });
   clients.forEach((ws) => {
     if (ws.readyState === 1) ws.send(msg);
   });

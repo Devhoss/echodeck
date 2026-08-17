@@ -35,7 +35,7 @@ import { ActionIcon, Icon } from "../icons.jsx";
 import {
   ACTION_BY_ID,
   ACTION_CATEGORIES,
-  ACTION_REGISTRY,
+  levelTargetFor,
   actionTypeLabel,
   applyActionTypeDefaults,
 } from "../actionRegistry.js";
@@ -61,11 +61,6 @@ const COLORS = [
   "#6b4a0a",
 ];
 
-const VOLUME_ACTIONS = new Set(
-  ACTION_REGISTRY.filter((action) => action.id.startsWith("volume_")).map(
-    (action) => action.id,
-  ),
-);
 const SOUND_TARGETS = [
   { value: "phone", label: "Phone", icon: "phone" },
   { value: "pc", label: "PC", icon: "desktop" },
@@ -165,6 +160,8 @@ export default function DesktopApp({
   stats,
   volume,
   muted,
+  micVolume,
+  micMuted,
   wsRef,
   switchPage,
   pageButtonsCacheRef,
@@ -175,6 +172,7 @@ export default function DesktopApp({
   const [saved, setSaved] = useState(false);
   const [activeId, setActiveId] = useState(null); // dnd drag overlay
   const [audioDevices, setAudioDevices] = useState([]);
+  const [inputDevices, setInputDevices] = useState([]);
   const [profileRules, setProfileRules] = useState([]);
   const [ruleEditorKey, setRuleEditorKey] = useState(0);
   const [autoSwitch, setAutoSwitch] = useState(true);
@@ -246,7 +244,8 @@ export default function DesktopApp({
   // releasing anywhere replaced whichever key happened to be closest.
   // Reordering keys keeps closestCenter, where "nearest" is what you want.
   const collisionDetection = useCallback((args) => {
-    if (String(args.active.id).startsWith("action:")) return pointerWithin(args);
+    if (String(args.active.id).startsWith("action:"))
+      return pointerWithin(args);
     return closestCenter(args);
   }, []);
 
@@ -284,6 +283,10 @@ export default function DesktopApp({
     fetch(`${api()}/audio-devices`)
       .then((r) => r.json())
       .then(setAudioDevices)
+      .catch(() => {});
+    fetch(`${api()}/audio-devices?direction=input`)
+      .then((r) => r.json())
+      .then(setInputDevices)
       .catch(() => {});
     fetch(`${api()}/profile-rules`)
       .then((r) => r.json())
@@ -391,7 +394,11 @@ export default function DesktopApp({
   const isDirty = useMemo(() => {
     if (!savedForm || !resolvedSelected) return false;
     const norm = (o) =>
-      JSON.stringify(Object.keys(o).sort().map((k) => [k, o[k]]));
+      JSON.stringify(
+        Object.keys(o)
+          .sort()
+          .map((k) => [k, o[k]]),
+      );
     return norm(resolvedForm) !== norm(savedForm);
   }, [resolvedForm, savedForm, resolvedSelected]);
 
@@ -456,7 +463,10 @@ export default function DesktopApp({
 
       const apply = async () => {
         const patch = applyActionTypeDefaults(
-          { action_type: target.action_type, action_value: target.action_value },
+          {
+            action_type: target.action_type,
+            action_value: target.action_value,
+          },
           actionType,
         );
         await fetch(`${api()}/buttons/${buttonId}`, {
@@ -471,7 +481,8 @@ export default function DesktopApp({
         if (updated) selectBtn(updated);
       };
 
-      const isBlank = !target.action_value && target.action_type === "keystroke";
+      const isBlank =
+        !target.action_value && target.action_type === "keystroke";
       if (isBlank) return apply();
 
       askConfirm(
@@ -496,16 +507,15 @@ export default function DesktopApp({
         await fetch(`${api()}/buttons/${created.id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(
-            applyActionTypeDefaults({}, actionType),
-          ),
+          body: JSON.stringify(applyActionTypeDefaults({}, actionType)),
         });
       }
       const data = await reloadPages();
       const page = data.find((p) => p.id === currentPage);
       const btns = page?.buttons || [];
       setButtons(btns);
-      const newest = btns.find((b) => b.id === created?.id) ?? btns[btns.length - 1];
+      const newest =
+        btns.find((b) => b.id === created?.id) ?? btns[btns.length - 1];
       if (newest) selectBtn(newest);
     },
     [currentPage, selectBtn, reloadPages, setButtons],
@@ -826,6 +836,8 @@ export default function DesktopApp({
         stats={stats}
         volume={volume}
         muted={muted}
+        micVolume={micVolume}
+        micMuted={micMuted}
         isConnected={isConnected}
         status={status}
         onPair={openPairQR}
@@ -844,56 +856,56 @@ export default function DesktopApp({
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
         >
-        <div style={styles.canvasCol}>
-          <div style={styles.canvasHead}>
-            <ProfileMenu
-              open={profileMenuOpen}
-              setOpen={setProfileMenuOpen}
-              pages={pages}
-              currentPage={currentPage}
-              buttons={buttons}
-              pageButtonCounts={pageButtonCounts}
-              profileRules={profileRules}
-              onSelectPage={(id) => {
-                switchPage(id);
-                setSelectedBtn(null);
-              }}
-              onAddPage={addPage}
-              onDeletePage={deletePage}
-              onOpenRules={() => setShowRules(true)}
-              addingPage={addingPage}
-              setAddingPage={setAddingPage}
-              newPageName={newPageName}
-              setNewPageName={setNewPageName}
-            />
-
-            <div style={styles.canvasHeadActions}>
-              <button style={styles.ghostBtn} onClick={addButton}>
-                <Icon name="add" size={14} />
-                Add Button
-              </button>
-              <button
-                onClick={() =>
-                  setShowLabels((v) => {
-                    const next = !v;
-                    try {
-                      localStorage.setItem("deckShowLabels", String(next));
-                    } catch {
-                      /* */
-                    }
-                    return next;
-                  })
-                }
-                style={{
-                  ...styles.ghostBtn,
-                  ...(showLabels ? styles.ghostBtnOn : {}),
+          <div style={styles.canvasCol}>
+            <div style={styles.canvasHead}>
+              <ProfileMenu
+                open={profileMenuOpen}
+                setOpen={setProfileMenuOpen}
+                pages={pages}
+                currentPage={currentPage}
+                buttons={buttons}
+                pageButtonCounts={pageButtonCounts}
+                profileRules={profileRules}
+                onSelectPage={(id) => {
+                  switchPage(id);
+                  setSelectedBtn(null);
                 }}
-                aria-pressed={showLabels}
-              >
-                {showLabels ? "Hide labels" : "Show labels"}
-              </button>
+                onAddPage={addPage}
+                onDeletePage={deletePage}
+                onOpenRules={() => setShowRules(true)}
+                addingPage={addingPage}
+                setAddingPage={setAddingPage}
+                newPageName={newPageName}
+                setNewPageName={setNewPageName}
+              />
+
+              <div style={styles.canvasHeadActions}>
+                <button style={styles.ghostBtn} onClick={addButton}>
+                  <Icon name="add" size={14} />
+                  Add Button
+                </button>
+                <button
+                  onClick={() =>
+                    setShowLabels((v) => {
+                      const next = !v;
+                      try {
+                        localStorage.setItem("deckShowLabels", String(next));
+                      } catch {
+                        /* */
+                      }
+                      return next;
+                    })
+                  }
+                  style={{
+                    ...styles.ghostBtn,
+                    ...(showLabels ? styles.ghostBtnOn : {}),
+                  }}
+                  aria-pressed={showLabels}
+                >
+                  {showLabels ? "Hide labels" : "Show labels"}
+                </button>
+              </div>
             </div>
-          </div>
 
             <SortableContext items={buttonIds} strategy={rectSortingStrategy}>
               <div style={styles.canvas}>
@@ -905,6 +917,8 @@ export default function DesktopApp({
                       selected={resolvedSelected === btn.id}
                       volume={volume}
                       muted={muted}
+                      micVolume={micVolume}
+                      micMuted={micMuted}
                       onSelect={selectBtn}
                       showLabels={showLabels}
                       droppingAction={!!activeAction}
@@ -924,6 +938,8 @@ export default function DesktopApp({
                   selected={false}
                   volume={volume}
                   muted={muted}
+                  micVolume={micVolume}
+                  micMuted={micMuted}
                   ghost
                 />
               ) : activeAction ? (
@@ -934,37 +950,38 @@ export default function DesktopApp({
               ) : null}
             </DragOverlay>
 
-          <PageRail
-            pages={pages}
-            currentPage={currentPage}
-            onSelectPage={(id) => {
-              switchPage(id);
-              setSelectedBtn(null);
-            }}
-            onAddPage={() => {
-              setAddingPage(true);
-              setProfileMenuOpen(true);
-            }}
-          />
+            <PageRail
+              pages={pages}
+              currentPage={currentPage}
+              onSelectPage={(id) => {
+                switchPage(id);
+                setSelectedBtn(null);
+              }}
+              onAddPage={() => {
+                setAddingPage(true);
+                setProfileMenuOpen(true);
+              }}
+            />
 
-          {/* ── Inspector: sits under the canvas, like the deck's own panel ── */}
-          <PropertyPanel
-            btn={selectedBtnData}
-            form={resolvedForm}
-            saving={saving}
-            saved={saved}
-            dirty={isDirty}
-            audioDevices={audioDevices}
-            onPatch={patchForm}
-            onSave={saveButton}
-            onDelete={deleteButton}
-            onUploadIcon={uploadIcon}
-            onUploadSound={uploadSound}
-            onDeleteSound={deleteSound}
-          />
-        </div>
+            {/* ── Inspector: sits under the canvas, like the deck's own panel ── */}
+            <PropertyPanel
+              btn={selectedBtnData}
+              form={resolvedForm}
+              saving={saving}
+              saved={saved}
+              dirty={isDirty}
+              audioDevices={audioDevices}
+              inputDevices={inputDevices}
+              onPatch={patchForm}
+              onSave={saveButton}
+              onDelete={deleteButton}
+              onUploadIcon={uploadIcon}
+              onUploadSound={uploadSound}
+              onDeleteSound={deleteSound}
+            />
+          </div>
 
-        <ActionLibrary />
+          <ActionLibrary />
         </DndContext>
       </div>
       {showQR && (
@@ -1167,7 +1184,12 @@ export default function DesktopApp({
                           opacity: online ? 1 : 0.65,
                         }}
                       >
-                        <div style={{ flexShrink: 0, color: "var(--text-secondary)" }}>
+                        <div
+                          style={{
+                            flexShrink: 0,
+                            color: "var(--text-secondary)",
+                          }}
+                        >
                           <Icon name="phone" size={22} />
                         </div>
                         <div style={{ flex: 1, minWidth: 0 }}>
@@ -1411,11 +1433,10 @@ export default function DesktopApp({
                     lineHeight: 1.6,
                   }}
                 >
-                  Also play on <strong style={{ color: "#a855f7" }}>
-                    monitor
-                  </strong>{" "}
-                  — pick your headset here when the output above is a virtual
-                  cable, so you hear the sound too.
+                  Also play on{" "}
+                  <strong style={{ color: "#a855f7" }}>monitor</strong> — pick
+                  your headset here when the output above is a virtual cable, so
+                  you hear the sound too.
                 </div>
                 <select
                   value={pcMonitorDevice}
@@ -1755,8 +1776,8 @@ function VolChip({ volume, muted }) {
             transformOrigin: "left center",
             transform: `scaleX(${(muted ? 0 : volume) / 100})`,
             // Level is a quantity, not a health status — neutral white, with red
-              // kept for muted, which is a state worth flagging.
-              background: muted ? "#f87171" : "rgba(255,255,255,0.85)",
+            // kept for muted, which is a state worth flagging.
+            background: muted ? "#f87171" : "rgba(255,255,255,0.85)",
             borderRadius: 2,
             transition: "transform 0.15s",
           }}
@@ -1880,9 +1901,7 @@ function ActionLibrary() {
 
       <div style={styles.libraryList}>
         {total === 0 ? (
-          <div style={styles.libraryEmpty}>
-            No actions match “{query}”
-          </div>
+          <div style={styles.libraryEmpty}>No actions match “{query}”</div>
         ) : (
           groups.map((group) => {
             const isOpen = q ? true : !collapsed.has(group.label);
@@ -2026,7 +2045,10 @@ function ProfileMenu({
                 </span>
                 <span style={styles.menuItemName}>{p.name}</span>
                 {pRule?.enabled && pRule.conditions?.[0]?.value ? (
-                  <span style={styles.menuRuleDot} title="Auto-switch rule set" />
+                  <span
+                    style={styles.menuRuleDot}
+                    title="Auto-switch rule set"
+                  />
                 ) : null}
                 <span style={styles.menuCount}>
                   {isActive ? buttons.length : (pageButtonCounts[p.id] ?? 0)}
@@ -2080,7 +2102,10 @@ function ProfileMenu({
               </button>
             </div>
           ) : (
-            <button style={styles.menuAction} onClick={() => setAddingPage(true)}>
+            <button
+              style={styles.menuAction}
+              onClick={() => setAddingPage(true)}
+            >
               <Icon name="add" size={14} />
               New profile
             </button>
@@ -2120,7 +2145,11 @@ function PageRail({ pages, currentPage, onSelectPage, onAddPage }) {
           {i + 1}
         </button>
       ))}
-      <button style={styles.pagePill} onClick={onAddPage} aria-label="New profile">
+      <button
+        style={styles.pagePill}
+        onClick={onAddPage}
+        aria-label="New profile"
+      >
         <Icon name="add" size={13} />
       </button>
     </div>
@@ -2163,7 +2192,6 @@ function RuleEditorModal({ pageName, onClose, ...editorProps }) {
     </div>
   );
 }
-
 
 function Toggle({ value, onChange }) {
   return (
@@ -2533,6 +2561,8 @@ const DesktopSortableButton = memo(function DesktopSortableButton({
   selected,
   volume,
   muted,
+  micVolume,
+  micMuted,
   onSelect,
   showLabels,
   droppingAction,
@@ -2592,6 +2622,8 @@ const DesktopSortableButton = memo(function DesktopSortableButton({
         selected={selected}
         volume={volume}
         muted={muted}
+        micVolume={micVolume}
+        micMuted={micMuted}
         showLabels={showLabels}
       />
     </div>
@@ -2603,13 +2635,18 @@ function ButtonTile({
   selected,
   volume,
   muted,
+  micVolume,
+  micMuted,
   ghost,
   showLabels = true,
 }) {
   const isToggleOn =
     Number(btn.is_toggle) === 1 && Number(btn.toggle_state) === 1;
   const isToggle = Number(btn.is_toggle) === 1;
-  const isVolumeBtn = VOLUME_ACTIONS.has(btn.action_type);
+  const levelTarget = levelTargetFor(btn.action_type);
+  const isVolumeBtn = levelTarget !== null;
+  const level = levelTarget === "mic" ? micVolume : volume;
+  const levelMuted = levelTarget === "mic" ? micMuted : muted;
   const isVideo = btn.icon_data?.startsWith("data:video/");
 
   const accentColor = btn.color || "#4f80ff";
@@ -2781,7 +2818,7 @@ function ButtonTile({
       </div>
 
       {/* Volume fill */}
-      {isVolumeBtn && volume !== null && (
+      {isVolumeBtn && level !== null && (
         <div
           style={{
             position: "absolute",
@@ -2801,12 +2838,12 @@ function ButtonTile({
               fontSize: 9,
               fontWeight: 700,
               letterSpacing: 0.3,
-              color: muted ? "#f87171" : "rgba(255,255,255,0.8)",
+              color: levelMuted ? "#f87171" : "rgba(255,255,255,0.8)",
               textShadow: "0 1px 3px rgba(0,0,0,0.7)",
               fontVariantNumeric: "tabular-nums",
             }}
           >
-            {muted ? "MUTED" : `${volume}%`}
+            {levelMuted ? "MUTED" : `${level}%`}
           </span>
           <span
             style={{
@@ -2824,8 +2861,8 @@ function ButtonTile({
                 height: "100%",
                 borderRadius: 2,
                 transformOrigin: "left center",
-                transform: `scaleX(${(muted ? 0 : volume) / 100})`,
-                background: muted ? "#f87171" : "rgba(255,255,255,0.92)",
+                transform: `scaleX(${(levelMuted ? 0 : level) / 100})`,
+                background: levelMuted ? "#f87171" : "rgba(255,255,255,0.92)",
                 transition: "transform 0.12s ease, background 0.12s ease",
               }}
             />
@@ -2871,6 +2908,7 @@ function PropertyPanel({
   saved,
   dirty,
   audioDevices,
+  inputDevices,
   onPatch,
   onSave,
   onDelete,
@@ -2913,9 +2951,7 @@ function PropertyPanel({
           >
             <Icon name="settings" size={26} />
           </div>
-          <div style={styles.panelEmptyText}>
-            Select a key to configure it
-          </div>
+          <div style={styles.panelEmptyText}>Select a key to configure it</div>
           <div style={styles.panelEmptyHint}>
             Drag a key to reorder the deck
           </div>
@@ -2929,51 +2965,59 @@ function PropertyPanel({
       <div style={styles.panelInner}>
         {/* Preview */}
         <div style={styles.headerBar}>
-        <div style={styles.previewRow}>
-          <div
-            style={{
-              width: 46,
-              height: 46,
-              borderRadius: 11,
-              background: `linear-gradient(160deg, ${form.color}28, ${form.color}12)`,
-              border: `1.5px solid ${form.color}50`,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 22,
-              position: "relative",
-              overflow: "hidden",
-              flexShrink: 0,
-              boxShadow: `0 2px 10px rgba(0,0,0,0.5)`,
-            }}
-          >
-            {form.icon_data ? (
-              form.icon_data.startsWith("data:video/") ? (
-                <video
-                  src={form.icon_data}
-                  autoPlay
-                  loop
-                  muted
-                  playsInline
-                  style={{ width: "80%", height: "80%", objectFit: "contain" }}
-                />
+          <div style={styles.previewRow}>
+            <div
+              style={{
+                width: 46,
+                height: 46,
+                borderRadius: 11,
+                background: `linear-gradient(160deg, ${form.color}28, ${form.color}12)`,
+                border: `1.5px solid ${form.color}50`,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 22,
+                position: "relative",
+                overflow: "hidden",
+                flexShrink: 0,
+                boxShadow: `0 2px 10px rgba(0,0,0,0.5)`,
+              }}
+            >
+              {form.icon_data ? (
+                form.icon_data.startsWith("data:video/") ? (
+                  <video
+                    src={form.icon_data}
+                    autoPlay
+                    loop
+                    muted
+                    playsInline
+                    style={{
+                      width: "80%",
+                      height: "80%",
+                      objectFit: "contain",
+                    }}
+                  />
+                ) : (
+                  <img
+                    src={form.icon_data}
+                    style={{
+                      width: "80%",
+                      height: "80%",
+                      objectFit: "contain",
+                    }}
+                  />
+                )
               ) : (
-                <img
-                  src={form.icon_data}
-                  style={{ width: "80%", height: "80%", objectFit: "contain" }}
-                />
-              )
-            ) : (
-              <span>{form.icon}</span>
-            )}
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={styles.previewLabel}>{form.label || "Untitled"}</div>
-            <div style={styles.previewAction}>
-              {actionTypeLabel(form.action_type)}
+                <span>{form.icon}</span>
+              )}
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={styles.previewLabel}>{form.label || "Untitled"}</div>
+              <div style={styles.previewAction}>
+                {actionTypeLabel(form.action_type)}
+              </div>
             </div>
           </div>
-        </div>
 
           <div style={styles.headerActions}>
             {dirty && !saving ? (
@@ -2992,7 +3036,11 @@ function PropertyPanel({
             >
               {saving ? "Saving…" : saved ? "Saved" : "Save"}
             </button>
-            <button style={styles.deleteBtn} onClick={onDelete} aria-label="Delete key">
+            <button
+              style={styles.deleteBtn}
+              onClick={onDelete}
+              aria-label="Delete key"
+            >
               <Icon name="delete" size={15} />
             </button>
           </div>
@@ -3126,6 +3174,7 @@ function PropertyPanel({
             }}
             onChange={onPatch}
             audioDevices={audioDevices}
+            inputDevices={inputDevices}
           />
         ) : null}
 
@@ -3134,7 +3183,10 @@ function PropertyPanel({
           onClick={() => setShowAdvanced((v) => !v)}
           aria-expanded={advancedOpen}
         >
-          <Icon name={advancedOpen ? "chevronDown" : "chevronRight"} size={14} />
+          <Icon
+            name={advancedOpen ? "chevronDown" : "chevronRight"}
+            size={14}
+          />
           Advanced
           {usesAdvanced && !showAdvanced ? (
             <span style={styles.disclosureNote}>in use</span>
@@ -3143,200 +3195,205 @@ function PropertyPanel({
 
         {advancedOpen ? (
           <>
-        {/* Toggle */}
-        <Field label="Toggle mode">
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <Toggle
-              value={!!form.is_toggle}
-              onChange={(v) => onPatch({ is_toggle: v ? 1 : 0 })}
-            />
-            <span style={{ fontSize: 11, color: "#666" }}>
-              Button toggles on/off
-            </span>
-          </div>
-        </Field>
-
-        {form.is_toggle ? (
-          <ActionEditor
-            title="Toggle OFF action"
-            action={{
-              action_type: form.toggle_action_type || "keystroke",
-              action_value: form.toggle_action_value || "",
-            }}
-            onChange={(patch) =>
-              onPatch({
-                ...(patch.action_type !== undefined
-                  ? { toggle_action_type: patch.action_type }
-                  : {}),
-                ...(patch.action_value !== undefined
-                  ? { toggle_action_value: patch.action_value }
-                  : {}),
-              })
-            }
-            audioDevices={audioDevices}
-          />
-        ) : null}
-
-        <Field label="Multi-action">
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <Toggle
-              value={
-                form.button_mode === "multi" ||
-                (form.actions?.length > 0 &&
-                  form.button_mode !== "multi_switch")
-              }
-              onChange={(v) =>
-                onPatch({
-                  button_mode: v ? "multi" : "single",
-                  is_toggle: 0,
-                  actions: v
-                    ? form.actions?.length > 0
-                      ? form.actions
-                      : [
-                          {
-                            action_type: "keystroke",
-                            action_value: "",
-                            delay_ms: 0,
-                          },
-                        ]
-                    : null,
-                })
-              }
-            />
-            <span style={{ fontSize: 11, color: "#666" }}>
-              Run a sequence of actions
-            </span>
-          </div>
-        </Field>
-
-        {form.button_mode === "multi" || form.actions?.length > 0 ? (
-          <ActionStackEditor
-            title="Steps"
-            actions={form.actions || []}
-            onChange={(actions) => onPatch({ actions, button_mode: "multi" })}
-            audioDevices={audioDevices}
-          />
-        ) : null}
-
-        <Field label="Multi-action switch">
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <Toggle
-              value={form.button_mode === "multi_switch"}
-              onChange={(v) =>
-                onPatch({
-                  button_mode: v ? "multi_switch" : "single",
-                  is_toggle: 0,
-                  actions: null,
-                  switch_actions_a:
-                    form.switch_actions_a?.length > 0
-                      ? form.switch_actions_a
-                      : [
-                          {
-                            action_type: "keystroke",
-                            action_value: "",
-                            delay_ms: 0,
-                          },
-                        ],
-                  switch_actions_b:
-                    form.switch_actions_b?.length > 0
-                      ? form.switch_actions_b
-                      : [
-                          {
-                            action_type: "keystroke",
-                            action_value: "",
-                            delay_ms: 0,
-                          },
-                        ],
-                })
-              }
-            />
-            <span style={{ fontSize: 11, color: "#666" }}>
-              Alternate between two stacks
-            </span>
-          </div>
-        </Field>
-
-        {form.button_mode === "multi_switch" ? (
-          <>
-            <ActionStackEditor
-              title="Stack A"
-              actions={form.switch_actions_a || []}
-              onChange={(actions) => onPatch({ switch_actions_a: actions })}
-              audioDevices={audioDevices}
-            />
-            <ActionStackEditor
-              title="Stack B"
-              actions={form.switch_actions_b || []}
-              onChange={(actions) => onPatch({ switch_actions_b: actions })}
-              audioDevices={audioDevices}
-            />
-          </>
-        ) : null}
-
-        <div style={styles.panelDivider} />
-
-        {/* Sound */}
-        <Field label="Button sound">
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {form.sound_file ? (
-              <div style={{ display: "flex", gap: 6 }}>
-                <div style={styles.soundChip}>
-                  <Icon name="sound" size={12} /> Sound attached
-                </div>
-                <button
-                  style={{ ...styles.iconUploadBtn, color: "#f87171" }}
-                  onClick={onDeleteSound}
-                  title="Remove sound"
-                >
-                  <Icon name="close" size={14} />
-                </button>
-              </div>
-            ) : (
-              <>
-                <input
-                  ref={soundRef}
-                  type="file"
-                  accept="audio/*"
-                  style={{ display: "none" }}
-                  onChange={(e) => {
-                    if (e.target.files[0]) onUploadSound(e.target.files[0]);
-                    e.target.value = "";
-                  }}
+            {/* Toggle */}
+            <Field label="Toggle mode">
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <Toggle
+                  value={!!form.is_toggle}
+                  onChange={(v) => onPatch({ is_toggle: v ? 1 : 0 })}
                 />
-                <button
-                  style={styles.uploadBtn}
-                  onClick={() => soundRef.current?.click()}
-                >
-                  Upload sound
-                </button>
-              </>
-            )}
-            <div style={{ display: "flex", gap: 4 }}>
-              {SOUND_TARGETS.map((t) => (
-                <button
-                  key={t.value}
-                  style={{
-                    ...styles.segBtn,
-                    flex: 1,
-                    fontSize: 10,
-                    ...(form.sound_target === t.value
-                      ? styles.segBtnActive
+                <span style={{ fontSize: 11, color: "#666" }}>
+                  Button toggles on/off
+                </span>
+              </div>
+            </Field>
+
+            {form.is_toggle ? (
+              <ActionEditor
+                title="Toggle OFF action"
+                action={{
+                  action_type: form.toggle_action_type || "keystroke",
+                  action_value: form.toggle_action_value || "",
+                }}
+                onChange={(patch) =>
+                  onPatch({
+                    ...(patch.action_type !== undefined
+                      ? { toggle_action_type: patch.action_type }
                       : {}),
-                  }}
-                  onClick={() => onPatch({ sound_target: t.value })}
-                >
-                  <Icon name={t.icon} size={12} />
-                  {t.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        </Field>
+                    ...(patch.action_value !== undefined
+                      ? { toggle_action_value: patch.action_value }
+                      : {}),
+                  })
+                }
+                audioDevices={audioDevices}
+                inputDevices={inputDevices}
+              />
+            ) : null}
+
+            <Field label="Multi-action">
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <Toggle
+                  value={
+                    form.button_mode === "multi" ||
+                    (form.actions?.length > 0 &&
+                      form.button_mode !== "multi_switch")
+                  }
+                  onChange={(v) =>
+                    onPatch({
+                      button_mode: v ? "multi" : "single",
+                      is_toggle: 0,
+                      actions: v
+                        ? form.actions?.length > 0
+                          ? form.actions
+                          : [
+                              {
+                                action_type: "keystroke",
+                                action_value: "",
+                                delay_ms: 0,
+                              },
+                            ]
+                        : null,
+                    })
+                  }
+                />
+                <span style={{ fontSize: 11, color: "#666" }}>
+                  Run a sequence of actions
+                </span>
+              </div>
+            </Field>
+
+            {form.button_mode === "multi" || form.actions?.length > 0 ? (
+              <ActionStackEditor
+                title="Steps"
+                actions={form.actions || []}
+                onChange={(actions) =>
+                  onPatch({ actions, button_mode: "multi" })
+                }
+                audioDevices={audioDevices}
+                inputDevices={inputDevices}
+              />
+            ) : null}
+
+            <Field label="Multi-action switch">
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <Toggle
+                  value={form.button_mode === "multi_switch"}
+                  onChange={(v) =>
+                    onPatch({
+                      button_mode: v ? "multi_switch" : "single",
+                      is_toggle: 0,
+                      actions: null,
+                      switch_actions_a:
+                        form.switch_actions_a?.length > 0
+                          ? form.switch_actions_a
+                          : [
+                              {
+                                action_type: "keystroke",
+                                action_value: "",
+                                delay_ms: 0,
+                              },
+                            ],
+                      switch_actions_b:
+                        form.switch_actions_b?.length > 0
+                          ? form.switch_actions_b
+                          : [
+                              {
+                                action_type: "keystroke",
+                                action_value: "",
+                                delay_ms: 0,
+                              },
+                            ],
+                    })
+                  }
+                />
+                <span style={{ fontSize: 11, color: "#666" }}>
+                  Alternate between two stacks
+                </span>
+              </div>
+            </Field>
+
+            {form.button_mode === "multi_switch" ? (
+              <>
+                <ActionStackEditor
+                  title="Stack A"
+                  actions={form.switch_actions_a || []}
+                  onChange={(actions) => onPatch({ switch_actions_a: actions })}
+                  audioDevices={audioDevices}
+                  inputDevices={inputDevices}
+                />
+                <ActionStackEditor
+                  title="Stack B"
+                  actions={form.switch_actions_b || []}
+                  onChange={(actions) => onPatch({ switch_actions_b: actions })}
+                  audioDevices={audioDevices}
+                  inputDevices={inputDevices}
+                />
+              </>
+            ) : null}
+
+            <div style={styles.panelDivider} />
+
+            {/* Sound */}
+            <Field label="Button sound">
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {form.sound_file ? (
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <div style={styles.soundChip}>
+                      <Icon name="sound" size={12} /> Sound attached
+                    </div>
+                    <button
+                      style={{ ...styles.iconUploadBtn, color: "#f87171" }}
+                      onClick={onDeleteSound}
+                      title="Remove sound"
+                    >
+                      <Icon name="close" size={14} />
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <input
+                      ref={soundRef}
+                      type="file"
+                      accept="audio/*"
+                      style={{ display: "none" }}
+                      onChange={(e) => {
+                        if (e.target.files[0]) onUploadSound(e.target.files[0]);
+                        e.target.value = "";
+                      }}
+                    />
+                    <button
+                      style={styles.uploadBtn}
+                      onClick={() => soundRef.current?.click()}
+                    >
+                      Upload sound
+                    </button>
+                  </>
+                )}
+                <div style={{ display: "flex", gap: 4 }}>
+                  {SOUND_TARGETS.map((t) => (
+                    <button
+                      key={t.value}
+                      style={{
+                        ...styles.segBtn,
+                        flex: 1,
+                        fontSize: 10,
+                        ...(form.sound_target === t.value
+                          ? styles.segBtnActive
+                          : {}),
+                      }}
+                      onClick={() => onPatch({ sound_target: t.value })}
+                    >
+                      <Icon name={t.icon} size={12} />
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </Field>
           </>
         ) : null}
 
         <div style={styles.panelDivider} />
-
       </div>
     </div>
   );
@@ -3367,7 +3424,13 @@ function ActionTypeSelect({ value, onChange }) {
   );
 }
 
-function ActionEditor({ title = "Action", action, onChange, audioDevices }) {
+function ActionEditor({
+  title = "Action",
+  action,
+  onChange,
+  audioDevices,
+  inputDevices,
+}) {
   return (
     <>
       <Field label={title}>
@@ -3380,12 +3443,13 @@ function ActionEditor({ title = "Action", action, onChange, audioDevices }) {
         action={action}
         onChange={onChange}
         audioDevices={audioDevices}
+        inputDevices={inputDevices}
       />
     </>
   );
 }
 
-function ActionFields({ action, onChange, audioDevices }) {
+function ActionFields({ action, onChange, audioDevices, inputDevices }) {
   const meta = ACTION_BY_ID[action.action_type] || ACTION_BY_ID.keystroke;
   return (
     <>
@@ -3396,13 +3460,14 @@ function ActionFields({ action, onChange, audioDevices }) {
           action={action}
           onChange={onChange}
           audioDevices={audioDevices}
+          inputDevices={inputDevices}
         />
       ))}
     </>
   );
 }
 
-function ActionField({ field, action, onChange, audioDevices }) {
+function ActionField({ field, action, onChange, audioDevices, inputDevices }) {
   const value = action[field.key] || "";
 
   if (field.type === "info") {
@@ -3453,6 +3518,26 @@ function ActionField({ field, action, onChange, audioDevices }) {
     );
   }
 
+  if (field.type === "input_device") {
+    return (
+      <Field label={field.label}>
+        <select
+          value={value}
+          onChange={(e) => onChange({ [field.key]: e.target.value })}
+        >
+          <option value="">— select device —</option>
+          {inputDevices.map((d) => (
+            <option key={d.id} value={d.name}>
+              {d.name}
+              {d.isDefault ? " (default)" : ""}
+              {d.state !== "active" ? " — not connected" : ""}
+            </option>
+          ))}
+        </select>
+      </Field>
+    );
+  }
+
   if (field.type === "audio_device") {
     return (
       <Field label={field.label}>
@@ -3465,6 +3550,7 @@ function ActionField({ field, action, onChange, audioDevices }) {
             <option key={d.id} value={d.name}>
               {d.name}
               {d.isDefault ? " (default)" : ""}
+              {d.state !== "active" ? " — not connected" : ""}
             </option>
           ))}
         </select>
@@ -3511,7 +3597,13 @@ function ActionField({ field, action, onChange, audioDevices }) {
   );
 }
 
-function ActionStackEditor({ title, actions, onChange, audioDevices }) {
+function ActionStackEditor({
+  title,
+  actions,
+  onChange,
+  audioDevices,
+  inputDevices,
+}) {
   const safeActions = actions || [];
 
   function patchStep(index, patch) {
@@ -3566,6 +3658,7 @@ function ActionStackEditor({ title, actions, onChange, audioDevices }) {
               action={step}
               onChange={(patch) => patchStep(index, patch)}
               audioDevices={audioDevices}
+              inputDevices={inputDevices}
             />
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <span style={{ fontSize: 10, color: "#55556a" }}>Wait after</span>
@@ -3700,8 +3793,6 @@ const styles = {
   // ── Body ──
   body: { flex: 1, display: "flex", minHeight: 0, overflow: "hidden" },
 
-
-
   // ── Center grid ──
   // ── Canvas column ──
   // The deck is the subject, so it gets the room the sidebar used to take.
@@ -3784,8 +3875,16 @@ const styles = {
     color: "var(--text-secondary)",
     fontSize: 13,
   },
-  menuItemActive: { background: "var(--accent-soft)", color: "var(--text-primary)" },
-  menuCheck: { width: 14, display: "grid", placeItems: "center", color: "var(--accent)" },
+  menuItemActive: {
+    background: "var(--accent-soft)",
+    color: "var(--text-primary)",
+  },
+  menuCheck: {
+    width: 14,
+    display: "grid",
+    placeItems: "center",
+    color: "var(--accent)",
+  },
   menuItemName: {
     flex: 1,
     minWidth: 0,
@@ -3813,7 +3912,11 @@ const styles = {
     color: "var(--text-muted)",
     cursor: "pointer",
   },
-  menuDivider: { height: 1, background: "var(--border-subtle)", margin: "6px 2px" },
+  menuDivider: {
+    height: 1,
+    background: "var(--border-subtle)",
+    margin: "6px 2px",
+  },
   menuAction: {
     display: "flex",
     alignItems: "center",
@@ -4262,7 +4365,12 @@ const styles = {
     marginBottom: 10,
     borderBottom: "1px solid var(--border-subtle)",
   },
-  headerActions: { marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 },
+  headerActions: {
+    marginLeft: "auto",
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+  },
   dirtyPip: {
     display: "flex",
     alignItems: "center",
@@ -4275,7 +4383,12 @@ const styles = {
     background: "var(--warning-soft)",
     border: "1px solid rgba(251,191,36,0.30)",
   },
-  dirtyDot: { width: 6, height: 6, borderRadius: "50%", background: "var(--warning)" },
+  dirtyDot: {
+    width: 6,
+    height: 6,
+    borderRadius: "50%",
+    background: "var(--warning)",
+  },
   fieldHint: { fontSize: 11, color: "var(--text-muted)" },
   disclosure: {
     gridColumn: "1 / -1",

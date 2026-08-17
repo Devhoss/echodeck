@@ -27,8 +27,9 @@ function hasVoicemeeterRemoteRegistry() {
 // package shelled out to a helper .exe per call, which piled up hundreds of
 // processes during a volume hold and made read-modify-write non-atomic.
 let speaker;
+let mic;
 try {
-  ({ speaker } = require("win-audio"));
+  ({ speaker, mic } = require("win-audio"));
 } catch {
   console.warn(
     "⚠️  win-audio not installed — volume actions won't work. Run: npm install win-audio",
@@ -171,6 +172,32 @@ async function getMuted() {
   if (!speaker) return null;
   try {
     return speaker.isMuted();
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// FEATURE: Microphone controls
+//
+// Deliberately not routed through Voicemeeter: bus 0 is an output bus, so the
+// Voicemeeter path above would move the wrong thing. The capture endpoint is
+// always read and written directly.
+// ---------------------------------------------------------------------------
+
+function getMicVolume() {
+  if (!mic) return null;
+  try {
+    return mic.get();
+  } catch {
+    return null;
+  }
+}
+
+function getMicMuted() {
+  if (!mic) return null;
+  try {
+    return mic.isMuted();
   } catch {
     return null;
   }
@@ -389,10 +416,58 @@ function executeAction(type, value) {
     }
 
     if (type === "audio_switch_device") {
-      switchAudioDevice(value)
+      switchAudioDevice(value, "output")
         .then(resolve)
         .catch(() => resolve());
       return;
+    }
+
+    if (type === "mic_switch_device") {
+      switchAudioDevice(value, "input")
+        .then(resolve)
+        .catch(() => resolve());
+      return;
+    }
+
+    // FEATURE: Microphone controls — always direct, never via Voicemeeter
+    if (type === "mic_mute") {
+      if (mic) {
+        try {
+          mic.isMuted() ? mic.unmute() : mic.mute();
+        } catch (e) {
+          console.error("Mic mute failed:", e.message);
+        }
+      }
+      return resolve();
+    }
+
+    if (type === "mic_volume_set") {
+      const level = Math.max(0, Math.min(100, parseInt(value) || 50));
+      if (mic) {
+        try {
+          mic.set(level);
+        } catch (e) {
+          console.error("Mic volume failed:", e.message);
+        }
+      }
+      return resolve();
+    }
+
+    if (type === "mic_volume_up" || type === "mic_volume_down") {
+      const step = Math.max(1, Math.min(20, parseInt(value) || 5));
+      if (mic) {
+        try {
+          const current = mic.get();
+          mic.set(
+            type === "mic_volume_up"
+              ? Math.min(100, current + step)
+              : Math.max(0, current - step),
+          );
+        } catch (e) {
+          console.error("Mic volume failed:", e.message);
+        }
+      }
+      return resolve();
     }
 
     // FEATURE: Volume controls — Voicemeeter-first, win-audio fallback
@@ -538,6 +613,8 @@ module.exports = {
   executeSequence,
   getVolume,
   getMuted,
+  getMicVolume,
+  getMicMuted,
   getAudioDevices,
   switchAudioDevice,
   playAudioOnDevice,
