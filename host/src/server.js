@@ -515,18 +515,14 @@ const statsInterval = setInterval(async () => {
     sessions: sessionLevels(),
   });
   clients.forEach((ws) => {
-    if (ws.readyState !== 1) {
-      console.log(
-        `[statsInterval] skipping client ${ws.clientId} (${ws.clientIp}) — readyState ${ws.readyState}`,
-      );
-      return;
-    }
+    if (ws.readyState !== 1) return;
     try {
       ws.send(msg);
-      console.log(`[statsInterval] sent to ${ws.clientId} (${ws.clientIp})`);
     } catch (e) {
+      // A failed send is worth hearing about; a successful one fires every
+      // three seconds per client and drowns everything else.
       console.error(
-        `[statsInterval] send FAILED for ${ws.clientId} (${ws.clientIp}):`,
+        `Stats push failed for ${ws.clientId} (${ws.clientIp}):`,
         e.message,
       );
     }

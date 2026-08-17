@@ -276,10 +276,6 @@ export default function App() {
     const wsUrl = getWsUrl();
     if (!wsUrl) return;
 
-    console.log("isElectron", isElectron());
-    console.log("location", window.location.href);
-    console.log("hostname", window.location.hostname);
-    console.log("ws", getWsUrl());
 
     lastMessageAtRef.current = Date.now();
     const ws = new ReconnectingWebSocket(getWsUrl(), [], {
@@ -305,7 +301,7 @@ export default function App() {
       }
     };
     const onError = (e) => {
-      console.log("WS error", e);
+      console.warn("WS error", e);
       setStatus("disconnected");
     };
     // A hold sends optimistic updates for one target only, so each field is
@@ -335,7 +331,6 @@ export default function App() {
         console.warn("[WS] dropped unparseable frame");
         return;
       }
-      console.log("[WS] message received:", msg.t, "at", Date.now());
       if (msg.t === "state") {
         if (typeof msg.show_labels === "boolean")
           setShowLabels(msg.show_labels);
@@ -390,10 +385,7 @@ export default function App() {
       if (document.visibilityState === "hidden") return;
 
       const now = Date.now();
-      if (now < reconnectInFlightUntil) {
-        console.log("[reconnectIfStale] SKIPPED — reconnect already in flight");
-        return;
-      }
+      if (now < reconnectInFlightUntil) return;
 
       const isClosedOrClosing =
         ws.readyState === WebSocket.CLOSING ||
@@ -403,19 +395,12 @@ export default function App() {
       const isSilentWhileOpen =
         ws.readyState === WebSocket.OPEN && quietFor > 8000;
 
-      console.log(
-        "[reconnectIfStale] called, readyState:",
-        ws.readyState,
-        "quietFor:",
-        quietFor,
-        "isClosedOrClosing:",
-        isClosedOrClosing,
-        "isSilentWhileOpen:",
-        isSilentWhileOpen,
-      );
-
       if (isClosedOrClosing || isSilentWhileOpen) {
-        console.log("[reconnectIfStale] TRIGGERING RECONNECT");
+        // Kept: an actual reconnect is rare and is the thing you want in the
+        // log when a phone drops. The per-tick "still fine" line above was not.
+        console.warn(
+          `Reconnecting — socket ${ws.readyState}, quiet for ${quietFor}ms`,
+        );
         setStatus("connecting");
         reconnectInFlightUntil = now + 5000;
         try {
