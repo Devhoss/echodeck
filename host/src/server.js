@@ -11,6 +11,7 @@ const { findMatchingRule } = require("./ruleEngine");
 const {
   listApplications,
   primeApplicationCache,
+  getApplicationIcons,
 } = require("./appDiscovery");
 const { PORT, LAN_IP, LAN_URL } = require("./network");
 const {
@@ -153,6 +154,20 @@ app.get("/api/applications", async (req, res) => {
   } catch (e) {
     console.error("applications error:", e.message);
     res.json([]);
+  }
+});
+
+// POST rather than GET: identifiers carry backslashes, braces and exclamation
+// marks, and a picker asks for thirty at once — a query string is the wrong
+// shape for both. Extraction costs ~180ms per icon, so only the ones actually
+// on screen are ever requested, and the host caches what it has resolved.
+app.post("/api/applications/icons", async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.slice(0, 120) : [];
+    res.json(await getApplicationIcons(ids));
+  } catch (e) {
+    console.error("application icons error:", e.message);
+    res.json({});
   }
 });
 
