@@ -16,8 +16,11 @@ import deckIcon from "/deck-icon.png";
 import {
   DndContext,
   closestCenter,
+  pointerWithin,
   DragOverlay,
   PointerSensor,
+  useDraggable,
+  useDroppable,
   useSensor,
   useSensors,
 } from "@dnd-kit/core";
@@ -28,6 +31,7 @@ import {
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import { ActionIcon, Icon } from "../icons.jsx";
 import {
   ACTION_BY_ID,
   ACTION_CATEGORIES,
@@ -63,9 +67,9 @@ const VOLUME_ACTIONS = new Set(
   ),
 );
 const SOUND_TARGETS = [
-  { value: "phone", label: "📱 Phone" },
-  { value: "pc", label: "🖥️ PC" },
-  { value: "both", label: "📱+🖥️ Both" },
+  { value: "phone", label: "Phone", icon: "phone" },
+  { value: "pc", label: "PC", icon: "desktop" },
+  { value: "both", label: "Both", icon: "pages" },
 ];
 
 const CONDITION_TYPES = [
@@ -109,7 +113,6 @@ function parseDeviceName(userAgent) {
 }
 
 const globalStyles = `
-  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
 
   @keyframes pulse      { 0%,100%{opacity:1} 50%{opacity:0.35} }
   @keyframes ripple     { 0%{transform:scale(0);opacity:0.5} 100%{transform:scale(3);opacity:0} }
@@ -205,6 +208,13 @@ export default function DesktopApp({
   const [pcMonitorDevice, setPcMonitorDevice] = useState("");
   const [audioSettingsSaved, setAudioSettingsSaved] = useState(false);
   const [showDevices, setShowDevices] = useState(false);
+  // FEATURE: Auto-switch rules moved out of the sidebar — they are configured
+  // occasionally, so they no longer hold permanent canvas space.
+  const [showRules, setShowRules] = useState(false);
+  // Lifted so the page rail's + can open the profile menu straight into its
+  // "name this profile" state — before, it set addingPage on a closed menu and
+  // looked like it did nothing.
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [connectedDevices, setConnectedDevices] = useState([]);
   // FEATURE: Pairing — devices that hold a persisted credential. Distinct from
   // connectedDevices, which is only the sockets open right now.
@@ -230,6 +240,15 @@ export default function DesktopApp({
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   );
+
+  // Dragging an action must only land on something the pointer is actually
+  // over — closestCenter always returns the nearest droppable, which meant
+  // releasing anywhere replaced whichever key happened to be closest.
+  // Reordering keys keeps closestCenter, where "nearest" is what you want.
+  const collisionDetection = useCallback((args) => {
+    if (String(args.active.id).startsWith("action:")) return pointerWithin(args);
+    return closestCenter(args);
+  }, []);
 
   // FEATURE: Soundboard — enumerate playback devices, refreshing when the user
   // plugs in or removes hardware. Labels are only populated once the media
@@ -426,6 +445,71 @@ export default function DesktopApp({
     const newest = btns[btns.length - 1];
     if (newest) selectBtn(newest);
   }
+
+  // Dropping an action onto a key rewrites that key's action, keeping its
+  // label, icon and colour — you are changing what the key does, not replacing
+  // the key. A key that already does something asks first.
+  const assignAction = useCallback(
+    async (buttonId, actionType) => {
+      const target = buttons.find((b) => b.id === buttonId);
+      if (!target) return;
+
+      const apply = async () => {
+        const patch = applyActionTypeDefaults(
+          { action_type: target.action_type, action_value: target.action_value },
+          actionType,
+        );
+        await fetch(`${api()}/buttons/${buttonId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(patch),
+        });
+        const data = await reloadPages();
+        const page = data.find((p) => p.id === currentPage);
+        setButtons(page?.buttons || []);
+        const updated = (page?.buttons || []).find((b) => b.id === buttonId);
+        if (updated) selectBtn(updated);
+      };
+
+      const isBlank = !target.action_value && target.action_type === "keystroke";
+      if (isBlank) return apply();
+
+      askConfirm(
+        `Replace “${target.label}” with ${actionTypeLabel(actionType)}?`,
+        apply,
+      );
+    },
+    [buttons, currentPage, selectBtn, reloadPages, setButtons],
+  );
+
+  // Dropping onto the empty well creates a key already set to that action.
+  const createWithAction = useCallback(
+    async (actionType) => {
+      if (!currentPage) return;
+      const res = await fetch(`${api()}/buttons`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ page_id: currentPage }),
+      });
+      const created = await res.json().catch(() => null);
+      if (created?.id) {
+        await fetch(`${api()}/buttons/${created.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(
+            applyActionTypeDefaults({}, actionType),
+          ),
+        });
+      }
+      const data = await reloadPages();
+      const page = data.find((p) => p.id === currentPage);
+      const btns = page?.buttons || [];
+      setButtons(btns);
+      const newest = btns.find((b) => b.id === created?.id) ?? btns[btns.length - 1];
+      if (newest) selectBtn(newest);
+    },
+    [currentPage, selectBtn, reloadPages, setButtons],
+  );
 
   async function saveButton() {
     if (!resolvedSelected) return;
@@ -640,7 +724,19 @@ export default function DesktopApp({
   const handleDragEnd = useCallback(
     ({ active, over }) => {
       setActiveId(null);
-      if (!over || active.id === over.id) return;
+      if (!over) return;
+
+      // Library rows carry an `action:` prefix so they can be told apart from
+      // keys, which are dragged for reordering.
+      const dragged = String(active.id);
+      if (dragged.startsWith("action:")) {
+        const actionType = dragged.slice("action:".length);
+        if (over.id === ADD_SLOT_ID) createWithAction(actionType);
+        else assignAction(String(over.id), actionType);
+        return;
+      }
+
+      if (active.id === over.id) return;
       setButtons((prev) => {
         const oldIndex = prev.findIndex((b) => b.id === active.id);
         const newIndex = prev.findIndex((b) => b.id === over.id);
@@ -664,7 +760,7 @@ export default function DesktopApp({
         return reordered;
       });
     },
-    [wsRef, setButtons],
+    [wsRef, setButtons, assignAction, createWithAction],
   );
 
   // ── Derived ───────────────────────────────────────────────────────────────
@@ -673,6 +769,10 @@ export default function DesktopApp({
   const selectedBtnData = buttons.find((b) => b.id === resolvedSelected);
   const buttonIds = buttons.map((b) => b.id);
   const activeBtn = buttons.find((b) => b.id === activeId);
+  // A library row is being dragged rather than a key — used for the ghost.
+  const activeAction = String(activeId ?? "").startsWith("action:")
+    ? ACTION_BY_ID[String(activeId).slice("action:".length)]
+    : null;
   const currentRule = profileRules.find((r) => r.page_id === currentPage);
   const phoneDevices = useMemo(
     () =>
@@ -737,101 +837,81 @@ export default function DesktopApp({
 
       {/* ── Body ── */}
       <div style={styles.body}>
-        {/* ── LEFT: Profile/page sidebar ── */}
-        <Sidebar
-          pages={pages}
-          buttons={buttons}
-          pageButtonCounts={pageButtonCounts}
-          ruleEditorKey={ruleEditorKey}
-          currentPage={currentPage}
-          profileRules={profileRules}
-          autoSwitch={autoSwitch}
-          currentRule={currentRule}
-          activeWindow={activeWindow}
-          openWindows={openWindows}
-          showAppPicker={showAppPicker}
-          captureCountdown={captureCountdown}
-          onSelectPage={(id) => {
-            switchPage(id);
-            setSelectedBtn(null);
-          }}
-          onAddPage={addPage}
-          onDeletePage={deletePage}
-          onToggleAutoSwitch={toggleAutoSwitch}
-          onSaveRule={saveProfileRule}
-          onDeleteRule={deleteProfileRule}
-          onSelectRunningApp={loadOpenWindows}
-          onPickApp={saveAppAsRule}
-          onClosePicker={() => setShowAppPicker(false)}
-          onCaptureDelayed={startDelayedCapture}
-          onRefreshCurrentApp={getCurrentApp}
-          addingPage={addingPage}
-          setAddingPage={setAddingPage}
-          newPageName={newPageName}
-          setNewPageName={setNewPageName}
-        />
-
-        {/* ── CENTER: Button grid ── */}
-        <div style={styles.center}>
-          <div style={styles.gridHeader}>
-            <span style={styles.gridTitle}>
-              {pages.find((p) => p.id === currentPage)?.name || "—"}
-            </span>
-            <span style={styles.gridCount}>
-              {buttons.length} button{buttons.length !== 1 ? "s" : ""}
-            </span>
-            <button style={styles.addBtnPill} onClick={addButton}>
-              + Add Button
-            </button>
-            <button
-              onClick={() =>
-                setShowLabels((v) => {
-                  const next = !v;
-                  try {
-                    localStorage.setItem("deckShowLabels", String(next));
-                  } catch {
-                    /* */
-                  }
-                  return next;
-                })
-              }
-              style={{
-                ...styles.addBtnPill,
-                marginLeft: 8,
-                background: showLabels
-                  ? "rgba(79,128,255,0.14)"
-                  : "rgba(255,255,255,0.04)",
-                border: `1px solid ${showLabels ? "rgba(79,128,255,0.3)" : "#252530"}`,
-                color: showLabels ? "#7aafff" : "#44445a",
+        {/* ── CANVAS COLUMN ── */}
+        <DndContext
+          sensors={sensors}
+          collisionDetection={collisionDetection}
+          onDragStart={handleDragStart}
+          onDragEnd={handleDragEnd}
+        >
+        <div style={styles.canvasCol}>
+          <div style={styles.canvasHead}>
+            <ProfileMenu
+              open={profileMenuOpen}
+              setOpen={setProfileMenuOpen}
+              pages={pages}
+              currentPage={currentPage}
+              buttons={buttons}
+              pageButtonCounts={pageButtonCounts}
+              profileRules={profileRules}
+              onSelectPage={(id) => {
+                switchPage(id);
+                setSelectedBtn(null);
               }}
-              title="Toggle button labels"
-            >
-              {showLabels ? "Hide Labels" : "Show Labels"}
-            </button>
+              onAddPage={addPage}
+              onDeletePage={deletePage}
+              onOpenRules={() => setShowRules(true)}
+              addingPage={addingPage}
+              setAddingPage={setAddingPage}
+              newPageName={newPageName}
+              setNewPageName={setNewPageName}
+            />
+
+            <div style={styles.canvasHeadActions}>
+              <button style={styles.ghostBtn} onClick={addButton}>
+                <Icon name="add" size={14} />
+                Add Button
+              </button>
+              <button
+                onClick={() =>
+                  setShowLabels((v) => {
+                    const next = !v;
+                    try {
+                      localStorage.setItem("deckShowLabels", String(next));
+                    } catch {
+                      /* */
+                    }
+                    return next;
+                  })
+                }
+                style={{
+                  ...styles.ghostBtn,
+                  ...(showLabels ? styles.ghostBtnOn : {}),
+                }}
+                aria-pressed={showLabels}
+              >
+                {showLabels ? "Hide labels" : "Show labels"}
+              </button>
+            </div>
           </div>
 
-          <DndContext
-            sensors={sensors}
-            collisionDetection={closestCenter}
-            onDragStart={handleDragStart}
-            onDragEnd={handleDragEnd}
-          >
             <SortableContext items={buttonIds} strategy={rectSortingStrategy}>
-              <div style={styles.grid}>
-                {buttons.map((btn) => (
-                  <DesktopSortableButton
-                    key={btn.id}
-                    btn={btn}
-                    selected={resolvedSelected === btn.id}
-                    volume={volume}
-                    muted={muted}
-                    onSelect={selectBtn}
-                    showLabels={showLabels}
-                  />
-                ))}
-                {/* Empty add slot */}
-                <div style={styles.addSlot} onClick={addButton}>
-                  <span style={styles.addSlotPlus}>+</span>
+              <div style={styles.canvas}>
+                <div style={styles.grid}>
+                  {buttons.map((btn) => (
+                    <DesktopSortableButton
+                      key={btn.id}
+                      btn={btn}
+                      selected={resolvedSelected === btn.id}
+                      volume={volume}
+                      muted={muted}
+                      onSelect={selectBtn}
+                      showLabels={showLabels}
+                      droppingAction={!!activeAction}
+                    />
+                  ))}
+                  {/* Empty well — click to add, or drop an action to create */}
+                  <AddSlot onClick={addButton} />
                 </div>
               </div>
             </SortableContext>
@@ -846,26 +926,46 @@ export default function DesktopApp({
                   muted={muted}
                   ghost
                 />
+              ) : activeAction ? (
+                <div style={styles.actionGhost}>
+                  <ActionIcon name={activeAction.icon} size={15} />
+                  {activeAction.name}
+                </div>
               ) : null}
             </DragOverlay>
-          </DndContext>
+
+          <PageRail
+            pages={pages}
+            currentPage={currentPage}
+            onSelectPage={(id) => {
+              switchPage(id);
+              setSelectedBtn(null);
+            }}
+            onAddPage={() => {
+              setAddingPage(true);
+              setProfileMenuOpen(true);
+            }}
+          />
+
+          {/* ── Inspector: sits under the canvas, like the deck's own panel ── */}
+          <PropertyPanel
+            btn={selectedBtnData}
+            form={resolvedForm}
+            saving={saving}
+            saved={saved}
+            dirty={isDirty}
+            audioDevices={audioDevices}
+            onPatch={patchForm}
+            onSave={saveButton}
+            onDelete={deleteButton}
+            onUploadIcon={uploadIcon}
+            onUploadSound={uploadSound}
+            onDeleteSound={deleteSound}
+          />
         </div>
 
-        {/* ── RIGHT: Property panel ── */}
-        <PropertyPanel
-          btn={selectedBtnData}
-          form={resolvedForm}
-          saving={saving}
-          saved={saved}
-          dirty={isDirty}
-          audioDevices={audioDevices}
-          onPatch={patchForm}
-          onSave={saveButton}
-          onDelete={deleteButton}
-          onUploadIcon={uploadIcon}
-          onUploadSound={uploadSound}
-          onDeleteSound={deleteSound}
-        />
+        <ActionLibrary />
+        </DndContext>
       </div>
       {showQR && (
         <div
@@ -990,7 +1090,7 @@ export default function DesktopApp({
               }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ fontSize: 16 }}>📱</span>
+                <Icon name="phone" size={17} />
                 <span
                   style={{ fontWeight: 700, fontSize: 14, color: "#e0e0ec" }}
                 >
@@ -1020,7 +1120,7 @@ export default function DesktopApp({
                   padding: "2px 6px",
                 }}
               >
-                ✕
+                <Icon name="close" size={14} />
               </button>
             </div>
             <div
@@ -1067,7 +1167,9 @@ export default function DesktopApp({
                           opacity: online ? 1 : 0.65,
                         }}
                       >
-                        <div style={{ fontSize: 22, flexShrink: 0 }}>📱</div>
+                        <div style={{ flexShrink: 0, color: "var(--text-secondary)" }}>
+                          <Icon name="phone" size={22} />
+                        </div>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div
                             style={{
@@ -1213,7 +1315,7 @@ export default function DesktopApp({
               }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ fontSize: 16 }}>🎛️</span>
+                <Icon name="sound" size={17} />
                 <span
                   style={{ fontWeight: 700, fontSize: 14, color: "#e0e0ec" }}
                 >
@@ -1231,7 +1333,7 @@ export default function DesktopApp({
                   padding: "2px 6px",
                 }}
               >
-                ✕
+                <Icon name="close" size={14} />
               </button>
             </div>
             <div style={{ padding: "20px 20px 24px" }}>
@@ -1252,7 +1354,7 @@ export default function DesktopApp({
                     marginBottom: 6,
                   }}
                 >
-                  🖥️ PC Soundboard Output Device
+                  PC Soundboard Output Device
                 </div>
                 <div
                   style={{
@@ -1360,12 +1462,34 @@ export default function DesktopApp({
                     cursor: "pointer",
                   }}
                 >
-                  {audioSettingsSaved ? "✓ Saved!" : "Save"}
+                  {audioSettingsSaved ? "Saved" : "Save"}
                 </button>
               </div>
             </div>
           </div>
         </div>
+      )}
+
+      {showRules && currentPage && (
+        <RuleEditorModal
+          key={`${currentPage}-${ruleEditorKey}`}
+          pageName={pages.find((p) => p.id === currentPage)?.name || ""}
+          rule={currentRule}
+          enabled={autoSwitch}
+          activeWindow={activeWindow}
+          openWindows={openWindows}
+          showAppPicker={showAppPicker}
+          captureCountdown={captureCountdown}
+          onClose={() => setShowRules(false)}
+          onToggleGlobal={toggleAutoSwitch}
+          onSave={saveProfileRule}
+          onDelete={deleteProfileRule}
+          onSelectRunningApp={loadOpenWindows}
+          onPickApp={saveAppAsRule}
+          onClosePicker={() => setShowAppPicker(false)}
+          onCaptureDelayed={startDelayedCapture}
+          onRefreshCurrentApp={getCurrentApp}
+        />
       )}
 
       {confirmModal && (
@@ -1512,7 +1636,7 @@ function TopBar({
           }}
           title="Connected devices"
         >
-          <span style={{ fontSize: 11 }}>📱</span>
+          <Icon name="phone" size={15} />
           <span>Devices{devicesCount > 0 ? ` (${devicesCount})` : ""}</span>
         </button>
 
@@ -1522,7 +1646,7 @@ function TopBar({
           style={styles.topBarBtn}
           title="Audio settings"
         >
-          <span style={{ fontSize: 11 }}>🎛️</span>
+          <Icon name="sound" size={15} />
           <span>Audio</span>
         </button>
 
@@ -1534,7 +1658,7 @@ function TopBar({
             ...(pairOpen ? styles.topBarBtnActive : {}),
           }}
         >
-          <span style={{ fontSize: 11 }}>＋</span>
+          <Icon name="add" size={15} />
           <span>{pairOpen ? "QR Open" : "Add Phone"}</span>
         </button>
 
@@ -1613,7 +1737,7 @@ function VolChip({ volume, muted }) {
       }}
     >
       <span style={{ fontSize: 10 }}>
-        {muted ? "🔇" : volume > 60 ? "🔊" : "🔉"}
+        <Icon name="sound" size={13} />
       </span>
       <div
         style={{
@@ -1630,7 +1754,9 @@ function VolChip({ volume, muted }) {
             width: "100%",
             transformOrigin: "left center",
             transform: `scaleX(${(muted ? 0 : volume) / 100})`,
-            background: muted ? "#f87171" : volume > 95 ? "#fb923c" : "#4ade80",
+            // Level is a quantity, not a health status — neutral white, with red
+              // kept for muted, which is a state worth flagging.
+              background: muted ? "#f87171" : "rgba(255,255,255,0.85)",
             borderRadius: 2,
             transition: "transform 0.15s",
           }}
@@ -1651,177 +1777,393 @@ function VolChip({ volume, muted }) {
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 
-function Sidebar({
+/**
+ * The profile switcher, replacing the old left sidebar. Switching is the common
+ * action so it sits one click away; creating, deleting and auto-switch rules are
+ * occasional, so they live at the bottom of the menu rather than on screen.
+ */
+/** Drop target id for the empty well at the end of the deck. */
+const ADD_SLOT_ID = "__add_slot__";
+
+/** The empty well: click to add a blank key, or drop an action to create one. */
+function AddSlot({ onClick }) {
+  const { setNodeRef, isOver } = useDroppable({ id: ADD_SLOT_ID });
+  return (
+    <button
+      ref={setNodeRef}
+      style={{
+        ...styles.addSlot,
+        ...(isOver ? styles.addSlotOver : {}),
+      }}
+      onClick={onClick}
+      aria-label="Add a key"
+    >
+      <Icon name="add" size={20} />
+    </button>
+  );
+}
+
+/** One draggable row in the library. */
+function ActionRow({ action }) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `action:${action.id}`,
+  });
+  return (
+    <div
+      ref={setNodeRef}
+      {...listeners}
+      {...attributes}
+      style={{
+        ...styles.actionRow,
+        ...(isDragging ? styles.actionRowDragging : {}),
+      }}
+      title={action.name}
+    >
+      <ActionIcon name={action.icon} size={15} />
+      <span style={styles.actionRowName}>{action.name}</span>
+      <span style={styles.actionRowGrip}>
+        <Icon name="drag" size={13} />
+      </span>
+    </div>
+  );
+}
+
+/**
+ * The actions library. Search filters across action and category names; each
+ * category collapses so a long list stays navigable. Searching expands
+ * everything that matched, because a hit hidden inside a collapsed group reads
+ * as no result at all.
+ */
+function ActionLibrary() {
+  const [query, setQuery] = useState("");
+  const [collapsed, setCollapsed] = useState(() => new Set());
+
+  const q = query.trim().toLowerCase();
+  const groups = ACTION_CATEGORIES.map((cat) => ({
+    label: cat.label,
+    actions: q
+      ? cat.actions.filter(
+          (a) =>
+            a.name.toLowerCase().includes(q) ||
+            cat.label.toLowerCase().includes(q),
+        )
+      : cat.actions,
+  })).filter((g) => g.actions.length > 0);
+
+  const total = groups.reduce((n, g) => n + g.actions.length, 0);
+
+  return (
+    <aside style={styles.library} aria-label="Actions library">
+      <div style={styles.libraryHead}>
+        <div style={styles.searchWrap}>
+          <span style={styles.searchIcon}>
+            <Icon name="search" size={14} />
+          </span>
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search actions"
+            aria-label="Search actions"
+            style={styles.searchInput}
+          />
+          {query ? (
+            <button
+              style={styles.searchClear}
+              onClick={() => setQuery("")}
+              aria-label="Clear search"
+            >
+              <Icon name="close" size={13} />
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      <div style={styles.libraryList}>
+        {total === 0 ? (
+          <div style={styles.libraryEmpty}>
+            No actions match “{query}”
+          </div>
+        ) : (
+          groups.map((group) => {
+            const isOpen = q ? true : !collapsed.has(group.label);
+            return (
+              <div key={group.label}>
+                <button
+                  style={styles.catHead}
+                  aria-expanded={isOpen}
+                  onClick={() =>
+                    setCollapsed((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(group.label)) next.delete(group.label);
+                      else next.add(group.label);
+                      return next;
+                    })
+                  }
+                >
+                  <span
+                    style={{
+                      ...styles.catChevron,
+                      transform: isOpen ? "rotate(90deg)" : "none",
+                    }}
+                  >
+                    <Icon name="chevronRight" size={13} />
+                  </span>
+                  <span style={styles.catName}>{group.label}</span>
+                  <span style={styles.catCount}>{group.actions.length}</span>
+                </button>
+
+                {isOpen ? (
+                  <div style={styles.catItems}>
+                    {group.actions.map((action) => (
+                      <ActionRow key={action.id} action={action} />
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      <div style={styles.libraryHint}>
+        Drag an action onto a key, or onto the empty well to make a new one.
+      </div>
+    </aside>
+  );
+}
+
+function ProfileMenu({
+  open,
+  setOpen,
   pages,
+  currentPage,
   buttons,
   pageButtonCounts,
-  currentPage,
   profileRules,
-  autoSwitch,
-  switchDelay,
-  ruleEditorKey,
-  currentRule,
-  activeWindow,
-  openWindows,
-  showAppPicker,
-  captureCountdown,
   onSelectPage,
   onAddPage,
   onDeletePage,
-  onToggleAutoSwitch,
-  onChangeDelay,
-  onSaveRule,
-  onDeleteRule,
-  onSelectRunningApp,
-  onPickApp,
-  onClosePicker,
-  onCaptureDelayed,
-  onRefreshCurrentApp,
+  onOpenRules,
   addingPage,
   setAddingPage,
   newPageName,
   setNewPageName,
 }) {
-  const newPageInputRef = useRef();
+  const wrapRef = useRef(null);
+  const inputRef = useRef(null);
+  const current = pages.find((p) => p.id === currentPage);
+  const rule = profileRules.find((r) => r.page_id === currentPage);
+
+  // Clicking away or pressing Escape closes the menu — a dropdown that can only
+  // be dismissed by re-clicking its trigger feels stuck.
   useEffect(() => {
-    if (addingPage) setTimeout(() => newPageInputRef.current?.focus(), 50);
+    if (!open) return;
+    const onDown = (e) => {
+      if (!wrapRef.current?.contains(e.target)) setOpen(false);
+    };
+    const onKey = (e) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, setOpen]);
+
+  useEffect(() => {
+    if (addingPage) setTimeout(() => inputRef.current?.focus(), 50);
   }, [addingPage]);
 
   return (
-    <div style={styles.sidebar}>
-      {/* Profiles section */}
-      <div style={styles.sidebarHeader}>
-        <span style={styles.sidebarHeading}>PROFILES</span>
+    <div style={styles.profileWrap} ref={wrapRef}>
+      <button
+        style={styles.profileTrigger}
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-haspopup="menu"
+      >
+        <span style={styles.profileName}>{current?.name || "—"}</span>
+        <Icon name="chevronDown" size={16} />
+      </button>
+
+      <div style={styles.profileMeta}>
+        {buttons.length} button{buttons.length === 1 ? "" : "s"}
+        {rule?.enabled && rule.conditions?.[0]?.value
+          ? ` · auto-switches on ${rule.conditions[0].value}`
+          : ""}
       </div>
 
-      <div style={styles.sidebarList}>
-        {pages.map((p) => {
-          const rule = profileRules.find((r) => r.page_id === p.id);
-          const isActive = p.id === currentPage;
-          return (
-            <div
-              key={p.id}
-              style={{
-                ...styles.pageItem,
-                ...(isActive ? styles.pageItemActive : {}),
-              }}
-              onClick={() => onSelectPage(p.id)}
-            >
+      {open && (
+        <div style={styles.menu} role="menu">
+          <div style={styles.menuLabel}>Profiles</div>
+
+          {pages.map((p) => {
+            const isActive = p.id === currentPage;
+            const pRule = profileRules.find((r) => r.page_id === p.id);
+            return (
               <div
+                key={p.id}
+                role="menuitem"
+                tabIndex={0}
                 style={{
-                  ...styles.pageItemIconBox,
-                  background: isActive ? "rgba(79,128,255,0.18)" : "#1e1e26",
-                  border: `1px solid ${isActive ? "rgba(79,128,255,0.35)" : "#2c2c3a"}`,
+                  ...styles.menuItem,
+                  ...(isActive ? styles.menuItemActive : {}),
+                }}
+                onClick={() => {
+                  onSelectPage(p.id);
+                  setOpen(false);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onSelectPage(p.id);
+                    setOpen(false);
+                  }
                 }}
               >
-                <span style={{ fontSize: 13 }}>🗂</span>
-              </div>
-              <div style={styles.pageItemInfo}>
-                <span
-                  style={{
-                    ...styles.pageItemName,
-                    color: isActive ? "#e8e8f0" : "#9898a8",
-                  }}
-                >
-                  {p.name}
+                <span style={styles.menuCheck}>
+                  {isActive ? <Icon name="check" size={14} /> : null}
                 </span>
-                {rule?.enabled && rule.conditions?.[0]?.value && (
-                  <span style={styles.pageItemRule}>
-                    ⚡ {rule.conditions[0].value}
-                  </span>
+                <span style={styles.menuItemName}>{p.name}</span>
+                {pRule?.enabled && pRule.conditions?.[0]?.value ? (
+                  <span style={styles.menuRuleDot} title="Auto-switch rule set" />
+                ) : null}
+                <span style={styles.menuCount}>
+                  {isActive ? buttons.length : (pageButtonCounts[p.id] ?? 0)}
+                </span>
+                {pages.length > 1 && (
+                  <button
+                    style={styles.menuDelete}
+                    aria-label={`Delete ${p.name}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeletePage(p.id);
+                    }}
+                  >
+                    <Icon name="close" size={13} />
+                  </button>
                 )}
               </div>
-              <span style={styles.pageItemCount}>
-                {p.id === currentPage
-                  ? buttons.length
-                  : (pageButtonCounts[p.id] ?? 0)}
-              </span>
-              {pages.length > 1 && (
-                <button
-                  style={styles.pageDeleteBtn}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDeletePage(p.id);
-                  }}
-                  title="Delete profile"
-                >
-                  ✕
-                </button>
-              )}
-            </div>
-          );
-        })}
+            );
+          })}
 
-        {addingPage ? (
-          <div style={styles.newPageRow}>
-            <input
-              ref={newPageInputRef}
-              value={newPageName}
-              onChange={(e) => setNewPageName(e.target.value)}
-              placeholder="Profile name…"
-              onKeyDown={(e) => {
-                if (e.key === "Enter") onAddPage();
-                if (e.key === "Escape") {
-                  setAddingPage(false);
-                  setNewPageName("");
-                }
-              }}
-              style={{ fontSize: 12, padding: "6px 10px" }}
-            />
-            <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
+          <div style={styles.menuDivider} />
+
+          {addingPage ? (
+            <div style={styles.menuAddRow}>
+              <input
+                ref={inputRef}
+                value={newPageName}
+                onChange={(e) => setNewPageName(e.target.value)}
+                placeholder="Profile name…"
+                style={styles.menuInput}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    onAddPage();
+                    setOpen(false);
+                  }
+                  if (e.key === "Escape") {
+                    setAddingPage(false);
+                    setNewPageName("");
+                  }
+                }}
+              />
               <button
-                style={styles.newPageConfirm}
-                onClick={onAddPage}
+                style={styles.menuPrimary}
+                onClick={() => {
+                  onAddPage();
+                  setOpen(false);
+                }}
                 disabled={!newPageName.trim()}
               >
                 Add
               </button>
-              <button
-                style={styles.newPageCancel}
-                onClick={() => {
-                  setAddingPage(false);
-                  setNewPageName("");
-                }}
-              >
-                Cancel
-              </button>
             </div>
-          </div>
-        ) : (
-          <button style={styles.addPageBtn} onClick={() => setAddingPage(true)}>
-            <span style={{ fontSize: 15, lineHeight: 1 }}>+</span>
-            <span>New Profile</span>
+          ) : (
+            <button style={styles.menuAction} onClick={() => setAddingPage(true)}>
+              <Icon name="add" size={14} />
+              New profile
+            </button>
+          )}
+
+          <button
+            style={styles.menuAction}
+            onClick={() => {
+              onOpenRules();
+              setOpen(false);
+            }}
+          >
+            <Icon name="settings" size={14} />
+            Auto-switch rules…
           </button>
-        )}
-      </div>
-
-      <div style={styles.sidebarDivider} />
-
-      {/* Auto-switch rule editor */}
-      {currentPage && (
-        <AutoSwitchRuleEditor
-          key={`${currentPage}-${ruleEditorKey}`}
-          rule={currentRule}
-          enabled={autoSwitch}
-          switchDelay={switchDelay}
-          activeWindow={activeWindow}
-          openWindows={openWindows}
-          showAppPicker={showAppPicker}
-          captureCountdown={captureCountdown}
-          onToggleGlobal={onToggleAutoSwitch}
-          onChangeDelay={onChangeDelay}
-          onSave={onSaveRule}
-          onDelete={onDeleteRule}
-          onSelectRunningApp={onSelectRunningApp}
-          onPickApp={onPickApp}
-          onClosePicker={onClosePicker}
-          onCaptureDelayed={onCaptureDelayed}
-          onRefreshCurrentApp={onRefreshCurrentApp}
-        />
+        </div>
       )}
     </div>
   );
 }
+
+/** Profile pills under the canvas — the fast switch, mirroring a deck's pages. */
+function PageRail({ pages, currentPage, onSelectPage, onAddPage }) {
+  return (
+    <div style={styles.pageRail}>
+      {pages.map((p, i) => (
+        <button
+          key={p.id}
+          style={{
+            ...styles.pagePill,
+            ...(p.id === currentPage ? styles.pagePillActive : {}),
+          }}
+          onClick={() => onSelectPage(p.id)}
+          aria-current={p.id === currentPage}
+          title={p.name}
+        >
+          {i + 1}
+        </button>
+      ))}
+      <button style={styles.pagePill} onClick={onAddPage} aria-label="New profile">
+        <Icon name="add" size={13} />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Auto-switch rules in a modal. The editor itself is unchanged — only where it
+ * lives moved, so it no longer costs the canvas a 320px column.
+ */
+function RuleEditorModal({ pageName, onClose, ...editorProps }) {
+  useEffect(() => {
+    const onKey = (e) => e.key === "Escape" && onClose();
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div style={styles.modalBackdrop} onClick={onClose}>
+      <div
+        style={styles.modalCard}
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Auto-switch rules for ${pageName}`}
+      >
+        <div style={styles.modalHead}>
+          <div>
+            <div style={styles.modalTitle}>Auto-switch rules</div>
+            <div style={styles.modalSub}>{pageName}</div>
+          </div>
+          <button style={styles.iconBtn} onClick={onClose} aria-label="Close">
+            <Icon name="close" size={18} />
+          </button>
+        </div>
+        <div style={styles.modalBody}>
+          <AutoSwitchRuleEditor {...editorProps} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 function Toggle({ value, onChange }) {
   return (
@@ -2102,7 +2444,7 @@ function AutoSwitchRuleEditor({
             disabled={conditions.length === 1}
             title="Remove condition"
           >
-            ✕
+            <Icon name="close" size={14} />
           </button>
         </div>
       ))}
@@ -2145,7 +2487,7 @@ function AutoSwitchRuleEditor({
           <div style={rs.pickerHeader}>
             <span>Running apps</span>
             <button style={rs.pickerClose} onClick={onClosePicker}>
-              ✕
+              <Icon name="close" size={14} />
             </button>
           </div>
           <div style={rs.pickerList}>
@@ -2193,6 +2535,7 @@ const DesktopSortableButton = memo(function DesktopSortableButton({
   muted,
   onSelect,
   showLabels,
+  droppingAction,
 }) {
   const {
     attributes,
@@ -2201,7 +2544,12 @@ const DesktopSortableButton = memo(function DesktopSortableButton({
     transform,
     transition,
     isDragging,
+    isOver,
   } = useSortable({ id: btn.id });
+
+  // Only light up while an action is being dragged — during a reorder every
+  // key passes under the cursor and flashing them all would be noise.
+  const isDropTarget = isOver && droppingAction;
 
   return (
     <div
@@ -2210,9 +2558,24 @@ const DesktopSortableButton = memo(function DesktopSortableButton({
       {...listeners}
       style={{
         transform: CSS.Transform.toString(transform),
-        transition,
         zIndex: isDragging ? 999 : "auto",
         opacity: isDragging ? 0.3 : 1,
+        borderRadius: 14,
+        // Longhands, not the `outline` shorthand: a var() inside a shorthand set
+        // through inline styles becomes a pending-substitution value and
+        // computes to transparent, so the highlight never painted.
+        outlineStyle: "solid",
+        outlineWidth: 2,
+        outlineColor: isDropTarget ? "var(--accent)" : "transparent",
+        outlineOffset: 2,
+        boxShadow: isDropTarget ? "0 0 0 6px rgba(59,130,246,0.20)" : "none",
+        transition: [
+          transition,
+          "outline-color 140ms var(--ease-out)",
+          "box-shadow 140ms var(--ease-out)",
+        ]
+          .filter(Boolean)
+          .join(", "),
         ...(btn.size === "2x2"
           ? { gridColumn: "span 2", gridRow: "span 2" }
           : {}),
@@ -2346,7 +2709,7 @@ function ButtonTile({
             zIndex: 3,
           }}
         >
-          🔊
+          <Icon name="sound" size={9} />
         </div>
       )}
 
@@ -2363,7 +2726,7 @@ function ButtonTile({
             zIndex: 3,
           }}
         >
-          🔒
+          <Icon name="guarded" size={9} />
         </div>
       )}
 
@@ -2422,46 +2785,51 @@ function ButtonTile({
         <div
           style={{
             position: "absolute",
-            inset: 0,
+            left: 9,
+            right: 9,
+            bottom: 7,
+            pointerEvents: "none",
+            zIndex: 3,
             display: "flex",
             flexDirection: "column",
-            justifyContent: "flex-end",
-            pointerEvents: "none",
-            zIndex: 2,
-            borderRadius: 14,
-            overflow: "hidden",
+            gap: 3,
+            alignItems: "center",
           }}
         >
-          <div
+          <span
             style={{
-              width: "100%",
-              height: "100%",
-              flexShrink: 0,
-              transformOrigin: "bottom center",
-              transform: `scaleY(${(muted ? 0 : volume) / 100})`,
-              background: muted
-                ? "rgba(248,113,113,0.25)"
-                : volume > 95
-                  ? "rgba(251,146,60,0.2)"
-                  : "rgba(74,222,128,0.15)",
-              transition: "transform 0.12s ease",
-            }}
-          />
-          <div
-            style={{
-              position: "absolute",
-              bottom: 8,
-              left: 0,
-              right: 0,
-              textAlign: "center",
-              fontSize: 10,
+              fontSize: 9,
               fontWeight: 700,
-              color: muted ? "#f87171" : "#fff",
-              textShadow: "0 1px 3px rgba(0,0,0,0.9)",
+              letterSpacing: 0.3,
+              color: muted ? "#f87171" : "rgba(255,255,255,0.8)",
+              textShadow: "0 1px 3px rgba(0,0,0,0.7)",
+              fontVariantNumeric: "tabular-nums",
             }}
           >
-            {muted ? "MUTE" : `${volume}%`}
-          </div>
+            {muted ? "MUTED" : `${volume}%`}
+          </span>
+          <span
+            style={{
+              width: "100%",
+              height: 3,
+              borderRadius: 2,
+              background: "rgba(255,255,255,0.14)",
+              overflow: "hidden",
+            }}
+          >
+            <span
+              style={{
+                display: "block",
+                width: "100%",
+                height: "100%",
+                borderRadius: 2,
+                transformOrigin: "left center",
+                transform: `scaleX(${(muted ? 0 : volume) / 100})`,
+                background: muted ? "#f87171" : "rgba(255,255,255,0.92)",
+                transition: "transform 0.12s ease, background 0.12s ease",
+              }}
+            />
+          </span>
         </div>
       )}
 
@@ -2513,6 +2881,17 @@ function PropertyPanel({
   const iconRef = useRef();
   const soundRef = useRef();
 
+  // Advanced stays shut for a plain key, but opens on its own when the key is
+  // already using one of these — a configured setting must never be hidden.
+  const usesAdvanced =
+    !!form.is_toggle ||
+    form.button_mode === "multi" ||
+    form.button_mode === "multi_switch" ||
+    form.actions?.length > 0 ||
+    !!form.sound_file;
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const advancedOpen = showAdvanced || usesAdvanced;
+
   if (!btn) {
     return (
       <div style={styles.panel}>
@@ -2532,14 +2911,14 @@ function PropertyPanel({
               boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
             }}
           >
-            🎛️
+            <Icon name="settings" size={26} />
           </div>
           <div style={styles.panelEmptyText}>
-            Select a button
-            <br />
-            to configure it
+            Select a key to configure it
           </div>
-          <div style={styles.panelEmptyHint}>Drag buttons to reorder</div>
+          <div style={styles.panelEmptyHint}>
+            Drag a key to reorder the deck
+          </div>
         </div>
       </div>
     );
@@ -2549,18 +2928,19 @@ function PropertyPanel({
     <div style={styles.panel}>
       <div style={styles.panelInner}>
         {/* Preview */}
+        <div style={styles.headerBar}>
         <div style={styles.previewRow}>
           <div
             style={{
-              width: 68,
-              height: 68,
-              borderRadius: 14,
+              width: 46,
+              height: 46,
+              borderRadius: 11,
               background: `linear-gradient(160deg, ${form.color}28, ${form.color}12)`,
               border: `1.5px solid ${form.color}50`,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              fontSize: 30,
+              fontSize: 22,
               position: "relative",
               overflow: "hidden",
               flexShrink: 0,
@@ -2595,7 +2975,28 @@ function PropertyPanel({
           </div>
         </div>
 
-        <div style={styles.panelDivider} />
+          <div style={styles.headerActions}>
+            {dirty && !saving ? (
+              <span style={styles.dirtyPip} title="Unsaved changes">
+                <span style={styles.dirtyDot} />
+                Unsaved
+              </span>
+            ) : null}
+            <button
+              style={{
+                ...styles.saveBtn,
+                ...(dirty || saving ? {} : styles.saveBtnClean),
+              }}
+              onClick={onSave}
+              disabled={saving || !dirty}
+            >
+              {saving ? "Saving…" : saved ? "Saved" : "Save"}
+            </button>
+            <button style={styles.deleteBtn} onClick={onDelete} aria-label="Delete key">
+              <Icon name="delete" size={15} />
+            </button>
+          </div>
+        </div>
 
         {/* Label */}
         <Field label="Label">
@@ -2630,7 +3031,7 @@ function PropertyPanel({
               onClick={() => iconRef.current?.click()}
               title="Upload image/GIF/video"
             >
-              📁
+              <Icon name="upload" size={14} />
             </button>
             {form.icon_data && (
               <button
@@ -2638,7 +3039,7 @@ function PropertyPanel({
                 onClick={() => onPatch({ icon_data: null })}
                 title="Remove image"
               >
-                ✕
+                <Icon name="close" size={14} />
               </button>
             )}
           </div>
@@ -2658,9 +3059,9 @@ function PropertyPanel({
               <div
                 key={c}
                 style={{
-                  width: 22,
-                  height: 22,
-                  borderRadius: 6,
+                  width: 18,
+                  height: 18,
+                  borderRadius: 5,
                   background: c,
                   cursor: "pointer",
                   border:
@@ -2709,9 +3110,7 @@ function PropertyPanel({
               value={!!form.require_confirm}
               onChange={(v) => onPatch({ require_confirm: v ? 1 : 0 })}
             />
-            <span style={{ fontSize: 11, color: "#666" }}>
-              Phone must hold the button to fire it
-            </span>
+            <span style={styles.fieldHint}>Hold on phone to fire</span>
           </div>
         </Field>
 
@@ -2730,6 +3129,20 @@ function PropertyPanel({
           />
         ) : null}
 
+        <button
+          style={styles.disclosure}
+          onClick={() => setShowAdvanced((v) => !v)}
+          aria-expanded={advancedOpen}
+        >
+          <Icon name={advancedOpen ? "chevronDown" : "chevronRight"} size={14} />
+          Advanced
+          {usesAdvanced && !showAdvanced ? (
+            <span style={styles.disclosureNote}>in use</span>
+          ) : null}
+        </button>
+
+        {advancedOpen ? (
+          <>
         {/* Toggle */}
         <Field label="Toggle mode">
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -2867,13 +3280,15 @@ function PropertyPanel({
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {form.sound_file ? (
               <div style={{ display: "flex", gap: 6 }}>
-                <div style={styles.soundChip}>🔊 Sound attached</div>
+                <div style={styles.soundChip}>
+                  <Icon name="sound" size={12} /> Sound attached
+                </div>
                 <button
                   style={{ ...styles.iconUploadBtn, color: "#f87171" }}
                   onClick={onDeleteSound}
                   title="Remove sound"
                 >
-                  ✕
+                  <Icon name="close" size={14} />
                 </button>
               </div>
             ) : (
@@ -2910,77 +3325,18 @@ function PropertyPanel({
                   }}
                   onClick={() => onPatch({ sound_target: t.value })}
                 >
+                  <Icon name={t.icon} size={12} />
                   {t.label}
                 </button>
               ))}
             </div>
           </div>
         </Field>
+          </>
+        ) : null}
 
         <div style={styles.panelDivider} />
 
-        {/* FEATURE: Editor — nothing in this panel applies until it is saved,
-            which is easy to miss on toggles and segmented controls that look
-            like they act immediately. Say so rather than relying on the
-            button's colour alone. */}
-        {dirty && !saving ? (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              margin: "0 0 8px",
-              padding: "7px 10px",
-              borderRadius: 8,
-              background: "rgba(251,191,36,0.10)",
-              border: "1px solid rgba(251,191,36,0.30)",
-              color: "#fbbf24",
-              fontSize: 11,
-              fontWeight: 600,
-            }}
-          >
-            <span
-              style={{
-                width: 6,
-                height: 6,
-                borderRadius: "50%",
-                background: "#fbbf24",
-                flexShrink: 0,
-              }}
-            />
-            Unsaved changes
-          </div>
-        ) : null}
-
-        {/* Save / Delete */}
-        <div style={styles.panelActions}>
-          <button
-            style={{
-              ...styles.saveBtn,
-              ...(dirty || saving
-                ? {}
-                : {
-                    background: "#16161e",
-                    border: "1px solid #2a2a38",
-                    color: "#44445a",
-                    cursor: "default",
-                  }),
-            }}
-            onClick={onSave}
-            disabled={saving || !dirty}
-          >
-            {saving
-              ? "Saving…"
-              : saved
-                ? "✓ Saved"
-                : dirty
-                  ? "Save Changes"
-                  : "No changes"}
-          </button>
-          <button style={styles.deleteBtn} onClick={onDelete}>
-            Delete
-          </button>
-        </div>
       </div>
     </div>
   );
@@ -3108,7 +3464,7 @@ function ActionField({ field, action, onChange, audioDevices }) {
           {audioDevices.map((d) => (
             <option key={d.id} value={d.name}>
               {d.name}
-              {d.isDefault ? " ✓" : ""}
+              {d.isDefault ? " (default)" : ""}
             </option>
           ))}
         </select>
@@ -3137,7 +3493,7 @@ function ActionField({ field, action, onChange, audioDevices }) {
               }
             }}
           >
-            📁
+            <Icon name="upload" size={14} />
           </button>
         </div>
       </Field>
@@ -3196,7 +3552,7 @@ function ActionStackEditor({ title, actions, onChange, audioDevices }) {
                   onChange(safeActions.filter((_, i) => i !== index))
                 }
               >
-                ✕
+                <Icon name="close" size={14} />
               </button>
             </div>
             <ActionTypeSelect
@@ -3344,185 +3700,403 @@ const styles = {
   // ── Body ──
   body: { flex: 1, display: "flex", minHeight: 0, overflow: "hidden" },
 
-  // ── Sidebar ──
-  sidebar: {
-    width: 320,
-    flexShrink: 0,
-    background: "#0f0f14",
-    borderRight: "1px solid #1e1e28",
-    display: "flex",
-    flexDirection: "column",
-    overflowY: "auto",
-  },
-  sidebarHeader: { padding: "16px 14px 8px" },
-  sidebarList: { padding: "0 8px 8px" },
-  sidebarSection: { padding: "0 14px 12px" },
-  sidebarHeading: {
-    fontSize: 10,
-    fontWeight: 700,
-    color: "#3a3a4e",
-    letterSpacing: 1.4,
-    textTransform: "uppercase",
-  },
-  sidebarDivider: { height: 1, background: "#1e1e28", margin: "4px 0" },
 
-  pageItem: {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    padding: "7px 8px",
-    borderRadius: 9,
-    cursor: "pointer",
-    transition: "background 0.1s",
-    marginBottom: 1,
-  },
-  pageItemActive: {
-    background: "rgba(79,128,255,0.1)",
-    border: "none",
-  },
-  pageItemIconBox: {
-    width: 28,
-    height: 28,
-    borderRadius: 7,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    flexShrink: 0,
-    transition: "background 0.1s, border 0.1s",
-  },
-  pageItemInfo: { flex: 1, minWidth: 0 },
-  pageItemName: {
-    fontSize: 12,
-    fontWeight: 600,
-    display: "block",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-    transition: "color 0.1s",
-  },
-  pageItemRule: {
-    fontSize: 10,
-    color: "#3a3a50",
-    display: "block",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-    marginTop: 1,
-  },
-  pageItemCount: {
-    fontSize: 10,
-    color: "#3a3a50",
-    flexShrink: 0,
-    fontWeight: 600,
-    minWidth: 12,
-    textAlign: "right",
-  },
-  pageDeleteBtn: {
-    background: "none",
-    border: "none",
-    color: "#3a3a50",
-    cursor: "pointer",
-    fontSize: 9,
-    padding: "2px 4px",
-    borderRadius: 4,
-    flexShrink: 0,
-    transition: "color 0.1s",
-  },
-  addPageBtn: {
-    width: "100%",
-    padding: "7px 10px",
-    marginTop: 4,
-    background: "none",
-    border: "1px dashed #252530",
-    borderRadius: 8,
-    color: "#3a3a50",
-    fontSize: 12,
-    fontWeight: 600,
-    cursor: "pointer",
-    transition: "all 0.12s",
-    display: "flex",
-    alignItems: "center",
-    gap: 6,
-    justifyContent: "center",
-  },
-  newPageRow: { padding: "4px 2px 6px" },
-  newPageConfirm: {
-    flex: 1,
-    padding: "5px 10px",
-    borderRadius: 7,
-    fontSize: 11,
-    fontWeight: 700,
-    background: "rgba(79,128,255,0.2)",
-    border: "1px solid rgba(79,128,255,0.4)",
-    color: "#7aafff",
-    cursor: "pointer",
-  },
-  newPageCancel: {
-    flex: 1,
-    padding: "5px 10px",
-    borderRadius: 7,
-    fontSize: 11,
-    fontWeight: 600,
-    background: "#1a1a22",
-    border: "1px solid #2c2c3a",
-    color: "#5a5a70",
-    cursor: "pointer",
-  },
-  autoSwitchRow: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 8,
-  },
-  autoSwitchLabel: { fontSize: 12, color: "#5a5a70" },
-  ruleChip: {
-    background: "#0a180e",
-    border: "1px solid #1a3a22",
-    borderRadius: 8,
-    padding: "7px 10px",
-  },
 
   // ── Center grid ──
-  center: {
+  // ── Canvas column ──
+  // The deck is the subject, so it gets the room the sidebar used to take.
+  canvasCol: {
     flex: 1,
     display: "flex",
     flexDirection: "column",
     minWidth: 0,
-    background: "#13131a",
+    background: "var(--bg-base)",
     overflow: "hidden",
   },
-  gridHeader: {
+  canvasHead: {
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+    padding: "10px 20px 6px",
+    flexShrink: 0,
+  },
+  canvasHeadActions: { display: "flex", gap: 6, paddingTop: 2 },
+
+  // Profile dropdown — the switcher, stacked over its own summary line.
+  profileWrap: { position: "relative", minWidth: 0 },
+  profileTrigger: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    background: "transparent",
+    border: 0,
+    padding: "2px 6px",
+    marginLeft: -6,
+    borderRadius: "var(--radius-sm)",
+    color: "var(--text-primary)",
+    cursor: "pointer",
+    transition: "background var(--duration-base) var(--ease-out)",
+  },
+  profileName: {
+    fontSize: 15,
+    fontWeight: 700,
+    letterSpacing: "-0.01em",
+    maxWidth: 280,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  profileMeta: {
+    fontSize: 11,
+    color: "var(--text-muted)",
+    paddingLeft: 0,
+    marginTop: 1,
+  },
+
+  menu: {
+    position: "absolute",
+    top: "calc(100% + 8px)",
+    left: -6,
+    minWidth: 268,
+    background: "var(--bg-elevated)",
+    border: "1px solid var(--border-strong)",
+    borderRadius: "var(--radius-lg)",
+    boxShadow: "var(--shadow-lg)",
+    padding: 6,
+    zIndex: "var(--z-overlay)",
+  },
+  menuLabel: {
+    fontSize: 11,
+    fontWeight: 600,
+    letterSpacing: "0.08em",
+    textTransform: "uppercase",
+    color: "var(--text-secondary)",
+    padding: "6px 8px 4px",
+  },
+  menuItem: {
     display: "flex",
     alignItems: "center",
     gap: 8,
-    padding: "12px 18px 10px",
-    borderBottom: "1px solid #1e1e28",
-    flexShrink: 0,
-    background: "#111118",
-  },
-  gridTitle: { fontWeight: 700, fontSize: 13, color: "#e0e0ec" },
-  gridCount: { fontSize: 11, color: "#3a3a50", fontWeight: 500 },
-  addBtnPill: {
-    marginLeft: "auto",
-    background: "rgba(79,128,255,0.14)",
-    border: "1px solid rgba(79,128,255,0.3)",
-    borderRadius: 8,
-    padding: "5px 13px",
-    color: "#7aafff",
-    fontSize: 11,
-    fontWeight: 700,
+    padding: "7px 8px",
+    borderRadius: "var(--radius-md)",
     cursor: "pointer",
-    transition: "all 0.12s",
+    color: "var(--text-secondary)",
+    fontSize: 13,
   },
-  grid: {
+  menuItemActive: { background: "var(--accent-soft)", color: "var(--text-primary)" },
+  menuCheck: { width: 14, display: "grid", placeItems: "center", color: "var(--accent)" },
+  menuItemName: {
     flex: 1,
-    padding: 18,
+    minWidth: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    fontWeight: 500,
+  },
+  menuRuleDot: {
+    width: 5,
+    height: 5,
+    borderRadius: "50%",
+    background: "var(--accent)",
+    flexShrink: 0,
+  },
+  menuCount: { fontSize: 11, color: "var(--text-muted)", fontWeight: 600 },
+  menuDelete: {
+    display: "grid",
+    placeItems: "center",
+    width: 20,
+    height: 20,
+    background: "transparent",
+    border: 0,
+    borderRadius: "var(--radius-sm)",
+    color: "var(--text-muted)",
+    cursor: "pointer",
+  },
+  menuDivider: { height: 1, background: "var(--border-subtle)", margin: "6px 2px" },
+  menuAction: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    width: "100%",
+    padding: "8px",
+    background: "transparent",
+    border: 0,
+    borderRadius: "var(--radius-md)",
+    color: "var(--text-secondary)",
+    fontSize: 13,
+    fontWeight: 500,
+    cursor: "pointer",
+    textAlign: "left",
+  },
+  menuAddRow: { display: "flex", gap: 6, padding: 4 },
+  menuInput: {
+    flex: 1,
+    minWidth: 0,
+    background: "var(--bg-surface)",
+    border: "1px solid var(--border-strong)",
+    borderRadius: "var(--radius-md)",
+    color: "var(--text-primary)",
+    padding: "6px 9px",
+    fontSize: 13,
+  },
+  menuPrimary: {
+    background: "var(--accent)",
+    border: 0,
+    borderRadius: "var(--radius-md)",
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: 600,
+    padding: "0 12px",
+    cursor: "pointer",
+  },
+
+  // The deck sits centred in whatever room is left, like hardware on a desk.
+  canvas: {
+    flex: 1,
+    minHeight: 0,
     overflowY: "auto",
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, minmax(108px, 1fr))",
-    gridAutoRows: "minmax(108px, calc((100% - 36px - 10px * 5) / 5))",
-    gap: 15,
-    alignContent: "start",
+    // `safe` matters: plain centring clips the first row under the header once
+    // the deck overflows, and no amount of scrolling brings it back.
+    alignContent: "safe center",
+    justifyContent: "safe center",
+    padding: "8px 20px 12px",
+  },
+
+  pageRail: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    padding: "6px 0 14px",
+    flexShrink: 0,
+  },
+  pagePill: {
+    minWidth: 30,
+    height: 26,
+    padding: "0 10px",
+    display: "grid",
+    placeItems: "center",
+    borderRadius: "var(--radius-pill)",
+    background: "var(--bg-elevated)",
+    border: "1px solid var(--border-subtle)",
+    color: "var(--text-secondary)",
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: "pointer",
+    transition: "background var(--duration-base) var(--ease-out)",
+  },
+  pagePillActive: {
+    background: "var(--accent)",
+    borderColor: "var(--accent)",
+    color: "#fff",
+  },
+
+  ghostBtn: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    padding: "6px 12px",
+    borderRadius: "var(--radius-md)",
+    background: "var(--bg-elevated)",
+    border: "1px solid var(--border-subtle)",
+    color: "var(--text-secondary)",
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: "pointer",
+    transition: "background var(--duration-base) var(--ease-out)",
+  },
+  ghostBtnOn: {
+    background: "var(--accent-soft)",
+    borderColor: "rgba(59,130,246,0.35)",
+    color: "var(--accent-hover)",
+  },
+  iconBtn: {
+    display: "grid",
+    placeItems: "center",
+    width: 32,
+    height: 32,
+    background: "transparent",
+    border: 0,
+    borderRadius: "var(--radius-md)",
+    color: "var(--text-secondary)",
+    cursor: "pointer",
+  },
+
+  // ── Actions library ──
+  library: {
+    width: "var(--library-width)",
+    flexShrink: 0,
+    display: "flex",
+    flexDirection: "column",
+    background: "var(--bg-surface)",
+    borderLeft: "1px solid var(--border-subtle)",
+    minHeight: 0,
+  },
+  libraryHead: {
+    padding: 12,
+    borderBottom: "1px solid var(--border-subtle)",
+    flexShrink: 0,
+  },
+  searchWrap: { position: "relative", display: "flex", alignItems: "center" },
+  searchIcon: {
+    position: "absolute",
+    left: 10,
+    display: "grid",
+    color: "var(--text-muted)",
+    pointerEvents: "none",
+  },
+  searchInput: {
+    width: "100%",
+    background: "var(--bg-base)",
+    border: "1px solid var(--border-strong)",
+    borderRadius: "var(--radius-md)",
+    color: "var(--text-primary)",
+    padding: "8px 30px 8px 32px",
+    fontSize: 13,
+  },
+  searchClear: {
+    position: "absolute",
+    right: 6,
+    display: "grid",
+    placeItems: "center",
+    width: 22,
+    height: 22,
+    background: "transparent",
+    border: 0,
+    borderRadius: "var(--radius-sm)",
+    color: "var(--text-muted)",
+    cursor: "pointer",
+  },
+  libraryList: { flex: 1, minHeight: 0, overflowY: "auto", padding: 6 },
+  libraryEmpty: {
+    padding: "28px 12px",
+    textAlign: "center",
+    color: "var(--text-muted)",
+    fontSize: 13,
+  },
+  libraryHint: {
+    padding: "10px 14px",
+    borderTop: "1px solid var(--border-subtle)",
+    color: "var(--text-muted)",
+    fontSize: 11,
+    lineHeight: 1.5,
+    flexShrink: 0,
+  },
+  catHead: {
+    width: "100%",
+    display: "flex",
+    alignItems: "center",
+    gap: 9,
+    padding: "9px 10px",
+    background: "transparent",
+    border: 0,
+    borderRadius: "var(--radius-md)",
+    color: "var(--text-primary)",
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: "pointer",
+    textAlign: "left",
+  },
+  catChevron: {
+    display: "grid",
+    color: "var(--text-muted)",
+    transition: "transform var(--duration-base) var(--ease-out)",
+  },
+  catName: { flex: 1, minWidth: 0 },
+  catCount: { fontSize: 11, color: "var(--text-muted)", fontWeight: 600 },
+  catItems: { padding: "2px 0 6px 14px" },
+  actionRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 9,
+    padding: "7px 10px",
+    borderRadius: "var(--radius-md)",
+    color: "var(--text-secondary)",
+    fontSize: 13,
+    cursor: "grab",
+    userSelect: "none",
+    transition: "background var(--duration-base) var(--ease-out)",
+  },
+  actionRowDragging: { opacity: 0.4, cursor: "grabbing" },
+  actionRowName: {
+    flex: 1,
+    minWidth: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  actionRowGrip: { display: "grid", color: "var(--text-muted)", opacity: 0.5 },
+
+  actionGhost: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    padding: "8px 12px",
+    borderRadius: "var(--radius-md)",
+    background: "var(--bg-elevated)",
+    border: "1px solid var(--accent)",
+    color: "var(--text-primary)",
+    fontSize: 13,
+    fontWeight: 600,
+    boxShadow: "var(--shadow-md)",
+    cursor: "grabbing",
+  },
+  addSlotOver: {
+    borderColor: "var(--accent)",
+    background: "var(--accent-soft)",
+    color: "var(--accent)",
+  },
+
+  // ── Rule editor modal ──
+  modalBackdrop: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.62)",
+    backdropFilter: "blur(4px)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: "var(--z-modal)",
+    padding: 24,
+  },
+  modalCard: {
+    width: "100%",
+    maxWidth: 520,
+    maxHeight: "84vh",
+    display: "flex",
+    flexDirection: "column",
+    background: "var(--bg-surface)",
+    border: "1px solid var(--border-strong)",
+    borderRadius: "var(--radius-xl)",
+    boxShadow: "var(--shadow-lg)",
+    overflow: "hidden",
+  },
+  modalHead: {
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+    padding: "16px 16px 12px 20px",
+    borderBottom: "1px solid var(--border-subtle)",
+    flexShrink: 0,
+  },
+  modalTitle: { fontSize: 15, fontWeight: 700, color: "var(--text-primary)" },
+  modalSub: { fontSize: 12, color: "var(--text-muted)", marginTop: 2 },
+  modalBody: { overflowY: "auto", padding: "4px 6px 12px" },
+
+  // Keys are a fixed size and the grid is centred, so the deck reads as a piece
+  // of hardware rather than a responsive layout that reflows as you resize.
+  // Up to 8 across, mirroring a Stream Deck XL, so a full deck is visible at
+  // once instead of scrolling. Narrow windows simply fit fewer per row.
+  grid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, 104px)",
+    gridAutoRows: "104px",
+    gap: 12,
+    justifyContent: "center",
+    maxWidth: 8 * 104 + 7 * 12,
   },
   addSlot: {
     aspectRatio: "1/1",
@@ -3535,28 +4109,28 @@ const styles = {
     transition: "all 0.12s",
     background: "transparent",
   },
-  addSlotPlus: {
-    fontSize: 22,
-    color: "#2c2c3c",
-    fontWeight: 300,
-    lineHeight: 1,
-  },
 
   // ── Property panel ──
+  // ── Inspector drawer ──
+  // Short and wide beneath the canvas rather than a tall column beside it, so
+  // the deck gets the full window width and the fields flow into columns.
   panel: {
-    width: 262,
     flexShrink: 0,
-    background: "#0f0f14",
-    borderLeft: "1px solid #1e1e28",
+    maxHeight: "50vh",
+    background: "var(--bg-surface)",
+    borderTop: "1px solid var(--border-subtle)",
     overflowY: "auto",
     display: "flex",
     flexDirection: "column",
   },
+  // Multi-column flow: the same fields as before, laid across instead of down.
+  // auto-fill keeps it sensible from a narrow window up to a wide one.
   panelInner: {
-    padding: "14px 14px",
-    display: "flex",
-    flexDirection: "column",
-    gap: 1,
+    padding: "12px 20px 14px",
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
+    alignContent: "start",
+    gap: "0 24px",
     animation: "slideIn 0.16s ease",
   },
   panelEmpty: {
@@ -3569,24 +4143,34 @@ const styles = {
     padding: 24,
   },
   panelEmptyText: {
-    fontSize: 12,
-    color: "#44444e",
+    fontSize: 13,
+    color: "var(--text-muted)",
     textAlign: "center",
     lineHeight: 1.7,
   },
   panelEmptyHint: {
-    fontSize: 10,
-    color: "#2a2a38",
+    fontSize: 12,
+    color: "var(--text-muted)",
+    opacity: 0.7,
     textAlign: "center",
     marginTop: 4,
   },
-  panelDivider: { height: 1, background: "#1e1e28", margin: "10px 0" },
+  // A column separator would be wrong in a grid, so dividers span the full row.
+  panelDivider: {
+    gridColumn: "1 / -1",
+    height: 1,
+    background: "var(--border-subtle)",
+    margin: "10px 0",
+  },
 
+  // Sits in the flow as its own column, like the key preview on the left of
+  // Stream Deck's inspector, rather than claiming a whole row.
   previewRow: {
     display: "flex",
     gap: 12,
     alignItems: "center",
     marginBottom: 6,
+    minWidth: 0,
   },
   previewLabel: {
     fontSize: 14,
@@ -3599,18 +4183,22 @@ const styles = {
   },
   previewAction: { fontSize: 11, color: "#44444e" },
 
-  field: { marginBottom: 9 },
+  field: { marginBottom: 6, minWidth: 0 },
   fieldLabel: {
     display: "block",
-    fontSize: 10,
-    fontWeight: 700,
-    color: "#3a3a50",
-    letterSpacing: 1,
+    fontSize: 11,
+    fontWeight: 600,
+    color: "var(--text-secondary)",
+    letterSpacing: "0.07em",
     marginBottom: 5,
     textTransform: "uppercase",
   },
 
   segBtn: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 5,
     padding: "5px 11px",
     borderRadius: 7,
     fontSize: 11,
@@ -3663,10 +4251,65 @@ const styles = {
     transition: "all 0.12s",
   },
 
-  panelActions: { display: "flex", gap: 8, marginTop: 6 },
+  // Save/Delete span the drawer so they stay findable regardless of how many
+  // columns the fields happen to flow into.
+  headerBar: {
+    gridColumn: "1 / -1",
+    display: "flex",
+    alignItems: "center",
+    gap: 14,
+    paddingBottom: 10,
+    marginBottom: 10,
+    borderBottom: "1px solid var(--border-subtle)",
+  },
+  headerActions: { marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 },
+  dirtyPip: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    fontSize: 11,
+    fontWeight: 600,
+    color: "var(--warning)",
+    padding: "5px 10px",
+    borderRadius: "var(--radius-pill)",
+    background: "var(--warning-soft)",
+    border: "1px solid rgba(251,191,36,0.30)",
+  },
+  dirtyDot: { width: 6, height: 6, borderRadius: "50%", background: "var(--warning)" },
+  fieldHint: { fontSize: 11, color: "var(--text-muted)" },
+  disclosure: {
+    gridColumn: "1 / -1",
+    display: "flex",
+    alignItems: "center",
+    gap: 7,
+    width: "fit-content",
+    margin: "6px 0 10px",
+    padding: "6px 10px 6px 6px",
+    background: "transparent",
+    border: 0,
+    borderRadius: "var(--radius-md)",
+    color: "var(--text-secondary)",
+    fontSize: 11,
+    fontWeight: 600,
+    letterSpacing: "0.06em",
+    textTransform: "uppercase",
+    cursor: "pointer",
+  },
+  disclosureNote: {
+    textTransform: "none",
+    letterSpacing: 0,
+    fontWeight: 500,
+    fontSize: 11,
+    color: "var(--accent)",
+  },
+  saveBtnClean: {
+    background: "var(--bg-elevated)",
+    border: "1px solid var(--border-subtle)",
+    color: "var(--text-muted)",
+    cursor: "default",
+  },
   saveBtn: {
-    flex: 1,
-    padding: "9px 16px",
+    padding: "8px 18px",
     borderRadius: 8,
     fontSize: 12,
     fontWeight: 700,

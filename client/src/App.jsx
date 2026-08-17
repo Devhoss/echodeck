@@ -1,12 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  memo,
+} from "react";
 import ReconnectingWebSocket from "reconnecting-websocket";
-import { DndContext, closestCenter } from "@dnd-kit/core";
 import { Haptics, ImpactStyle } from "@capacitor/haptics";
-import { useSortable } from "@dnd-kit/sortable";
 import deck from "/deck-icon.png";
 import disconnect from "/disconnect.svg";
 import DesktopApp from "./desktop/DesktopApp.jsx";
-import { CSS } from "@dnd-kit/utilities";
 import {
   isPaired,
   setPairConfig,
@@ -16,11 +21,7 @@ import {
   clearPairConfig,
 } from "./constants.js";
 import PairingScreen from "./PairingScreen.jsx";
-import {
-  SortableContext,
-  rectSortingStrategy,
-  arrayMove,
-} from "@dnd-kit/sortable";
+import { Icon } from "./icons.jsx";
 
 const globalStyles = `
   @keyframes pulse {
@@ -234,11 +235,13 @@ export default function App() {
   const [muted, setMuted] = useState(false);
 
   const [disconnectActive, setDisconnectActive] = useState(false);
+  const [keySize, setKeySize] = useState(84);
+  const deckRef = useRef(null);
+  const swipeRef = useRef(null);
 
   const wsRef = useRef(null);
   const lastMessageAtRef = useRef(0);
   const pageButtonsCacheRef = useRef(new Map());
-  const reorderTimer = useRef(null);
   const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
   const [pairedHost, setPairedHost] = useState(() => {
     loadPairConfig();
@@ -424,6 +427,53 @@ export default function App() {
     };
   }, [pairedHost, setUnpaired]);
 
+  // A deck key is square. Size it from whichever axis runs out first rather
+  // than letting 1fr rows stretch it into a tall rectangle.
+  const layout = useMemo(() => {
+    const count = Math.max(buttons.length, 1);
+    // Prefer the widest row that keeps keys reasonably large in landscape.
+    const cols = Math.min(count, count <= 8 ? 4 : count <= 15 ? 5 : 7);
+    return { cols, rows: Math.ceil(count / cols) };
+  }, [buttons.length]);
+
+  // Layout effect, not effect: the column count changes the moment a profile
+  // switches, so the size has to be right before the browser paints or the deck
+  // draws one frame of new columns at the old page's key size.
+  useLayoutEffect(() => {
+    const el = deckRef.current;
+    if (!el) return;
+    const measure = () => {
+      const gap = 8;
+      // Measure the content box: getBoundingClientRect includes the padding,
+      // which made keys a few pixels too big and pushed the last row under the
+      // container's clip.
+      const cs = getComputedStyle(el);
+      const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+      const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+      const box = el.getBoundingClientRect();
+      const w = (box.width - padX - (layout.cols - 1) * gap) / layout.cols;
+      const h = (box.height - padY - (layout.rows - 1) * gap) / layout.rows;
+      // Cap as well as floor: a four-key profile should not blow its keys up to
+      // fill the screen. Real decks keep a consistent key size whatever the
+      // page holds.
+      const next = Math.min(132, Math.max(44, Math.floor(Math.min(w, h))));
+      setKeySize((prev) => (Math.abs(prev - next) > 1 ? next : prev));
+    };
+    measure();
+    // ResizeObserver alone proved unreliable here — rotating the phone changes
+    // the viewport without the observed box reporting it in time — so the
+    // window events back it up. Both paths call the same measure.
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    window.addEventListener("resize", measure);
+    window.addEventListener("orientationchange", measure);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("orientationchange", measure);
+    };
+  }, [layout]);
+
   const pressButton = useCallback(async (id) => {
     if (wsRef.current?.readyState !== WebSocket.OPEN) {
       setStatus("connecting");
@@ -497,39 +547,36 @@ export default function App() {
     wsRef.current.send(JSON.stringify({ v: 1, t: "switch_page", page_id }));
   }, []);
 
-  const handleDragEnd = useCallback(
-    (event) => {
-      const { active, over } = event;
-      if (!over || active.id === over.id) return;
-      setButtons((prev) => {
-        const oldIndex = prev.findIndex((b) => b.id === active.id);
-        const newIndex = prev.findIndex((b) => b.id === over.id);
-        const reordered = arrayMove(prev, oldIndex, newIndex).map((btn, i) => ({
-          ...btn,
-          position: i,
-        }));
-        if (currentPage)
-          pageButtonsCacheRef.current.set(currentPage, reordered);
-        clearTimeout(reorderTimer.current);
-        reorderTimer.current = setTimeout(() => {
-          wsRef.current?.send(
-            JSON.stringify({
-              v: 1,
-              t: "reorder_buttons",
-              buttons: reordered.map((b) => ({
-                id: b.id,
-                position: b.position,
-              })),
-            }),
-          );
-        }, 300);
-        return reordered;
-      });
+  // Horizontal swipe changes page. A key press is a tap, so only a deliberate
+  // horizontal travel counts — vertical movement is left alone so the deck
+  // never fights a scroll, and short movements stay taps.
+  const onDeckPointerDown = useCallback((e) => {
+    swipeRef.current = { x: e.clientX, y: e.clientY };
+  }, []);
+
+  const onDeckPointerCancel = useCallback(() => {
+    swipeRef.current = null;
+  }, []);
+
+  const onDeckPointerUp = useCallback(
+    (e) => {
+      const startPt = swipeRef.current;
+      swipeRef.current = null;
+      if (!startPt || pages.length < 2) return;
+      const dx = e.clientX - startPt.x;
+      const dy = e.clientY - startPt.y;
+      if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+
+      const i = pages.findIndex((p) => p.id === currentPage);
+      if (i === -1) return;
+      const next = pages[(i + (dx < 0 ? 1 : -1) + pages.length) % pages.length];
+      if (next) switchPage(next.id);
     },
-    [currentPage],
+    [pages, currentPage, switchPage],
   );
 
-  const buttonIds = useMemo(() => buttons.map((b) => b.id), [buttons]);
+
+
 
   const params = new URLSearchParams(window.location.search);
   const forceDesktop =
@@ -739,74 +786,28 @@ export default function App() {
         </button>
       </div>
 
-      {/* Page tabs */}
-      {pages.length > 1 && (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 2,
-            paddingLeft: "max(env(safe-area-inset-left), 12px)",
-            paddingRight: "max(env(safe-area-inset-right), 12px)",
-            paddingTop: 0,
-            paddingBottom: 0,
-            background: "#161618",
-            flexShrink: 0,
-            height: 32,
-            overflowX: "auto",
-          }}
-        >
-          {pages.map((p) => (
-            <button
-              key={p.id}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                switchPage(p.id);
-              }}
-              style={{
-                background:
-                  currentPage === p.id
-                    ? "linear-gradient(180deg, #2a2a35 0%, #1e1e28 100%)"
-                    : "none",
-                border: "none",
-                borderBottom:
-                  currentPage === p.id
-                    ? "2px solid #6c63ff"
-                    : "2px solid transparent",
-                color: currentPage === p.id ? "#fff" : "#666",
-                cursor: "pointer",
-                padding: "0 14px",
-                height: "100%",
-                boxSizing: "border-box",
-                fontSize: 12,
-                fontWeight: 600,
-                borderRadius: "6px 6px 0 0",
-                whiteSpace: "nowrap",
-                transition: "all 0.15s",
-              }}
-            >
-              {p.name}
-            </button>
-          ))}
-        </div>
-      )}
-
       {/* FEATURE: Custom button size — 2x2 buttons use gridColumn/gridRow span 2 */}
-      <DndContext collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-        <SortableContext items={buttonIds} strategy={rectSortingStrategy}>
           {/* Container */}
           <div
+            ref={deckRef}
+            onPointerDown={onDeckPointerDown}
+            onPointerUp={onDeckPointerUp}
+            onPointerCancel={onDeckPointerCancel}
             style={{
               flex: 1,
               minHeight: 0,
               overflow: "hidden",
-              paddingLeft: "max(env(safe-area-inset-left), 10px)", // ← here
-              paddingRight: "max(env(safe-area-inset-right), 10px)", // ← here
-              paddingTop: 6,
-              paddingBottom: 6,
+              paddingLeft: "max(env(safe-area-inset-left), 10px)",
+              paddingRight: "max(env(safe-area-inset-right), 10px)",
+              paddingTop: 4,
+              paddingBottom: 4,
+              // The browser must not claim horizontal drags as scrolls: it
+              // cancels the pointer sequence and the swipe never completes.
+              touchAction: "none",
               display: "grid",
-              gridTemplateColumns: "repeat(7, 1fr)",
-              gridTemplateRows: "repeat(3, 1fr)",
+              placeContent: "center",
+              gridTemplateColumns: `repeat(${layout.cols}, ${keySize}px)`,
+              gridAutoRows: `${keySize}px`,
               gap: 8,
             }}
           >
@@ -825,8 +826,58 @@ export default function App() {
               />
             ))}
           </div>
-        </SortableContext>
-      </DndContext>
+
+      {/* FEATURE: Deck layout — swipe changes page; the dots do the same by tap,
+          so the deck is never gesture-only. */}
+      {pages.length > 1 && (
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+            gap: 7,
+            padding: "2px 0 8px",
+            flexShrink: 0,
+          }}
+        >
+          {pages.map((p) => {
+            const active = p.id === currentPage;
+            return (
+              <button
+                key={p.id}
+                onClick={() => switchPage(p.id)}
+                aria-label={p.name}
+                aria-current={active}
+                style={{
+                  // Fixed footprint: the pill inside scales, so growing the
+                  // active dot never reflows the row. Animating width here
+                  // would thrash layout on every page change.
+                  width: 18,
+                  height: 7,
+                  padding: 0,
+                  border: 0,
+                  background: "transparent",
+                  cursor: "pointer",
+                  display: "grid",
+                  placeItems: "center",
+                }}
+              >
+                <span
+                  style={{
+                    width: 18,
+                    height: 7,
+                    borderRadius: 999,
+                    background: active ? "#3b82f6" : "#303039",
+                    transform: `scaleX(${active ? 1 : 7 / 18})`,
+                    transition:
+                      "transform 0.16s ease, background 0.16s ease",
+                  }}
+                />
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {showDisconnectConfirm && (
         <div
@@ -954,7 +1005,7 @@ function VolumePill({ volume, muted }) {
       }}
     >
       <span style={{ color: muted ? "#f87171" : "#888" }}>
-        {muted ? "🔇" : volume > 60 ? "🔊" : volume > 20 ? "🔉" : "🔈"}
+        <Icon name="sound" size={13} />
       </span>
       <div
         style={{
@@ -971,7 +1022,9 @@ function VolumePill({ volume, muted }) {
             width: "100%",
             transformOrigin: "left center",
             transform: `scaleX(${(muted ? 0 : volume) / 100})`,
-            background: muted ? "#f87171" : volume > 95 ? "#fb923c" : "#4ade80",
+            // Level is a quantity, not a health status — neutral white, with red
+              // kept for muted, which is a state worth flagging.
+              background: muted ? "#f87171" : "rgba(255,255,255,0.85)",
             borderRadius: 2,
             transition: "transform 0.15s ease",
           }}
@@ -1018,14 +1071,9 @@ const SortableButton = memo(function SortableButton({
   onVolumeHoldStop,
   onConfirmHoldStart,
 }) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id: btn.id });
+  // Reordering lives on the desktop; on the phone a key is only ever pressed,
+  // which leaves horizontal swipes free to page between profiles.
+  const isDragging = false;
 
   const [ripple, setRipple] = useState(null);
   // FEATURE: Hold to confirm — local to the tile; nothing above needs to know.
@@ -1054,7 +1102,6 @@ const SortableButton = memo(function SortableButton({
   const hasSound = !!btn.sound_file;
 
   const mergedTransition = [
-    transition,
     "box-shadow 0.15s ease",
     "background 0.15s ease",
     "scale 0.1s ease",
@@ -1142,21 +1189,13 @@ const SortableButton = memo(function SortableButton({
 
   return (
     <div
-      ref={setNodeRef}
-      {...attributes}
       onClick={handleClick}
       onPointerDown={handlePointerDown}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
       style={{
         ...sizeStyle,
-        transform:
-          [
-            transform ? CSS.Transform.toString(transform) : null,
-            isDragging ? "scale(1.06)" : pressing ? "scale(0.96)" : null,
-          ]
-            .filter(Boolean)
-            .join(" ") || undefined,
+        transform: pressing ? "scale(0.96)" : undefined,
         transition: mergedTransition,
         zIndex: isDragging ? 999 : "auto",
         width: "100%",
@@ -1249,31 +1288,10 @@ const SortableButton = memo(function SortableButton({
             userSelect: "none",
           }}
         >
-          🔊
+          <Icon name="sound" size={9} />
         </div>
       )}
 
-      {/* Drag handle */}
-      <div
-        {...listeners}
-        className="drag-handle"
-        style={{
-          position: "absolute",
-          top: 7,
-          right: 7,
-          width: 18,
-          height: 18,
-          zIndex: 10,
-          cursor: "grab",
-          borderRadius: 6,
-          background: isDragging
-            ? "rgba(255,255,255,0.14)"
-            : "rgba(255,255,255,0.04)",
-          border: "1px solid rgba(255,255,255,0.07)",
-          opacity: isDragging ? 1 : 0,
-          transition: "opacity 0.2s ease",
-        }}
-      />
 
       {/* Icon */}
       <div
@@ -1331,47 +1349,51 @@ const SortableButton = memo(function SortableButton({
         <div
           style={{
             position: "absolute",
-            inset: 0,
-            display: "flex",
-            flexDirection: "column",
-            justifyContent: "flex-end",
+            left: 10,
+            right: 10,
+            bottom: 8,
             pointerEvents: "none",
             zIndex: 3,
-            borderRadius: 22,
-            overflow: "hidden",
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+            alignItems: "center",
           }}
         >
-          <div
+          <span
             style={{
-              width: "100%",
-              height: "100%",
-              flexShrink: 0,
-              transformOrigin: "bottom center",
-              transform: `scaleY(${(muted ? 0 : volume) / 100})`,
-              background: muted
-                ? "rgba(248,113,113,0.25)"
-                : volume > 95
-                  ? "rgba(251,146,60,0.2)"
-                  : "rgba(74,222,128,0.15)",
-              transition: "transform 0.12s ease",
-            }}
-          />
-          <div
-            style={{
-              position: "absolute",
-              bottom: 8,
-              left: 0,
-              right: 0,
-              textAlign: "center",
-              fontSize: 11,
+              fontSize: 10,
               fontWeight: 700,
-              color: muted ? "#f87171" : "#fff",
-              letterSpacing: 0.5,
-              textShadow: "0 1px 4px rgba(0,0,0,0.8)",
+              letterSpacing: 0.4,
+              color: muted ? "#f87171" : "rgba(255,255,255,0.82)",
+              textShadow: "0 1px 3px rgba(0,0,0,0.7)",
+              fontVariantNumeric: "tabular-nums",
             }}
           >
-            {muted ? "MUTE" : `${volume}%`}
-          </div>
+            {muted ? "MUTED" : `${volume}%`}
+          </span>
+          <span
+            style={{
+              width: "100%",
+              height: 3,
+              borderRadius: 2,
+              background: "rgba(255,255,255,0.14)",
+              overflow: "hidden",
+            }}
+          >
+            <span
+              style={{
+                display: "block",
+                width: "100%",
+                height: "100%",
+                borderRadius: 2,
+                transformOrigin: "left center",
+                transform: `scaleX(${(muted ? 0 : volume) / 100})`,
+                background: muted ? "#f87171" : "rgba(255,255,255,0.92)",
+                transition: "transform 0.12s ease, background 0.12s ease",
+              }}
+            />
+          </span>
         </div>
       )}
 
@@ -1442,12 +1464,10 @@ const SortableButton = memo(function SortableButton({
               userSelect: "none",
             }}
           >
-            🔒
+            <Icon name="guarded" size={9} />
           </div>
         </>
       )}
-
-      <style>{`div:hover > .drag-handle { opacity: 0.35 !important; } div:active > .drag-handle { opacity: 0 !important; }`}</style>
     </div>
   );
 });

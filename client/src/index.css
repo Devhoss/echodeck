@@ -1,15 +1,182 @@
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+@import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap");
+
+/* ─────────────────────────────────────────────────────────────────────────
+   EchoDeck design tokens
+
+   Single source of truth for colour, type, spacing, radius and motion.
+   Components reference these rather than hardcoding values, so the whole
+   surface can be retuned from one place.
+   ───────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* Surfaces — darkest at the base, lighter as elements rise toward the user.
+     Keys sit *below* the surface so they read as wells set into the panel. */
+  --bg-base: #0e0e11;
+  --bg-surface: #17171b;
+  --bg-elevated: #1f1f25;
+  --bg-key: #0a0a0c;
+  --bg-hover: #23232b;
+
+  --border-subtle: #26262e;
+  --border-strong: #34343f;
+
+  /* Text. --text-muted is for non-essential text only; it must never be the
+     sole carrier of meaning (see the colour-alone accessibility rule). */
+  --text-primary: #f2f2f5;
+  --text-secondary: #9a9aa8;
+  --text-muted: #5c5c6b;
+
+  /* Accent + status */
+  --accent: #3b82f6;
+  --accent-hover: #60a5fa;
+  --accent-soft: rgba(59, 130, 246, 0.14);
+  --warning: #fbbf24;
+  --warning-soft: rgba(251, 191, 36, 0.12);
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.12);
+  --success: #4ade80;
+
+  /* Type scale — 11/12/13/14/16/20/24. Mobile overrides the body size below,
+     because anything under 16px triggers iOS auto-zoom on focus. */
+  --font-sans: "DM Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-md: 16px;
+  --text-lg: 20px;
+  --text-xl: 24px;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  --leading-tight: 1.25;
+  --leading-body: 1.55;
+
+  /* Spacing — 4px rhythm */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Radius */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 9999px;
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55);
+
+  /* Motion. Entering eases out, leaving eases in, and exits run shorter than
+     entrances so dismissal feels quicker than arrival. */
+  --duration-fast: 120ms;
+  --duration-base: 180ms;
+  --duration-slow: 280ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+
+  /* Layout */
+  --topbar-height: 56px;
+  --library-width: 340px;
+  --inspector-height: 220px;
+
+  /* Z-index scale — deliberately coarse, so nothing needs 9999 */
+  --z-base: 0;
+  --z-raised: 10;
+  --z-sticky: 20;
+  --z-overlay: 40;
+  --z-modal: 100;
+  --z-toast: 1000;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
 
 body {
-  background: #0f0f13;
-  color: #fff;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-body);
   min-height: 100dvh;
   overflow: hidden;
+  -webkit-font-smoothing: antialiased;
 }
 
 #root {
   height: 100dvh;
   display: flex;
   flex-direction: column;
+}
+
+/* Touch targets should not flash a grey box, and taps should not wait 300ms. */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  touch-action: manipulation;
+}
+
+/* A single visible focus style for keyboard users. :focus-visible keeps it off
+   mouse clicks, so it never fires when someone presses a deck key. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Numeric readouts (CPU, RAM, volume, clock) must not jitter as digits change. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Phone: 16px base prevents iOS from zooming when an input takes focus. */
+@media (max-width: 767px) {
+  body {
+    font-size: var(--text-md);
+  }
+}
+
+/* Honour a reduced-motion preference everywhere at once. Transitions are
+   collapsed rather than removed so state changes still land, just instantly. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
