@@ -45,6 +45,7 @@ import {
   ACTION_CATEGORIES,
   actionIconFor,
   DEFAULT_BUTTON_ICON,
+  isFilesystemPath,
   levelTargetFor,
   packAppValue,
   unpackAppValue,
@@ -195,6 +196,19 @@ export default function DesktopApp({
   const [audioDevices, setAudioDevices] = useState([]);
   const [inputDevices, setInputDevices] = useState([]);
   const [audioSessions, setAudioSessions] = useState([]);
+  const [applications, setApplications] = useState([]);
+  // `refresh` rebuilds the host's cache, which costs a few seconds; the plain
+  // call serves whatever is already there.
+  const loadApplications = useCallback(
+    (refresh = false) =>
+      fetch(`${api()}/applications${refresh ? "?refresh=1" : ""}`)
+        .then((r) => r.json())
+        .then((apps) => {
+          if (Array.isArray(apps)) setApplications(apps);
+        })
+        .catch(() => {}),
+    [],
+  );
   const [profileRules, setProfileRules] = useState([]);
   const [ruleEditorKey, setRuleEditorKey] = useState(0);
   const [autoSwitch, setAutoSwitch] = useState(true);
@@ -311,8 +325,11 @@ export default function DesktopApp({
   // over — closestCenter always returns the nearest droppable, which meant
   // releasing anywhere replaced whichever key happened to be closest.
   // Reordering keys keeps closestCenter, where "nearest" is what you want.
+  // Library rows — actions and applications alike — are dropped by pointer
+  // position; keys being reordered use the centre-distance strategy.
   const collisionDetection = useCallback((args) => {
-    if (String(args.active.id).startsWith("action:"))
+    const id = String(args.active.id);
+    if (id.startsWith("action:") || id.startsWith("app:"))
       return pointerWithin(args);
     return closestCenter(args);
   }, []);
@@ -360,6 +377,7 @@ export default function DesktopApp({
       .then((r) => r.json())
       .then(setAudioSessions)
       .catch(() => {});
+    loadApplications();
     fetch(`${api()}/profile-rules`)
       .then((r) => r.json())
       .then(setProfileRules)
@@ -390,7 +408,9 @@ export default function DesktopApp({
       clearInterval(captureTimerRef.current);
       clearInterval(devicesInterval);
     };
-  }, []);
+    // loadApplications is a useCallback with no dependencies, so listing it
+    // here satisfies the rule without making the effect re-run.
+  }, [loadApplications]);
 
   const patchForm = useCallback(
     (patch) => setForm((f) => ({ ...f, ...patch })),
@@ -548,7 +568,7 @@ export default function DesktopApp({
   // label, icon and colour — you are changing what the key does, not replacing
   // the key. A key that already does something asks first.
   const assignAction = useCallback(
-    async (buttonId, actionType) => {
+    async (buttonId, actionType, extra = {}) => {
       const target = buttons.find((b) => b.id === buttonId);
       if (!target) return;
 
@@ -571,6 +591,7 @@ export default function DesktopApp({
         if (untouched) {
           patch.icon = actionIconFor(actionType) ?? DEFAULT_BUTTON_ICON;
         }
+        Object.assign(patch, extra);
         await fetch(`${api()}/buttons/${buttonId}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
@@ -597,7 +618,7 @@ export default function DesktopApp({
 
   // Dropping onto the empty well creates a key already set to that action.
   const createWithAction = useCallback(
-    async (actionType) => {
+    async (actionType, extra = {}) => {
       if (!currentPage) return;
       // One request, not a create-then-patch. The second round trip meant the
       // key existed briefly as a blank default — it painted the bolt icon and
@@ -609,6 +630,10 @@ export default function DesktopApp({
           page_id: currentPage,
           icon: actionIconFor(actionType) ?? DEFAULT_BUTTON_ICON,
           ...applyActionTypeDefaults({}, actionType),
+          // Applied last: an application drop carries its own label and value,
+          // which must survive the action's defaults rather than be reset by
+          // them.
+          ...extra,
         }),
       });
       const created = await res.json().catch(() => null);
@@ -849,6 +874,21 @@ export default function DesktopApp({
         return;
       }
 
+      // An application drops as a Launch App key already pointed at it. The
+      // name comes along too, so the key reads "Discord" rather than
+      // "New Button" and needs no trip through the drawer at all.
+      if (dragged.startsWith("app:")) {
+        const appId = dragged.slice("app:".length);
+        const appItem = applications.find((a) => a.id === appId);
+        const extra = {
+          action_value: appId,
+          ...(appItem ? { label: appItem.name } : {}),
+        };
+        if (over.id === ADD_SLOT_ID) createWithAction("launch", extra);
+        else assignAction(String(over.id), "launch", extra);
+        return;
+      }
+
       if (active.id === over.id) return;
       setButtons((prev) => {
         const oldIndex = prev.findIndex((b) => b.id === active.id);
@@ -873,7 +913,10 @@ export default function DesktopApp({
         return reordered;
       });
     },
-    [wsRef, setButtons, assignAction, createWithAction],
+    // `applications` matters: the handler looks the dropped app's name up to
+    // label the key, so a stale list would silently drop back to "New Button"
+    // for anything installed since this callback was made.
+    [wsRef, setButtons, assignAction, createWithAction, applications],
   );
 
   // ── Derived ───────────────────────────────────────────────────────────────
@@ -882,10 +925,20 @@ export default function DesktopApp({
   const selectedBtnData = buttons.find((b) => b.id === resolvedSelected);
   const buttonIds = buttons.map((b) => b.id);
   const activeBtn = buttons.find((b) => b.id === activeId);
-  // A library row is being dragged rather than a key — used for the ghost.
-  const activeAction = String(activeId ?? "").startsWith("action:")
-    ? ACTION_BY_ID[String(activeId).slice("action:".length)]
-    : null;
+  // A library row is being dragged rather than a key — used for the ghost and
+  // for lighting up drop targets. Applications count: they drop onto keys the
+  // same way actions do.
+  const activeIdStr = String(activeId ?? "");
+  const activeAction = activeIdStr.startsWith("action:")
+    ? ACTION_BY_ID[activeIdStr.slice("action:".length)]
+    : activeIdStr.startsWith("app:")
+      ? {
+          name:
+            applications.find((a) => a.id === activeIdStr.slice("app:".length))
+              ?.name ?? "Application",
+          icon: "rocket",
+        }
+      : null;
   const currentRule = profileRules.find((r) => r.page_id === currentPage);
   const phoneDevices = useMemo(
     () =>
@@ -1072,6 +1125,8 @@ export default function DesktopApp({
               audioDevices={audioDevices}
               inputDevices={inputDevices}
               audioSessions={audioSessions}
+              applications={applications}
+              onRefreshApplications={() => loadApplications(true)}
               onPatch={patchForm}
               onSave={saveButton}
               onRevert={revertForm}
@@ -1082,7 +1137,7 @@ export default function DesktopApp({
             />
           </div>
 
-          <ActionLibrary />
+          <ActionLibrary applications={applications} />
         </DndContext>
       </div>
       {showQR && (
@@ -1974,9 +2029,39 @@ const ActionRow = memo(function ActionRow({ action }) {
 // Takes no props at all, so memo pins it to a single render. It was rebuilding
 // its whole list — every category and every draggable row — each time an
 // unrelated piece of DesktopApp state changed.
-const ActionLibrary = memo(function ActionLibrary() {
+const AppRow = memo(function AppRow({ app }) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `app:${app.id}`,
+  });
+  return (
+    <div
+      ref={setNodeRef}
+      {...listeners}
+      {...attributes}
+      style={{
+        ...styles.actionRow,
+        ...(isDragging ? styles.actionRowDragging : {}),
+      }}
+      title={app.id}
+    >
+      <ActionIcon name="rocket" size={15} />
+      <span style={styles.actionRowName}>{app.name}</span>
+      {app.packaged ? <span style={styles.appTag}>Store</span> : null}
+      <span style={styles.actionRowGrip}>
+        <Icon name="drag" size={13} />
+      </span>
+    </div>
+  );
+});
+
+// Unsearched, the list is capped: a few hundred rows is not something anyone
+// scrolls, and the search field above is the way in.
+const APP_PREVIEW_LIMIT = 30;
+
+const ActionLibrary = memo(function ActionLibrary({ applications }) {
   const [query, setQuery] = useState("");
   const [collapsed, setCollapsed] = useState(() => new Set());
+  const [appsExpanded, setAppsExpanded] = useState(false);
 
   const q = query.trim().toLowerCase();
   const groups = ACTION_CATEGORIES.map((cat) => ({
@@ -1990,7 +2075,19 @@ const ActionLibrary = memo(function ActionLibrary() {
       : cat.actions,
   })).filter((g) => g.actions.length > 0);
 
-  const total = groups.reduce((n, g) => n + g.actions.length, 0);
+  // Applications are instances rather than action types, so they are their own
+  // group rather than entries in ACTION_CATEGORIES — which the property drawer
+  // and the action dropdown both read.
+  const appMatches = q
+    ? applications.filter((a) => a.name.toLowerCase().includes(q))
+    : applications;
+  const appsShown = q
+    ? appMatches.slice(0, 60)
+    : appMatches.slice(0, APP_PREVIEW_LIMIT);
+  const appsOpen = q ? true : appsExpanded;
+
+  const total =
+    groups.reduce((n, g) => n + g.actions.length, 0) + appMatches.length;
 
   return (
     <aside style={styles.library} aria-label="Actions library">
@@ -2020,7 +2117,7 @@ const ActionLibrary = memo(function ActionLibrary() {
 
       <div style={styles.libraryList}>
         {total === 0 ? (
-          <div style={styles.libraryEmpty}>No actions match “{query}”</div>
+          <div style={styles.libraryEmpty}>Nothing matches “{query}”</div>
         ) : (
           groups.map((group) => {
             const isOpen = q ? true : !collapsed.has(group.label);
@@ -2061,6 +2158,41 @@ const ActionLibrary = memo(function ActionLibrary() {
             );
           })
         )}
+
+        {appMatches.length > 0 ? (
+          <div>
+            <button
+              style={styles.catHead}
+              aria-expanded={appsOpen}
+              onClick={() => setAppsExpanded((v) => !v)}
+            >
+              <span
+                style={{
+                  ...styles.catChevron,
+                  transform: appsOpen ? "rotate(90deg)" : "none",
+                }}
+              >
+                <Icon name="chevronRight" size={13} />
+              </span>
+              <span style={styles.catName}>Applications</span>
+              <span style={styles.catCount}>{appMatches.length}</span>
+            </button>
+
+            {appsOpen ? (
+              <div style={styles.catItems}>
+                {appsShown.map((appItem) => (
+                  <AppRow key={appItem.id} app={appItem} />
+                ))}
+                {appMatches.length > appsShown.length ? (
+                  <div style={styles.appMore}>
+                    {appMatches.length - appsShown.length} more — search to
+                    narrow
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       <div style={styles.libraryHint}>
@@ -3127,6 +3259,127 @@ function useCoalescedPatch(onPatch) {
   );
 }
 
+// ─── Installed application picker ─────────────────────────────────────────────
+
+/**
+ * Launch App's editor: search what Windows reports as installed, or type a path.
+ *
+ * The list comes from the Applications shell folder, so it covers Start menu
+ * entries, App Paths registrations and packaged MSIX apps in one go. What it
+ * cannot cover is an unregistered portable executable, which is why the manual
+ * path stays underneath rather than being replaced.
+ */
+function ApplicationField({ field, value, applications, onRefresh, onChange }) {
+  const [query, setQuery] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+
+  const selected = applications.find((a) => a.id === value) ?? null;
+  const manual = !selected && value ? isFilesystemPath(value) : false;
+
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    // Unfiltered the list is a few hundred long, so it is capped until someone
+    // searches — a scroll through everything is not how anyone finds an app.
+    const pool = q
+      ? applications.filter((a) => a.name.toLowerCase().includes(q))
+      : applications;
+    return pool.slice(0, q ? 60 : 40);
+  }, [applications, query]);
+
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      await onRefresh();
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  return (
+    <>
+      <Field label={field.label}>
+        <div style={{ display: "flex", gap: 6 }}>
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={
+              applications.length
+                ? `Search ${applications.length} installed apps…`
+                : "Loading installed apps…"
+            }
+            style={{ flex: 1 }}
+          />
+          <button
+            style={styles.iconUploadBtn}
+            onClick={refresh}
+            disabled={refreshing}
+            title="Rescan installed applications"
+            aria-label="Rescan installed applications"
+          >
+            <Icon name="search" size={14} />
+          </button>
+        </div>
+
+        <div style={styles.appList}>
+          {matches.length === 0 ? (
+            <div style={styles.appEmpty}>
+              {applications.length
+                ? `No application matches “${query}”`
+                : "No applications found"}
+            </div>
+          ) : (
+            matches.map((appItem) => {
+              const isSelected = appItem.id === value;
+              return (
+                <button
+                  key={appItem.id}
+                  style={{
+                    ...styles.appRow,
+                    ...(isSelected ? styles.appRowOn : {}),
+                  }}
+                  onClick={() => onChange({ [field.key]: appItem.id })}
+                  title={appItem.id}
+                >
+                  <span style={styles.appName}>{appItem.name}</span>
+                  {appItem.packaged && <span style={styles.appTag}>Store</span>}
+                </button>
+              );
+            })
+          )}
+        </div>
+      </Field>
+
+      <Field label="Or enter a path">
+        <div style={{ display: "flex", gap: 6 }}>
+          <input
+            value={manual || !selected ? value : ""}
+            onChange={(e) => onChange({ [field.key]: e.target.value })}
+            placeholder={field.placeholder}
+            style={{ flex: 1 }}
+          />
+          <button
+            style={styles.iconUploadBtn}
+            onClick={async () => {
+              try {
+                const picked = await window.electronAPI?.system.pickFile();
+                if (picked) onChange({ [field.key]: picked });
+              } catch {
+                /* ignore */
+              }
+            }}
+            aria-label="Browse for an executable"
+          >
+            <Icon name="upload" size={14} />
+          </button>
+        </div>
+        {selected && (
+          <div style={styles.appChosen}>Selected: {selected.name}</div>
+        )}
+      </Field>
+    </>
+  );
+}
+
 // ─── Property Panel ───────────────────────────────────────────────────────────
 
 function PropertyPanel({
@@ -3138,6 +3391,8 @@ function PropertyPanel({
   audioDevices,
   inputDevices,
   audioSessions,
+  applications,
+  onRefreshApplications,
   onPatch,
   onSave,
   onRevert,
@@ -3416,6 +3671,8 @@ function PropertyPanel({
             audioDevices={audioDevices}
             inputDevices={inputDevices}
             audioSessions={audioSessions}
+            applications={applications}
+            onRefreshApplications={onRefreshApplications}
           />
         ) : null}
 
@@ -3469,6 +3726,8 @@ function PropertyPanel({
                 audioDevices={audioDevices}
                 inputDevices={inputDevices}
                 audioSessions={audioSessions}
+                applications={applications}
+                onRefreshApplications={onRefreshApplications}
               />
             ) : null}
 
@@ -3514,6 +3773,8 @@ function PropertyPanel({
                 audioDevices={audioDevices}
                 inputDevices={inputDevices}
                 audioSessions={audioSessions}
+                applications={applications}
+                onRefreshApplications={onRefreshApplications}
               />
             ) : null}
 
@@ -3564,6 +3825,8 @@ function PropertyPanel({
                   audioDevices={audioDevices}
                   inputDevices={inputDevices}
                   audioSessions={audioSessions}
+                  applications={applications}
+                  onRefreshApplications={onRefreshApplications}
                 />
                 <ActionStackEditor
                   title="Stack B"
@@ -3572,6 +3835,8 @@ function PropertyPanel({
                   audioDevices={audioDevices}
                   inputDevices={inputDevices}
                   audioSessions={audioSessions}
+                  applications={applications}
+                  onRefreshApplications={onRefreshApplications}
                 />
               </>
             ) : null}
@@ -3676,6 +3941,8 @@ function ActionEditor({
   audioDevices,
   inputDevices,
   audioSessions,
+  applications,
+  onRefreshApplications,
 }) {
   return (
     <>
@@ -3691,6 +3958,8 @@ function ActionEditor({
         audioDevices={audioDevices}
         inputDevices={inputDevices}
         audioSessions={audioSessions}
+        applications={applications}
+        onRefreshApplications={onRefreshApplications}
       />
     </>
   );
@@ -3702,6 +3971,8 @@ function ActionFields({
   audioDevices,
   inputDevices,
   audioSessions,
+  applications,
+  onRefreshApplications,
 }) {
   const meta = ACTION_BY_ID[action.action_type] || ACTION_BY_ID.keystroke;
   return (
@@ -3715,6 +3986,8 @@ function ActionFields({
           audioDevices={audioDevices}
           inputDevices={inputDevices}
           audioSessions={audioSessions}
+          applications={applications}
+          onRefreshApplications={onRefreshApplications}
         />
       ))}
     </>
@@ -3728,6 +4001,8 @@ function ActionField({
   audioDevices,
   inputDevices,
   audioSessions,
+  applications,
+  onRefreshApplications,
 }) {
   const value = action[field.key] || "";
 
@@ -3877,6 +4152,19 @@ function ActionField({
     );
   }
 
+  if (field.type === "application") {
+    return (
+      <ApplicationField
+        field={field}
+        value={value}
+        applications={applications}
+        onRefreshApplications={onRefreshApplications}
+        onRefresh={onRefreshApplications}
+        onChange={onChange}
+      />
+    );
+  }
+
   if (field.type === "file") {
     return (
       <Field label={field.label}>
@@ -3923,6 +4211,8 @@ function ActionStackEditor({
   audioDevices,
   inputDevices,
   audioSessions,
+  applications,
+  onRefreshApplications,
 }) {
   const safeActions = actions || [];
 
@@ -3980,6 +4270,8 @@ function ActionStackEditor({
               audioDevices={audioDevices}
               inputDevices={inputDevices}
               audioSessions={audioSessions}
+              applications={applications}
+              onRefreshApplications={onRefreshApplications}
             />
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <span style={{ fontSize: 10, color: "#606060" }}>Wait after</span>
@@ -4316,6 +4608,71 @@ const styles = {
     background: "var(--accent)",
     borderColor: "var(--accent)",
     color: "#fff",
+  },
+
+  // ── Installed application picker ──
+  // Bounded height: the drawer is a fixed size, so the list scrolls inside its
+  // own box rather than pushing the manual path field out of reach.
+  appList: {
+    marginTop: 6,
+    maxHeight: 120,
+    overflowY: "auto",
+    border: "1px solid var(--border-subtle)",
+    borderRadius: "var(--radius-md)",
+    background: "var(--bg-base)",
+  },
+  appRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    width: "100%",
+    padding: "6px 9px",
+    background: "transparent",
+    border: "none",
+    borderBottom: "1px solid var(--border-subtle)",
+    color: "var(--text-secondary)",
+    fontSize: 12,
+    textAlign: "left",
+    cursor: "pointer",
+  },
+  appRowOn: {
+    background: "var(--accent-soft)",
+    color: "var(--text-primary)",
+  },
+  appName: {
+    flex: 1,
+    minWidth: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  appTag: {
+    flexShrink: 0,
+    fontSize: 9,
+    fontWeight: 700,
+    letterSpacing: 0.4,
+    padding: "1px 5px",
+    borderRadius: 3,
+    background: "var(--bg-hover)",
+    color: "var(--text-muted)",
+  },
+  appMore: {
+    padding: "6px 9px",
+    fontSize: 11,
+    color: "var(--text-muted)",
+  },
+  appEmpty: {
+    padding: "10px 9px",
+    fontSize: 12,
+    color: "var(--text-muted)",
+  },
+  appChosen: {
+    marginTop: 5,
+    fontSize: 11,
+    color: "var(--text-muted)",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   },
 
   iconBtn: {

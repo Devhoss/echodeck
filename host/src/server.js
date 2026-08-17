@@ -8,6 +8,10 @@ const os = require("os");
 const db = require("./db");
 const { getActiveWindow, listOpenWindows } = require("./activeWindow");
 const { findMatchingRule } = require("./ruleEngine");
+const {
+  listApplications,
+  primeApplicationCache,
+} = require("./appDiscovery");
 const { PORT, LAN_IP, LAN_URL } = require("./network");
 const {
   executeAction,
@@ -138,6 +142,18 @@ app.delete("/api/paired-devices/:id", (req, res) => {
     if (ws.pairedDeviceId === req.params.id) ws.close(1008, "Device revoked");
   });
   res.json({ ok: removed });
+});
+
+// FEATURE: Launch App — installed applications for the picker. Enumeration is
+// slow (2-3s), so this serves a cache; ?refresh=1 rebuilds it, which is what the
+// picker's refresh control calls after the user installs something.
+app.get("/api/applications", async (req, res) => {
+  try {
+    res.json(await listApplications({ refresh: req.query.refresh === "1" }));
+  } catch (e) {
+    console.error("applications error:", e.message);
+    res.json([]);
+  }
 });
 
 app.get("/api/audio-sessions", async (req, res) => {
@@ -905,6 +921,10 @@ app.use(express.static(clientPath));
 app.use((req, res) => res.sendFile(path.join(clientPath, "index.html")));
 
 server.listen(PORT, "0.0.0.0", () => {
+  // Warm the application list in the background so the first time someone opens
+  // the picker it is already there. Never awaited: a slow enumeration must not
+  // hold up the host.
+  primeApplicationCache();
   console.log(`✅ EchoDeck running on ${LAN_URL}`);
   console.log(`   Phone URL:    ${LAN_URL}`);
   console.log(`   Local URL:    http://localhost:${PORT}`);
