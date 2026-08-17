@@ -177,339 +177,117 @@ async function getMuted() {
 }
 
 // ---------------------------------------------------------------------------
-// HELPERS
+// FEATURE: Audio device switching — Windows Core Audio via the echoaudio addon
+//
+// This previously drove a long-lived PowerShell process that imported the
+// AudioDeviceCmdlets module. That module is a separate manual install, so the
+// action failed outright on any machine without it — including this one. The
+// helper also cost a process to supervise and a multi-second cold start on the
+// first press. The addon runs in-process, so neither applies.
 // ---------------------------------------------------------------------------
 
-function psImportBlock() {
-  return `
-$_paths = @(
-  (Join-Path $env:USERPROFILE "Documents\\WindowsPowerShell\\Modules\\AudioDeviceCmdlets"),
-  (Join-Path $env:USERPROFILE "Documents\\PowerShell\\Modules\\AudioDeviceCmdlets"),
-  (Join-Path $env:ProgramFiles "WindowsPowerShell\\Modules\\AudioDeviceCmdlets"),
-  (Join-Path $env:ProgramFiles "PowerShell\\Modules\\AudioDeviceCmdlets")
-)
-$_loaded = $false
-foreach ($_p in $_paths) {
-  if (Test-Path $_p) {
-    try { Import-Module $_p -ErrorAction Stop; $_loaded = $true; break } catch {}
-  }
-}
-if (-not $_loaded) {
-  try { Import-Module AudioDeviceCmdlets -ErrorAction Stop; $_loaded = $true } catch {}
-}
-if (-not $_loaded) { Write-Output "ERROR:AudioDeviceCmdlets not found"; exit 1 }`.trim();
-}
-
-function writeTempScript(name, content) {
-  const p = path.join(os.tmpdir(), name);
-  fs.writeFileSync(p, content, "utf8");
-  return p;
-}
-
-let audioSwitchHelper = null;
-let audioSwitchHelperReady = null;
-let audioSwitchBuffer = "";
-let audioSwitchSeq = 0;
-const audioSwitchPending = new Map();
-let audioSwitchQueue = Promise.resolve();
-
-function resetAudioSwitchHelper(err) {
-  if (audioSwitchHelper) {
-    audioSwitchHelper.removeAllListeners();
-    audioSwitchHelper.stdout?.removeAllListeners();
-    audioSwitchHelper.stderr?.removeAllListeners();
-    try {
-      audioSwitchHelper.kill();
-    } catch {
-      /* ignore */
-    }
-  }
-  audioSwitchHelper = null;
-  audioSwitchHelperReady = null;
-  audioSwitchBuffer = "";
-
-  for (const pending of audioSwitchPending.values()) {
-    clearTimeout(pending.timer);
-    pending.resolve({
-      ok: false,
-      message: err?.message ?? "audio switch helper stopped",
-    });
-  }
-  audioSwitchPending.clear();
-}
-
-function handleAudioSwitchLine(line) {
-  const trimmed = line.trim();
-  if (!trimmed) return;
-  if (trimmed === "READY") return;
-
-  const [id, status, ...rest] = trimmed.split("|");
-  const pending = audioSwitchPending.get(id);
-  if (!pending) return;
-
-  audioSwitchPending.delete(id);
-  clearTimeout(pending.timer);
-  pending.resolve({
-    ok: status === "OK",
-    message: rest.join("|"),
-  });
-}
-
-async function getAudioSwitchHelper() {
-  if (audioSwitchHelperReady) {
-    await audioSwitchHelperReady;
-    return audioSwitchHelper;
-  }
-  if (audioSwitchHelper && !audioSwitchHelper.killed) return audioSwitchHelper;
-
-  audioSwitchHelperReady = new Promise((resolve, reject) => {
-    const { spawn } = require("child_process");
-    const script = `
-${psImportBlock()}
-Get-AudioDevice -List | Where-Object { $_.Type -eq "Playback" } | Out-Null
-[Console]::Out.WriteLine("READY")
-[Console]::Out.Flush()
-while ($null -ne ($line = [Console]::In.ReadLine())) {
-  try {
-    $sep = $line.IndexOf("|")
-    if ($sep -lt 1) { continue }
-    $id = $line.Substring(0, $sep)
-    $payload = $line.Substring($sep + 1)
-    $bytes = [Convert]::FromBase64String($payload)
-    $deviceName = [Text.Encoding]::UTF8.GetString($bytes)
-    $devs = Get-AudioDevice -List | Where-Object { $_.Type -eq "Playback" }
-    $dev = $devs | Where-Object { $_.Name -eq $deviceName } | Select-Object -First 1
-    if ($null -eq $dev) {
-      $dev = $devs | Where-Object { $_.Name -like "*$deviceName*" } | Select-Object -First 1
-    }
-    if ($null -eq $dev) {
-      [Console]::Out.WriteLine("$id|FAIL|device not found: $deviceName")
-      [Console]::Out.Flush()
-      continue
-    }
-    Set-AudioDevice -Index $dev.Index | Out-Null
-    Start-Sleep -Milliseconds 80
-    $current = Get-AudioDevice -Playback
-    if ($current.Name -like "*$($dev.Name)*" -or $dev.Name -like "*$($current.Name)*") {
-      [Console]::Out.WriteLine("$id|OK|$($current.Name)")
-      [Console]::Out.Flush()
-    } else {
-      [Console]::Out.WriteLine("$id|FAIL|default is still $($current.Name)")
-      [Console]::Out.Flush()
-    }
-  } catch {
-    [Console]::Out.WriteLine("$id|FAIL|$($_.Exception.Message)")
-    [Console]::Out.Flush()
-  }
-}`.trim();
-
-    let scriptPath;
-    try {
-      scriptPath = writeTempScript(
-        "streamdeck_audio_switch_helper.ps1",
-        script,
-      );
-    } catch (e) {
-      audioSwitchHelperReady = null;
-      reject(e);
-      return;
-    }
-
-    audioSwitchHelper = spawn(
-      "powershell",
-      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
-      { stdio: ["pipe", "pipe", "pipe"] },
-    );
-
-    const startupTimer = setTimeout(() => {
-      const err = new Error("audio switch helper startup timed out");
-      resetAudioSwitchHelper(err);
-      reject(err);
-    }, 20000);
-
-    audioSwitchHelper.stdout.on("data", (chunk) => {
-      audioSwitchBuffer += chunk.toString();
-      const lines = audioSwitchBuffer.split(/\r?\n/);
-      audioSwitchBuffer = lines.pop() ?? "";
-
-      for (const line of lines) {
-        if (line.trim() === "READY") {
-          clearTimeout(startupTimer);
-          resolve();
-        } else {
-          handleAudioSwitchLine(line);
-        }
-      }
-    });
-
-    audioSwitchHelper.stderr.on("data", (chunk) => {
-      const message = chunk.toString().trim();
-      if (message) console.warn("Audio switch helper:", message);
-    });
-
-    audioSwitchHelper.on("error", (e) => {
-      clearTimeout(startupTimer);
-      resetAudioSwitchHelper(e);
-      reject(e);
-    });
-
-    audioSwitchHelper.on("exit", () => {
-      clearTimeout(startupTimer);
-      resetAudioSwitchHelper();
-    });
-  });
-
-  await audioSwitchHelperReady;
-  return audioSwitchHelper;
-}
-
-async function switchAudioDeviceFast(deviceName) {
-  const helper = await getAudioSwitchHelper();
-  const id = String(++audioSwitchSeq);
-  const encoded = Buffer.from(deviceName, "utf8").toString("base64");
-
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      audioSwitchPending.delete(id);
-      resetAudioSwitchHelper(
-        new Error("audio switch helper request timed out"),
-      );
-      resolve({ ok: false, message: "request timed out" });
-    }, 15000);
-
-    audioSwitchPending.set(id, { resolve, timer });
-    helper.stdin.write(`${id}|${encoded}\n`);
-  });
-}
-
-// ---------------------------------------------------------------------------
-// FEATURE: Audio output switching — list Windows playback devices
-// ---------------------------------------------------------------------------
-async function getAudioDevices() {
-  return new Promise((resolve) => {
-    const { exec } = require("child_process");
-    const script = `
-${psImportBlock()}
+let nativeAudio = null;
 try {
-  $devs = Get-AudioDevice -List | Where-Object { $_.Type -eq 'Playback' }
-  $devs | ForEach-Object { "$($_.Index)|$($_.Name)|$($_.Default)" }
-} catch {
-  Write-Output "ERROR:$($_.Exception.Message)"
-}`.trim();
-
-    let scriptPath;
-    try {
-      scriptPath = writeTempScript("streamdeck_devices.ps1", script);
-    } catch (e) {
-      console.warn("⚠️  Could not write PS1:", e.message);
-      return resolve([]);
-    }
-
-    exec(
-      `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}"`,
-      (err, stdout) => {
-        const out = stdout?.trim() ?? "";
-        if (err || out.startsWith("ERROR")) {
-          console.warn(
-            "⚠️  Could not enumerate audio devices:",
-            err?.message ?? out,
-          );
-          return resolve([]);
-        }
-        const devices = out
-          .split("\n")
-          .filter(Boolean)
-          .map((line) => {
-            const [index, name, isDefault] = line.split("|");
-            return {
-              id: index?.trim(),
-              name: name?.trim() ?? "Unknown",
-              isDefault: isDefault?.trim() === "True",
-            };
-          })
-          .filter((d) => d.name);
-        resolve(devices);
-      },
+  nativeAudio = require("echoaudio");
+  if (!nativeAudio.available) {
+    console.warn(
+      "⚠️  Native audio support did not load — device switching is disabled:",
+      nativeAudio.loadError,
     );
-  });
+  }
+} catch (e) {
+  console.warn(
+    "⚠️  echoaudio addon is missing — device switching is disabled:",
+    e.message,
+  );
+}
+
+function nativeAudioReady() {
+  return !!nativeAudio && nativeAudio.available;
+}
+
+// A device is usable if Windows can actually route to it right now. Devices in
+// any other state stay in the list so a button configured for a headset that is
+// currently off still shows its name, but they lose to a present device when
+// resolving an ambiguous name.
+function isPresent(device) {
+  return device.state === "active";
 }
 
 // ---------------------------------------------------------------------------
-// FEATURE: Audio output switching — switch default Windows playback device
+// FEATURE: Audio device switching — list endpoints
 // ---------------------------------------------------------------------------
-async function switchAudioDevice(deviceName) {
-  if (!deviceName) return;
-
-  audioSwitchQueue = audioSwitchQueue
-    .catch(() => {
-      /* keep the queue alive after a failed switch */
-    })
-    .then(() => switchAudioDeviceQueued(deviceName));
-
-  return audioSwitchQueue;
-}
-
-async function switchAudioDeviceQueued(deviceName) {
+async function getAudioDevices(direction = "output") {
+  if (!nativeAudioReady()) return [];
   try {
-    const result = await switchAudioDeviceFast(deviceName);
-    if (result.ok) {
-      console.log(`🔊 Switched audio output to: ${result.message} (helper)`);
-      return;
-    }
-    console.warn("⚠️  Fast audio switch failed:", result.message);
+    return nativeAudio.listDevices(direction === "input" ? "input" : "output");
   } catch (e) {
-    console.warn("⚠️  Fast audio switch unavailable:", e.message);
+    console.warn("⚠️  Could not enumerate audio devices:", e.message);
+    return [];
   }
-
-  await switchAudioDeviceWithPowerShell(deviceName);
 }
 
-function switchAudioDeviceWithPowerShell(deviceName) {
-  return new Promise((resolve) => {
-    const { exec } = require("child_process");
-    const safe = deviceName.replace(/'/g, "").replace(/"/g, "");
-    const script = `
-${psImportBlock()}
-try {
-  $devs = Get-AudioDevice -List | Where-Object { $_.Type -eq 'Playback' }
-  $dev = $devs | Where-Object { $_.Name -eq '${safe}' } | Select-Object -First 1
-  if ($null -eq $dev) {
-    $dev = $devs | Where-Object { $_.Name -like '*${safe}*' } | Select-Object -First 1
-  }
-  if ($null -eq $dev) { Write-Output "FAIL:device not found: ${safe}"; exit 1 }
-  Set-AudioDevice -Index $dev.Index | Out-Null
-  Start-Sleep -Milliseconds 150
-  $current = Get-AudioDevice -Playback
-  if ($current.Name -like "*$($dev.Name)*" -or $dev.Name -like "*$($current.Name)*") {
-    Write-Output "OK:$($current.Name)"
-  } else {
-    Write-Output "FAIL:default is still $($current.Name)"
-    exit 1
-  }
-} catch {
-  Write-Output "FAIL:$($_.Exception.Message)"
-}`.trim();
+// Buttons save the device *name*, not its id — that is what the property panel
+// puts in the option value, and there are saved buttons in the wild already. So
+// a name has to keep resolving, and it has to survive Windows appending or
+// renumbering the interface part ("Speakers (2- Conexant)" today, "(3- ...)"
+// after a reinstall). Present devices win, so an off headset never shadows a
+// live one with a similar name.
+function findDevice(devices, wanted) {
+  if (!wanted) return null;
+  const needle = String(wanted).trim();
+  if (!needle) return null;
+  const lower = needle.toLowerCase();
 
-    let scriptPath;
-    try {
-      scriptPath = writeTempScript("streamdeck_switch.ps1", script);
-    } catch {
-      return resolve();
+  const byRank = (matches) =>
+    matches.find(isPresent) ?? matches[0] ?? null;
+
+  const exactId = devices.filter((d) => d.id === needle);
+  if (exactId.length) return byRank(exactId);
+
+  const exactName = devices.filter((d) => d.name.toLowerCase() === lower);
+  if (exactName.length) return byRank(exactName);
+
+  const partial = devices.filter(
+    (d) =>
+      d.name.toLowerCase().includes(lower) ||
+      lower.includes(d.name.toLowerCase()),
+  );
+  return byRank(partial);
+}
+
+// ---------------------------------------------------------------------------
+// FEATURE: Audio device switching — move the default endpoint
+// ---------------------------------------------------------------------------
+async function switchAudioDevice(wanted, direction = "output") {
+  if (!wanted) return;
+  if (!nativeAudioReady()) {
+    console.error("⚠️  Audio switch failed: native audio support is unavailable.");
+    return;
+  }
+
+  const flow = direction === "input" ? "input" : "output";
+
+  try {
+    const devices = nativeAudio.listDevices(flow);
+    const match = findDevice(devices, wanted);
+
+    if (!match) {
+      console.error(`⚠️  Audio switch failed: no ${flow} device matching "${wanted}".`);
+      return;
+    }
+    if (!isPresent(match)) {
+      console.error(
+        `⚠️  Audio switch failed: "${match.name}" is ${match.state}, not connected.`,
+      );
+      return;
     }
 
-    exec(
-      `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}"`,
-      (err, stdout) => {
-        const out = stdout?.trim() ?? "";
-        if (!err && out.startsWith("OK:")) {
-          console.log(`🔊 Switched audio output to: ${out.slice(3)} (PS)`);
-          return resolve();
-        }
-        console.error("⚠️  Audio switch failed.", out || err?.message);
-        resolve();
-      },
-    );
-  });
+    nativeAudio.setDefaultDevice(match.id);
+    console.log(`🔊 Switched ${flow} to: ${match.name}`);
+  } catch (e) {
+    console.error("⚠️  Audio switch failed:", e.message);
+  }
 }
 
 // ---------------------------------------------------------------------------
