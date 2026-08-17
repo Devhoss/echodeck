@@ -318,6 +318,44 @@ async function switchAudioDevice(wanted, direction = "output") {
 }
 
 // ---------------------------------------------------------------------------
+// FEATURE: Per-application volume — Windows audio sessions
+//
+// A button stores "process.exe|amount" in its single action_value, because
+// actions also live inside multi-action stacks with no columns of their own.
+// See packAppValue in the client's actionRegistry.js.
+// ---------------------------------------------------------------------------
+
+function unpackAppValue(value) {
+  const [app = "", amount = ""] = String(value ?? "").split("|");
+  return { app: app.trim(), amount };
+}
+
+async function getAudioSessions() {
+  if (!nativeAudioReady()) return [];
+  try {
+    return nativeAudio.listSessions();
+  } catch (e) {
+    console.warn("⚠️  Could not enumerate audio sessions:", e.message);
+    return [];
+  }
+}
+
+// Matching is by process name, not pid, so a button keeps working after the
+// application restarts. One process can own several sessions; the addon applies
+// the change to all of them.
+function currentAppVolume(app) {
+  try {
+    const sessions = nativeAudio.listSessions();
+    const match = sessions.find(
+      (s) => s.processName.toLowerCase() === app.toLowerCase(),
+    );
+    return match ? match.volume : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // FEATURE: Soundboard — play audio on PC via ffplay + SDL device routing
 // ---------------------------------------------------------------------------
 async function playAudioOnDevice(dataUrl, deviceName) {
@@ -427,6 +465,55 @@ function executeAction(type, value) {
         .then(resolve)
         .catch(() => resolve());
       return;
+    }
+
+    // FEATURE: Per-application volume
+    if (
+      type === "app_mute" ||
+      type === "app_volume_set" ||
+      type === "app_volume_up" ||
+      type === "app_volume_down"
+    ) {
+      const { app, amount } = unpackAppValue(value);
+      if (!app) {
+        console.warn(`⚠️  ${type}: no application selected.`);
+        return resolve();
+      }
+      if (!nativeAudioReady()) {
+        console.error(`⚠️  ${type} failed: native audio support is unavailable.`);
+        return resolve();
+      }
+
+      try {
+        let changed = 0;
+        if (type === "app_mute") {
+          changed = nativeAudio.setSessionMute(app);
+        } else if (type === "app_volume_set") {
+          const level = Math.max(0, Math.min(100, parseInt(amount) || 0));
+          changed = nativeAudio.setSessionVolume(app, level);
+        } else {
+          const step = Math.max(1, Math.min(20, parseInt(amount) || 5));
+          const current = currentAppVolume(app);
+          if (current === null) {
+            console.warn(`⚠️  ${type}: "${app}" is not playing audio right now.`);
+            return resolve();
+          }
+          const next =
+            type === "app_volume_up"
+              ? Math.min(100, current + step)
+              : Math.max(0, current - step);
+          changed = nativeAudio.setSessionVolume(app, next);
+        }
+
+        if (changed === 0) {
+          // Windows only exposes a session while an app holds the audio device,
+          // so a closed or silent app genuinely has nothing to set.
+          console.warn(`⚠️  ${type}: "${app}" is not playing audio right now.`);
+        }
+      } catch (e) {
+        console.error(`${type} failed:`, e.message);
+      }
+      return resolve();
     }
 
     // FEATURE: Microphone controls — always direct, never via Voicemeeter
@@ -616,6 +703,7 @@ module.exports = {
   getMicVolume,
   getMicMuted,
   getAudioDevices,
+  getAudioSessions,
   switchAudioDevice,
   playAudioOnDevice,
 };

@@ -36,6 +36,8 @@ import {
   ACTION_BY_ID,
   ACTION_CATEGORIES,
   levelTargetFor,
+  packAppValue,
+  unpackAppValue,
   actionTypeLabel,
   applyActionTypeDefaults,
 } from "../actionRegistry.js";
@@ -173,6 +175,7 @@ export default function DesktopApp({
   const [activeId, setActiveId] = useState(null); // dnd drag overlay
   const [audioDevices, setAudioDevices] = useState([]);
   const [inputDevices, setInputDevices] = useState([]);
+  const [audioSessions, setAudioSessions] = useState([]);
   const [profileRules, setProfileRules] = useState([]);
   const [ruleEditorKey, setRuleEditorKey] = useState(0);
   const [autoSwitch, setAutoSwitch] = useState(true);
@@ -287,6 +290,10 @@ export default function DesktopApp({
     fetch(`${api()}/audio-devices?direction=input`)
       .then((r) => r.json())
       .then(setInputDevices)
+      .catch(() => {});
+    fetch(`${api()}/audio-sessions`)
+      .then((r) => r.json())
+      .then(setAudioSessions)
       .catch(() => {});
     fetch(`${api()}/profile-rules`)
       .then((r) => r.json())
@@ -972,6 +979,7 @@ export default function DesktopApp({
               dirty={isDirty}
               audioDevices={audioDevices}
               inputDevices={inputDevices}
+              audioSessions={audioSessions}
               onPatch={patchForm}
               onSave={saveButton}
               onDelete={deleteButton}
@@ -2909,6 +2917,7 @@ function PropertyPanel({
   dirty,
   audioDevices,
   inputDevices,
+  audioSessions,
   onPatch,
   onSave,
   onDelete,
@@ -3175,6 +3184,7 @@ function PropertyPanel({
             onChange={onPatch}
             audioDevices={audioDevices}
             inputDevices={inputDevices}
+            audioSessions={audioSessions}
           />
         ) : null}
 
@@ -3227,6 +3237,7 @@ function PropertyPanel({
                 }
                 audioDevices={audioDevices}
                 inputDevices={inputDevices}
+                audioSessions={audioSessions}
               />
             ) : null}
 
@@ -3271,6 +3282,7 @@ function PropertyPanel({
                 }
                 audioDevices={audioDevices}
                 inputDevices={inputDevices}
+                audioSessions={audioSessions}
               />
             ) : null}
 
@@ -3320,6 +3332,7 @@ function PropertyPanel({
                   onChange={(actions) => onPatch({ switch_actions_a: actions })}
                   audioDevices={audioDevices}
                   inputDevices={inputDevices}
+                  audioSessions={audioSessions}
                 />
                 <ActionStackEditor
                   title="Stack B"
@@ -3327,6 +3340,7 @@ function PropertyPanel({
                   onChange={(actions) => onPatch({ switch_actions_b: actions })}
                   audioDevices={audioDevices}
                   inputDevices={inputDevices}
+                  audioSessions={audioSessions}
                 />
               </>
             ) : null}
@@ -3430,6 +3444,7 @@ function ActionEditor({
   onChange,
   audioDevices,
   inputDevices,
+  audioSessions,
 }) {
   return (
     <>
@@ -3444,12 +3459,19 @@ function ActionEditor({
         onChange={onChange}
         audioDevices={audioDevices}
         inputDevices={inputDevices}
+        audioSessions={audioSessions}
       />
     </>
   );
 }
 
-function ActionFields({ action, onChange, audioDevices, inputDevices }) {
+function ActionFields({
+  action,
+  onChange,
+  audioDevices,
+  inputDevices,
+  audioSessions,
+}) {
   const meta = ACTION_BY_ID[action.action_type] || ACTION_BY_ID.keystroke;
   return (
     <>
@@ -3461,13 +3483,21 @@ function ActionFields({ action, onChange, audioDevices, inputDevices }) {
           onChange={onChange}
           audioDevices={audioDevices}
           inputDevices={inputDevices}
+          audioSessions={audioSessions}
         />
       ))}
     </>
   );
 }
 
-function ActionField({ field, action, onChange, audioDevices, inputDevices }) {
+function ActionField({
+  field,
+  action,
+  onChange,
+  audioDevices,
+  inputDevices,
+  audioSessions,
+}) {
   const value = action[field.key] || "";
 
   if (field.type === "info") {
@@ -3515,6 +3545,64 @@ function ActionField({ field, action, onChange, audioDevices, inputDevices }) {
           )}
         </div>
       </Field>
+    );
+  }
+
+  if (field.type === "app_picker" || field.type === "app_level") {
+    const { app, amount } = unpackAppValue(value);
+    const level =
+      amount === "" ? field.fallback : (parseInt(amount) ?? field.fallback);
+
+    // Windows only lists a session while the app holds the audio device, so a
+    // previously-chosen app disappears from the list when it is closed or
+    // silent. It stays selectable so the button does not silently lose its
+    // target — it is just marked as not currently playing.
+    const running = [...new Set(audioSessions.map((s) => s.processName))].sort(
+      (a, b) => a.localeCompare(b),
+    );
+    const options = app && !running.includes(app) ? [app, ...running] : running;
+
+    return (
+      <>
+        <Field label={field.label}>
+          <select
+            value={app}
+            onChange={(e) =>
+              onChange({
+                [field.key]:
+                  field.type === "app_level"
+                    ? packAppValue(e.target.value, level)
+                    : packAppValue(e.target.value),
+              })
+            }
+          >
+            <option value="">— select application —</option>
+            {options.map((name) => (
+              <option key={name} value={name}>
+                {name}
+                {running.includes(name) ? "" : " — not playing"}
+              </option>
+            ))}
+          </select>
+        </Field>
+        {field.type === "app_level" && (
+          <Field label={field.amountLabel}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <input
+                type="range"
+                min={field.min}
+                max={field.max}
+                value={level}
+                onChange={(e) =>
+                  onChange({ [field.key]: packAppValue(app, e.target.value) })
+                }
+                style={{ flex: 1 }}
+              />
+              <span style={{ minWidth: 38, textAlign: "right" }}>{level}%</span>
+            </div>
+          </Field>
+        )}
+      </>
     );
   }
 
@@ -3603,6 +3691,7 @@ function ActionStackEditor({
   onChange,
   audioDevices,
   inputDevices,
+  audioSessions,
 }) {
   const safeActions = actions || [];
 
@@ -3659,6 +3748,7 @@ function ActionStackEditor({
               onChange={(patch) => patchStep(index, patch)}
               audioDevices={audioDevices}
               inputDevices={inputDevices}
+              audioSessions={audioSessions}
             />
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <span style={{ fontSize: 10, color: "#55556a" }}>Wait after</span>

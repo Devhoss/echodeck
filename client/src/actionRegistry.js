@@ -268,6 +268,88 @@ export const ACTION_REGISTRY = [
       },
     ],
   },
+  {
+    id: "app_mute",
+    name: "Mute App",
+    icon: "volume-x",
+    category: "App Audio",
+    defaults: { action_value: "" },
+    summary: (action) =>
+      unpackAppValue(action.action_value).app || "No app selected",
+    fields: [
+      {
+        type: "app_picker",
+        key: "action_value",
+        label: "Application",
+      },
+    ],
+  },
+  {
+    id: "app_volume_set",
+    name: "Set App Volume",
+    icon: "sliders-horizontal",
+    category: "App Audio",
+    defaults: { action_value: "|50" },
+    summary: (action) => {
+      const { app, amount } = unpackAppValue(action.action_value);
+      return app ? `${app} → ${parseInt(amount) || 0}%` : "No app selected";
+    },
+    fields: [
+      {
+        type: "app_level",
+        key: "action_value",
+        label: "Application",
+        amountLabel: "Target volume",
+        min: 0,
+        max: 100,
+        fallback: 50,
+      },
+    ],
+  },
+  {
+    id: "app_volume_up",
+    name: "App Volume Up",
+    icon: "volume-2",
+    category: "App Audio",
+    defaults: { action_value: "|5" },
+    summary: (action) => {
+      const { app, amount } = unpackAppValue(action.action_value);
+      return app ? `${app} +${parseInt(amount) || 5}%` : "No app selected";
+    },
+    fields: [
+      {
+        type: "app_level",
+        key: "action_value",
+        label: "Application",
+        amountLabel: "Step size",
+        min: 1,
+        max: 20,
+        fallback: 5,
+      },
+    ],
+  },
+  {
+    id: "app_volume_down",
+    name: "App Volume Down",
+    icon: "volume-1",
+    category: "App Audio",
+    defaults: { action_value: "|5" },
+    summary: (action) => {
+      const { app, amount } = unpackAppValue(action.action_value);
+      return app ? `${app} −${parseInt(amount) || 5}%` : "No app selected";
+    },
+    fields: [
+      {
+        type: "app_level",
+        key: "action_value",
+        label: "Application",
+        amountLabel: "Step size",
+        min: 1,
+        max: 20,
+        fallback: 5,
+      },
+    ],
+  },
 ];
 
 // Volume keys show a live level on the face and repeat while held. Both the
@@ -293,6 +375,22 @@ export const HOLD_REPEAT_ACTIONS = new Set([
   "mic_volume_up",
   "mic_volume_down",
 ]);
+
+// Per-app actions need two inputs — which application, and how much — but an
+// action only ever carries one `action_value`, because actions also live inside
+// multi-action stacks as plain {action_type, action_value} objects with no
+// columns of their own. So both are packed into one string. "|" is safe as the
+// separator: Windows forbids it in filenames, so no process name can contain one.
+export function packAppValue(app, amount) {
+  return amount === undefined || amount === null || amount === ""
+    ? String(app ?? "")
+    : `${app ?? ""}|${amount}`;
+}
+
+export function unpackAppValue(value) {
+  const [app = "", amount = ""] = String(value ?? "").split("|");
+  return { app, amount };
+}
 
 export function levelTargetFor(actionType) {
   if (MIC_LEVEL_ACTIONS.has(actionType)) return "mic";

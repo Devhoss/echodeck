@@ -16,6 +16,7 @@ const {
   getMuted,
   getMicVolume,
   getMicMuted,
+  getAudioSessions,
   getAudioDevices,
   playAudioOnDevice,
 } = require("./actions");
@@ -136,6 +137,15 @@ app.delete("/api/paired-devices/:id", (req, res) => {
     if (ws.pairedDeviceId === req.params.id) ws.close(1008, "Device revoked");
   });
   res.json({ ok: removed });
+});
+
+app.get("/api/audio-sessions", async (req, res) => {
+  try {
+    res.json(await getAudioSessions());
+  } catch (e) {
+    console.error("audio-sessions error:", e.message);
+    res.json([]);
+  }
 });
 
 app.get("/api/audio-devices", async (req, res) => {

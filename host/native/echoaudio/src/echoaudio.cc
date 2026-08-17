@@ -10,8 +10,12 @@
 
 #include <windows.h>
 #include <mmdeviceapi.h>
+#include <audiopolicy.h>
+#include <endpointvolume.h>
+#include <psapi.h>
 #include <functiondiscoverykeys_devpkey.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -345,11 +349,239 @@ Napi::Value SetDefaultDevice(const Napi::CallbackInfo& info) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-application volume
+//
+// Windows tracks volume per audio *session*, not per application, and one
+// program often owns several — a browser opens one per tab group, and some
+// apps leave expired sessions behind after playback stops. So a session is
+// identified here by its owning process name, and every write applies to all
+// of that process's sessions at once. That is what "mute Spotify" means, and
+// it is also what survives the app restarting under a new pid.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string ProcessNameForPid(DWORD pid) {
+  if (pid == 0) return {};
+  // LIMITED_INFORMATION is enough for the image name and, unlike QUERY_INFORMATION,
+  // is granted for processes running at a different integrity level.
+  HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (!proc) return {};
+
+  wchar_t buffer[MAX_PATH] = {0};
+  DWORD size = MAX_PATH;
+  std::string name;
+  if (QueryFullProcessImageNameW(proc, 0, buffer, &size)) {
+    std::wstring full(buffer, size);
+    const size_t slash = full.find_last_of(L"\\/");
+    name = ToUtf8((slash == std::wstring::npos ? full : full.substr(slash + 1)).c_str());
+  }
+  CloseHandle(proc);
+  return name;
+}
+
+std::string LowerCopy(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return static_cast<char>(::tolower(c)); });
+  return s;
+}
+
+// Walks every session on the default render endpoint, calling `visit` with the
+// session's control interface, its volume interface, and its process name.
+// Returns false only if the enumerator itself could not be obtained.
+template <typename Fn>
+bool ForEachSession(Fn visit) {
+  IMMDeviceEnumerator* enumerator = nullptr;
+  if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                              __uuidof(IMMDeviceEnumerator),
+                              reinterpret_cast<void**>(&enumerator)))) {
+    return false;
+  }
+
+  IMMDevice* device = nullptr;
+  if (FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &device)) || !device) {
+    enumerator->Release();
+    return false;
+  }
+
+  IAudioSessionManager2* manager = nullptr;
+  if (FAILED(device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr,
+                              reinterpret_cast<void**>(&manager))) ||
+      !manager) {
+    device->Release();
+    enumerator->Release();
+    return false;
+  }
+
+  IAudioSessionEnumerator* sessions = nullptr;
+  if (FAILED(manager->GetSessionEnumerator(&sessions)) || !sessions) {
+    manager->Release();
+    device->Release();
+    enumerator->Release();
+    return false;
+  }
+
+  int count = 0;
+  sessions->GetCount(&count);
+
+  for (int i = 0; i < count; i++) {
+    IAudioSessionControl* control = nullptr;
+    if (FAILED(sessions->GetSession(i, &control)) || !control) continue;
+
+    IAudioSessionControl2* control2 = nullptr;
+    ISimpleAudioVolume* volume = nullptr;
+    if (SUCCEEDED(control->QueryInterface(__uuidof(IAudioSessionControl2),
+                                          reinterpret_cast<void**>(&control2))) &&
+        SUCCEEDED(control->QueryInterface(__uuidof(ISimpleAudioVolume),
+                                          reinterpret_cast<void**>(&volume)))) {
+      DWORD pid = 0;
+      control2->GetProcessId(&pid);
+      const bool isSystem = control2->IsSystemSoundsSession() == S_OK;
+      std::string procName = isSystem ? "System Sounds" : ProcessNameForPid(pid);
+      visit(control2, volume, pid, procName, isSystem);
+    }
+
+    if (volume) volume->Release();
+    if (control2) control2->Release();
+    control->Release();
+  }
+
+  sessions->Release();
+  manager->Release();
+  device->Release();
+  enumerator->Release();
+  return true;
+}
+
+}  // namespace
+
+// listSessions() -> [{ pid, processName, displayName, volume, muted, isSystem, active }]
+Napi::Value ListSessions(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  ComScope com;
+
+  Napi::Array result = Napi::Array::New(env);
+  uint32_t written = 0;
+
+  const bool ok = ForEachSession([&](IAudioSessionControl2* control, ISimpleAudioVolume* volume,
+                                     DWORD pid, const std::string& procName, bool isSystem) {
+    // A session whose process has gone leaves no name behind and cannot be
+    // acted on, so it is not worth showing.
+    if (procName.empty()) return;
+
+    float level = 0.0f;
+    volume->GetMasterVolume(&level);
+    BOOL muted = FALSE;
+    volume->GetMute(&muted);
+
+    AudioSessionState state = AudioSessionStateInactive;
+    control->GetState(&state);
+
+    LPWSTR display = nullptr;
+    std::string displayName;
+    if (SUCCEEDED(control->GetDisplayName(&display)) && display) {
+      displayName = ToUtf8(display);
+      CoTaskMemFree(display);
+    }
+    // Most apps never set a display name, and Windows' own sessions set an
+    // unexpanded resource reference ("@%SystemRoot%\\System32\\AudioSrv.Dll,-202").
+    // Neither is showable, so fall back to the process name.
+    if (displayName.empty() || displayName[0] == '@') displayName = procName;
+
+    Napi::Object entry = Napi::Object::New(env);
+    entry.Set("pid", Napi::Number::New(env, static_cast<double>(pid)));
+    entry.Set("processName", Napi::String::New(env, procName));
+    entry.Set("displayName", Napi::String::New(env, displayName));
+    entry.Set("volume", Napi::Number::New(env, static_cast<int>(level * 100.0f + 0.5f)));
+    entry.Set("muted", Napi::Boolean::New(env, muted != FALSE));
+    entry.Set("isSystem", Napi::Boolean::New(env, isSystem));
+    entry.Set("active", Napi::Boolean::New(env, state == AudioSessionStateActive));
+    result.Set(written++, entry);
+  });
+
+  if (!ok) {
+    Napi::Error::New(env, "Could not enumerate audio sessions")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  return result;
+}
+
+// setSessionVolume(processName, 0..100) -> number of sessions changed
+Napi::Value SetSessionVolume(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 2 || !info[0].IsString() || !info[1].IsNumber()) {
+    Napi::TypeError::New(env, "setSessionVolume(processName, level) requires a name and a level")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  const std::string wanted = LowerCopy(info[0].As<Napi::String>().Utf8Value());
+  const int level = (std::max)(0, (std::min)(100, info[1].As<Napi::Number>().Int32Value()));
+  const float scalar = static_cast<float>(level) / 100.0f;
+
+  ComScope com;
+  int changed = 0;
+  ForEachSession([&](IAudioSessionControl2*, ISimpleAudioVolume* volume, DWORD,
+                     const std::string& procName, bool) {
+    if (LowerCopy(procName) != wanted) return;
+    if (SUCCEEDED(volume->SetMasterVolume(scalar, nullptr))) changed++;
+  });
+
+  return Napi::Number::New(env, changed);
+}
+
+// setSessionMute(processName, muted | "toggle") -> number of sessions changed
+Napi::Value SetSessionMute(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsString()) {
+    Napi::TypeError::New(env, "setSessionMute(processName, muted) requires a process name")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  const std::string wanted = LowerCopy(info[0].As<Napi::String>().Utf8Value());
+  const bool toggle = info.Length() < 2 || !info[1].IsBoolean();
+  const BOOL target = toggle ? FALSE : (info[1].As<Napi::Boolean>().Value() ? TRUE : FALSE);
+
+  ComScope com;
+  int changed = 0;
+  // With several sessions for one process, the first one's state decides the
+  // toggle for all of them — otherwise a half-muted app would flip into a
+  // different half-muted state instead of simply muting.
+  bool decided = false;
+  BOOL resolved = FALSE;
+
+  ForEachSession([&](IAudioSessionControl2*, ISimpleAudioVolume* volume, DWORD,
+                     const std::string& procName, bool) {
+    if (LowerCopy(procName) != wanted) return;
+
+    if (!decided) {
+      if (toggle) {
+        BOOL current = FALSE;
+        volume->GetMute(&current);
+        resolved = current ? FALSE : TRUE;
+      } else {
+        resolved = target;
+      }
+      decided = true;
+    }
+
+    if (SUCCEEDED(volume->SetMute(resolved, nullptr))) changed++;
+  });
+
+  return Napi::Number::New(env, changed);
+}
+
+// ---------------------------------------------------------------------------
 
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("listDevices", Napi::Function::New(env, ListDevices));
   exports.Set("getDefaultDevice", Napi::Function::New(env, GetDefaultDevice));
   exports.Set("setDefaultDevice", Napi::Function::New(env, SetDefaultDevice));
+  exports.Set("listSessions", Napi::Function::New(env, ListSessions));
+  exports.Set("setSessionVolume", Napi::Function::New(env, SetSessionVolume));
+  exports.Set("setSessionMute", Napi::Function::New(env, SetSessionMute));
   return exports;
 }
 
