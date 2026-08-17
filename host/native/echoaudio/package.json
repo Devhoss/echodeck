@@ -1,0 +1,17 @@
+{
+  "name": "echoaudio",
+  "version": "1.0.0",
+  "description": "Windows Core Audio bindings for EchoDeck — device enumeration and default-device switching",
+  "main": "index.js",
+  "private": true,
+  "os": [
+    "win32"
+  ],
+  "gypfile": true,
+  "scripts": {
+    "install": "node-gyp rebuild"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.9.2"
+  }
+}

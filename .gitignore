@@ -65,3 +65,9 @@ host/dist/
 
 # Fetched at build time by host/scripts/fetch-tools.mjs (~112MB), never committed
 host/assets/tools/
+
+# Compiled native addons — built by node-gyp/@electron/rebuild at install time.
+# `build/` is already ignored above; `bin/` is where @electron/rebuild caches
+# its per-ABI copy, and both are regenerated, never committed.
+*.node
+host/native/**/bin/
