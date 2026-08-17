@@ -235,6 +235,9 @@ export default function App() {
   const [muted, setMuted] = useState(false);
 
   const [disconnectActive, setDisconnectActive] = useState(false);
+  const [keySize, setKeySize] = useState(84);
+  const deckRef = useRef(null);
+  const swipeRef = useRef(null);
 
   const wsRef = useRef(null);
   const lastMessageAtRef = useRef(0);
@@ -425,6 +428,47 @@ export default function App() {
     };
   }, [pairedHost, setUnpaired]);
 
+  // A deck key is square. Size it from whichever axis runs out first rather
+  // than letting 1fr rows stretch it into a tall rectangle.
+  const layout = useMemo(() => {
+    const count = Math.max(buttons.length, 1);
+    // Prefer the widest row that keeps keys reasonably large in landscape.
+    const cols = Math.min(count, count <= 8 ? 4 : count <= 15 ? 5 : 7);
+    return { cols, rows: Math.ceil(count / cols) };
+  }, [buttons.length]);
+
+  useEffect(() => {
+    const el = deckRef.current;
+    if (!el) return;
+    const measure = () => {
+      const gap = 8;
+      // Measure the content box: getBoundingClientRect includes the padding,
+      // which made keys a few pixels too big and pushed the last row under the
+      // container's clip.
+      const cs = getComputedStyle(el);
+      const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+      const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+      const box = el.getBoundingClientRect();
+      const w = (box.width - padX - (layout.cols - 1) * gap) / layout.cols;
+      const h = (box.height - padY - (layout.rows - 1) * gap) / layout.rows;
+      const next = Math.max(44, Math.floor(Math.min(w, h)));
+      setKeySize((prev) => (Math.abs(prev - next) > 1 ? next : prev));
+    };
+    measure();
+    // ResizeObserver alone proved unreliable here — rotating the phone changes
+    // the viewport without the observed box reporting it in time — so the
+    // window events back it up. Both paths call the same measure.
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    window.addEventListener("resize", measure);
+    window.addEventListener("orientationchange", measure);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("orientationchange", measure);
+    };
+  }, [layout]);
+
   const pressButton = useCallback(async (id) => {
     if (wsRef.current?.readyState !== WebSocket.OPEN) {
       setStatus("connecting");
@@ -497,6 +541,31 @@ export default function App() {
     if (cachedButtons) setButtons(cachedButtons);
     wsRef.current.send(JSON.stringify({ v: 1, t: "switch_page", page_id }));
   }, []);
+
+  // Horizontal swipe changes page. A key press is a tap, so only a deliberate
+  // horizontal travel counts — vertical movement is left alone so the deck
+  // never fights a scroll, and short movements stay taps.
+  const onDeckPointerDown = useCallback((e) => {
+    swipeRef.current = { x: e.clientX, y: e.clientY };
+  }, []);
+
+  const onDeckPointerUp = useCallback(
+    (e) => {
+      const startPt = swipeRef.current;
+      swipeRef.current = null;
+      if (!startPt || pages.length < 2) return;
+      const dx = e.clientX - startPt.x;
+      const dy = e.clientY - startPt.y;
+      if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+
+      const i = pages.findIndex((p) => p.id === currentPage);
+      if (i === -1) return;
+      const next = pages[(i + (dx < 0 ? 1 : -1) + pages.length) % pages.length];
+      if (next) switchPage(next.id);
+    },
+    [pages, currentPage, switchPage],
+  );
+
 
   const handleDragEnd = useCallback(
     (event) => {
@@ -740,74 +809,26 @@ export default function App() {
         </button>
       </div>
 
-      {/* Page tabs */}
-      {pages.length > 1 && (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 2,
-            paddingLeft: "max(env(safe-area-inset-left), 12px)",
-            paddingRight: "max(env(safe-area-inset-right), 12px)",
-            paddingTop: 0,
-            paddingBottom: 0,
-            background: "#161618",
-            flexShrink: 0,
-            height: 32,
-            overflowX: "auto",
-          }}
-        >
-          {pages.map((p) => (
-            <button
-              key={p.id}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                switchPage(p.id);
-              }}
-              style={{
-                background:
-                  currentPage === p.id
-                    ? "linear-gradient(180deg, #2a2a35 0%, #1e1e28 100%)"
-                    : "none",
-                border: "none",
-                borderBottom:
-                  currentPage === p.id
-                    ? "2px solid #6c63ff"
-                    : "2px solid transparent",
-                color: currentPage === p.id ? "#fff" : "#666",
-                cursor: "pointer",
-                padding: "0 14px",
-                height: "100%",
-                boxSizing: "border-box",
-                fontSize: 12,
-                fontWeight: 600,
-                borderRadius: "6px 6px 0 0",
-                whiteSpace: "nowrap",
-                transition: "all 0.15s",
-              }}
-            >
-              {p.name}
-            </button>
-          ))}
-        </div>
-      )}
-
       {/* FEATURE: Custom button size — 2x2 buttons use gridColumn/gridRow span 2 */}
       <DndContext collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
         <SortableContext items={buttonIds} strategy={rectSortingStrategy}>
           {/* Container */}
           <div
+            ref={deckRef}
+            onPointerDown={onDeckPointerDown}
+            onPointerUp={onDeckPointerUp}
             style={{
               flex: 1,
               minHeight: 0,
               overflow: "hidden",
-              paddingLeft: "max(env(safe-area-inset-left), 10px)", // ← here
-              paddingRight: "max(env(safe-area-inset-right), 10px)", // ← here
-              paddingTop: 6,
-              paddingBottom: 6,
+              paddingLeft: "max(env(safe-area-inset-left), 10px)",
+              paddingRight: "max(env(safe-area-inset-right), 10px)",
+              paddingTop: 4,
+              paddingBottom: 4,
               display: "grid",
-              gridTemplateColumns: "repeat(7, 1fr)",
-              gridTemplateRows: "repeat(3, 1fr)",
+              placeContent: "center",
+              gridTemplateColumns: `repeat(${layout.cols}, ${keySize}px)`,
+              gridAutoRows: `${keySize}px`,
               gap: 8,
             }}
           >
@@ -828,6 +849,43 @@ export default function App() {
           </div>
         </SortableContext>
       </DndContext>
+
+      {/* FEATURE: Deck layout — swipe changes page; the dots do the same by tap,
+          so the deck is never gesture-only. */}
+      {pages.length > 1 && (
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+            gap: 7,
+            padding: "2px 0 8px",
+            flexShrink: 0,
+          }}
+        >
+          {pages.map((p) => {
+            const active = p.id === currentPage;
+            return (
+              <button
+                key={p.id}
+                onClick={() => switchPage(p.id)}
+                aria-label={p.name}
+                aria-current={active}
+                style={{
+                  width: active ? 18 : 7,
+                  height: 7,
+                  padding: 0,
+                  border: 0,
+                  borderRadius: 999,
+                  background: active ? "#3b82f6" : "#303039",
+                  cursor: "pointer",
+                  transition: "width 0.16s ease, background 0.16s ease",
+                }}
+              />
+            );
+          })}
+        </div>
+      )}
 
       {showDisconnectConfirm && (
         <div
