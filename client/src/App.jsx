@@ -16,6 +16,7 @@ import {
   clearPairConfig,
 } from "./constants.js";
 import PairingScreen from "./PairingScreen.jsx";
+import { Icon } from "./icons.jsx";
 import {
   SortableContext,
   rectSortingStrategy,
@@ -954,7 +955,7 @@ function VolumePill({ volume, muted }) {
       }}
     >
       <span style={{ color: muted ? "#f87171" : "#888" }}>
-        {muted ? "🔇" : volume > 60 ? "🔊" : volume > 20 ? "🔉" : "🔈"}
+        <Icon name="sound" size={13} />
       </span>
       <div
         style={{
@@ -1249,7 +1250,7 @@ const SortableButton = memo(function SortableButton({
             userSelect: "none",
           }}
         >
-          🔊
+          <Icon name="sound" size={9} />
         </div>
       )}
 
@@ -1442,7 +1443,7 @@ const SortableButton = memo(function SortableButton({
               userSelect: "none",
             }}
           >
-            🔒
+            <Icon name="guarded" size={9} />
           </div>
         </>
       )}
