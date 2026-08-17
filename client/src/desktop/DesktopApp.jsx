@@ -210,14 +210,7 @@ export default function DesktopApp({
   const [openWindows, setOpenWindows] = useState([]);
   const [showAppPicker, setShowAppPicker] = useState(false);
   const [captureCountdown, setCaptureCountdown] = useState(0);
-  const [showLabels, setShowLabels] = useState(() => {
-    try {
-      const v = localStorage.getItem("deckShowLabels");
-      return v === null ? true : v === "true";
-    } catch {
-      return true;
-    }
-  });
+  const [showLabels, setShowLabels] = useState(false);
   const [showAudioSettings, setShowAudioSettings] = useState(false);
   const [pcSoundDevice, setPcSoundDevice] = useState("");
   // FEATURE: Soundboard — real output devices as Chromium sees them. These are
@@ -377,6 +370,7 @@ export default function DesktopApp({
         setAutoSwitch(d.auto_profile_switching !== false);
         setPcSoundDevice(d.pc_sound_device ?? "");
         setPcMonitorDevice(d.pc_monitor_device ?? "");
+        setShowLabels(d.deck_show_labels === true);
       })
       .catch(() => {});
 
@@ -441,8 +435,27 @@ export default function DesktopApp({
     [currentPage],
   );
 
-  function askConfirm(message, onConfirm) {
-    setConfirmModal({ message, onConfirm });
+  // FEATURE: Editor — put the form back to the last loaded or saved snapshot.
+  // Confirmed rather than immediate: the drawer can hold a whole multi-action
+  // stack, so discarding is not always the small change it looks like.
+  //
+  // An uploaded icon is deliberately not undone. That upload already wrote to
+  // the database on its own, so there is nothing local left to revert, and
+  // pretending otherwise would show the old icon over the new stored one.
+  function revertForm() {
+    if (!savedForm || !isDirty) return;
+    askConfirm(
+      "Discard unsaved changes to this key?",
+      () => setForm(savedForm),
+      { confirmLabel: "Discard", tone: "neutral" },
+    );
+  }
+
+  // `options` carries the affirmative button's wording and tone. Every caller
+  // but one is a deletion, so the defaults leave them untouched — but a revert
+  // offering a red "Delete" button was actively alarming.
+  function askConfirm(message, onConfirm, options = {}) {
+    setConfirmModal({ message, onConfirm, ...options });
   }
 
   async function openPairQR() {
@@ -965,38 +978,26 @@ export default function DesktopApp({
                 onAddPage={addPage}
                 onDeletePage={deletePage}
                 onOpenRules={() => setShowRules(true)}
+                showLabels={showLabels}
+                onToggleLabels={() => {
+                  // Optimistic locally, then persisted — the host broadcasts it
+                  // back so the phone picks it up on the same change.
+                  const next = !showLabels;
+                  setShowLabels(next);
+                  fetch(`${api()}/settings`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      key: "deck_show_labels",
+                      value: next,
+                    }),
+                  }).catch(() => setShowLabels(!next));
+                }}
                 addingPage={addingPage}
                 setAddingPage={setAddingPage}
                 newPageName={newPageName}
                 setNewPageName={setNewPageName}
               />
-
-              <div style={styles.canvasHeadActions}>
-                <button style={styles.ghostBtn} onClick={addButton}>
-                  <Icon name="add" size={14} />
-                  Add Button
-                </button>
-                <button
-                  onClick={() =>
-                    setShowLabels((v) => {
-                      const next = !v;
-                      try {
-                        localStorage.setItem("deckShowLabels", String(next));
-                      } catch {
-                        /* */
-                      }
-                      return next;
-                    })
-                  }
-                  style={{
-                    ...styles.ghostBtn,
-                    ...(showLabels ? styles.ghostBtnOn : {}),
-                  }}
-                  aria-pressed={showLabels}
-                >
-                  {showLabels ? "Hide labels" : "Show labels"}
-                </button>
-              </div>
             </div>
 
             <SortableContext items={buttonIds} strategy={rectSortingStrategy}>
@@ -1075,6 +1076,7 @@ export default function DesktopApp({
               audioSessions={audioSessions}
               onPatch={patchForm}
               onSave={saveButton}
+              onRevert={revertForm}
               onDelete={deleteButton}
               onUploadIcon={uploadIcon}
               onUploadSound={uploadSound}
@@ -1678,13 +1680,21 @@ export default function DesktopApp({
                   borderRadius: 8,
                   fontSize: 12,
                   fontWeight: 700,
-                  background: "#2e0d0d",
-                  border: "1px solid #5c1a1a",
-                  color: "#f87171",
                   cursor: "pointer",
+                  ...(confirmModal.tone === "neutral"
+                    ? {
+                        background: "var(--bg-hover)",
+                        border: "1px solid var(--border-strong)",
+                        color: "var(--text-primary)",
+                      }
+                    : {
+                        background: "#2e0d0d",
+                        border: "1px solid #5c1a1a",
+                        color: "#f87171",
+                      }),
                 }}
               >
-                Delete
+                {confirmModal.confirmLabel ?? "Delete"}
               </button>
             </div>
           </div>
@@ -2074,6 +2084,8 @@ function ProfileMenu({
   onAddPage,
   onDeletePage,
   onOpenRules,
+  showLabels,
+  onToggleLabels,
   addingPage,
   setAddingPage,
   newPageName,
@@ -2221,6 +2233,20 @@ function ProfileMenu({
               New profile
             </button>
           )}
+
+          <button
+            style={styles.menuAction}
+            onClick={onToggleLabels}
+            role="menuitemcheckbox"
+            aria-checked={showLabels}
+          >
+            {/* The check keeps its slot when unchecked, so the row does not
+                shift as it toggles. */}
+            <span style={{ opacity: showLabels ? 1 : 0, display: "flex" }}>
+              <Icon name="check" size={14} />
+            </span>
+            Key labels
+          </button>
 
           <button
             style={styles.menuAction}
@@ -2969,21 +2995,49 @@ function ButtonTile({
             display: "flex",
             flexDirection: "column",
             gap: 3,
-            alignItems: "center",
+            alignItems: "stretch",
           }}
         >
-          <span
+          {/* Label and level share a row rather than each claiming the bottom
+              edge, which is what made them overlap once labels were on. */}
+          <div
             style={{
-              fontSize: 9,
-              fontWeight: 700,
-              letterSpacing: 0.3,
-              color: levelMuted ? "#f87171" : "rgba(255,255,255,0.8)",
-              textShadow: "0 1px 3px rgba(0,0,0,0.7)",
-              fontVariantNumeric: "tabular-nums",
+              display: "flex",
+              alignItems: "baseline",
+              gap: 5,
+              justifyContent: showLabels ? "space-between" : "center",
             }}
           >
-            {levelMuted ? "MUTED" : `${level}%`}
-          </span>
+            {showLabels && (
+              <span
+                style={{
+                  fontSize: 9,
+                  fontWeight: 600,
+                  color: "rgba(255,255,255,0.72)",
+                  textShadow: "0 1px 3px rgba(0,0,0,0.8)",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  minWidth: 0,
+                }}
+              >
+                {btn.label}
+              </span>
+            )}
+            <span
+              style={{
+                fontSize: 9,
+                fontWeight: 700,
+                letterSpacing: 0.3,
+                color: levelMuted ? "#f87171" : "rgba(255,255,255,0.8)",
+                textShadow: "0 1px 3px rgba(0,0,0,0.8)",
+                fontVariantNumeric: "tabular-nums",
+                flexShrink: 0,
+              }}
+            >
+              {levelMuted ? "MUTED" : `${level}%`}
+            </span>
+          </div>
           <span
             style={{
               width: "100%",
@@ -3009,8 +3063,9 @@ function ButtonTile({
         </div>
       )}
 
-      {/* Label */}
-      {showLabels && (
+      {/* Label — volume keys draw their own above the rail, so this would be a
+          second copy sitting on top of it. */}
+      {showLabels && !isVolumeBtn && (
         <div
           style={{
             position: "absolute",
@@ -3087,6 +3142,7 @@ function PropertyPanel({
   audioSessions,
   onPatch,
   onSave,
+  onRevert,
   onDelete,
   onUploadIcon,
   onUploadSound,
@@ -3202,6 +3258,15 @@ function PropertyPanel({
                 <span style={styles.dirtyDot} />
                 Unsaved
               </span>
+            ) : null}
+            {dirty && !saving ? (
+              <button
+                style={styles.revertBtn}
+                onClick={onRevert}
+                title="Discard unsaved changes"
+              >
+                Revert
+              </button>
             ) : null}
             <button
               style={{
@@ -4070,7 +4135,6 @@ const styles = {
     padding: "10px 20px 6px",
     flexShrink: 0,
   },
-  canvasHeadActions: { display: "flex", gap: 6, paddingTop: 2 },
 
   // Profile dropdown — the switcher, stacked over its own summary line.
   profileWrap: { position: "relative", minWidth: 0 },
@@ -4256,25 +4320,6 @@ const styles = {
     color: "#fff",
   },
 
-  ghostBtn: {
-    display: "flex",
-    alignItems: "center",
-    gap: 6,
-    padding: "6px 12px",
-    borderRadius: "var(--radius-md)",
-    background: "var(--bg-elevated)",
-    border: "1px solid var(--border-subtle)",
-    color: "var(--text-secondary)",
-    fontSize: 12,
-    fontWeight: 600,
-    cursor: "pointer",
-    transition: "background var(--duration-base) var(--ease-out)",
-  },
-  ghostBtnOn: {
-    background: "var(--accent-soft)",
-    borderColor: "rgba(59,130,246,0.35)",
-    color: "var(--accent-hover)",
-  },
   iconBtn: {
     display: "grid",
     placeItems: "center",
@@ -4690,12 +4735,24 @@ const styles = {
     borderRadius: 8,
     fontSize: 12,
     fontWeight: 700,
-    background: "linear-gradient(135deg, #3d8fd6, #3d8fd6)",
+    background: "var(--accent)",
     border: "none",
     color: "#fff",
     cursor: "pointer",
-    boxShadow: "0 2px 12px rgba(79,128,255,0.3)",
     transition: "opacity 0.12s",
+  },
+  // Quieter than Save on purpose: discarding is the secondary path, so it reads
+  // as an outline beside the filled primary rather than competing with it.
+  revertBtn: {
+    padding: "8px 14px",
+    borderRadius: 8,
+    fontSize: 12,
+    fontWeight: 600,
+    background: "transparent",
+    border: "1px solid var(--border-strong)",
+    color: "var(--text-secondary)",
+    cursor: "pointer",
+    transition: "color 0.12s, border-color 0.12s",
   },
   deleteBtn: {
     padding: "9px 12px",

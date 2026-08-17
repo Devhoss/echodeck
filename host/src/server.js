@@ -166,11 +166,13 @@ app.get("/api/settings", (req, res) => {
   const pc_monitor_device = db.getSetting("pc_monitor_device") ?? "";
   const auto_profile_switching = db.getSetting("auto_profile_switching") ?? "1";
   const auto_switch_delay = db.getSetting("auto_switch_delay") ?? "0";
+  const deck_show_labels = db.getSetting("deck_show_labels") ?? "0";
   res.json({
     pc_sound_device,
     pc_monitor_device,
     auto_profile_switching: auto_profile_switching === "1",
     auto_switch_delay: Number(auto_switch_delay),
+    deck_show_labels: deck_show_labels === "1",
   });
 });
 
@@ -181,12 +183,13 @@ app.post("/api/settings", (req, res) => {
     "pc_monitor_device",
     "auto_profile_switching",
     "auto_switch_delay",
+    "deck_show_labels",
   ];
   if (!allowed.includes(key))
     return res.status(400).json({ error: "Unknown setting" });
   db.setSetting(
     key,
-    key === "auto_profile_switching"
+    key === "auto_profile_switching" || key === "deck_show_labels"
       ? value
         ? "1"
         : "0"
@@ -807,6 +810,7 @@ function sendState(ws, page_id) {
       pages,
       current_page: targetPage,
       buttons,
+      show_labels: db.getSetting("deck_show_labels") === "1",
       auto_switch: {
         active_page: autoPageId,
         active_rule: activeRuleId,

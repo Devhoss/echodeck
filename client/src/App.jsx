@@ -238,6 +238,7 @@ export default function App() {
   const [micVolume, setMicVolume] = useState(null);
   const [micMuted, setMicMuted] = useState(false);
   const [sessions, setSessions] = useState([]);
+  const [showLabels, setShowLabels] = useState(false);
   const [muted, setMuted] = useState(false);
 
   const [disconnectActive, setDisconnectActive] = useState(false);
@@ -336,6 +337,8 @@ export default function App() {
       }
       console.log("[WS] message received:", msg.t, "at", Date.now());
       if (msg.t === "state") {
+        if (typeof msg.show_labels === "boolean")
+          setShowLabels(msg.show_labels);
         setPages(msg.pages);
         setCurrentPage(msg.current_page);
         pageButtonsCacheRef.current.set(msg.current_page, msg.buttons);
@@ -616,6 +619,7 @@ export default function App() {
         micVolume={micVolume}
         micMuted={micMuted}
         sessions={sessions}
+        showLabels={showLabels}
         wsRef={wsRef}
         switchPage={switchPage}
         pageButtonsCacheRef={pageButtonsCacheRef}
@@ -841,6 +845,7 @@ export default function App() {
             micVolume={micVolume}
             micMuted={micMuted}
             sessions={sessions}
+            showLabels={showLabels}
             onVolumeHoldStart={startVolumeHold}
             onVolumeHoldStop={stopVolumeHold}
             onConfirmHoldStart={beginConfirmHold}
@@ -1090,6 +1095,7 @@ const SortableButton = memo(function SortableButton({
   micVolume,
   micMuted,
   sessions,
+  showLabels,
   onVolumeHoldStart,
   onVolumeHoldStop,
   onConfirmHoldStart,
@@ -1388,6 +1394,32 @@ const SortableButton = memo(function SortableButton({
         )}
       </div>
 
+      {/* Labels are a deck-wide preference set on the desktop; volume keys draw
+          their own above the rail, so this covers everything else. */}
+      {showLabels && !isVolumeBtn && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: 0,
+            left: 0,
+            right: 0,
+            padding: "14px 6px 7px",
+            background: "linear-gradient(transparent, rgba(0,0,0,0.72))",
+            textAlign: "center",
+            fontSize: 11,
+            fontWeight: 600,
+            color: "rgba(255,255,255,0.82)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            pointerEvents: "none",
+            zIndex: 3,
+          }}
+        >
+          {btn.label}
+        </div>
+      )}
+
       {/* FEATURE: Volume controls — live fill bar + % overlay */}
       {isVolumeBtn && level !== null && (
         <div
@@ -1401,21 +1433,47 @@ const SortableButton = memo(function SortableButton({
             display: "flex",
             flexDirection: "column",
             gap: 4,
-            alignItems: "center",
+            alignItems: "stretch",
           }}
         >
-          <span
+          <div
             style={{
-              fontSize: 10,
-              fontWeight: 700,
-              letterSpacing: 0.4,
-              color: levelMuted ? "#f87171" : "rgba(255,255,255,0.82)",
-              textShadow: "0 1px 3px rgba(0,0,0,0.7)",
-              fontVariantNumeric: "tabular-nums",
+              display: "flex",
+              alignItems: "baseline",
+              gap: 5,
+              justifyContent: showLabels ? "space-between" : "center",
             }}
           >
-            {levelMuted ? "MUTED" : `${level}%`}
-          </span>
+            {showLabels && (
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 600,
+                  color: "rgba(255,255,255,0.75)",
+                  textShadow: "0 1px 3px rgba(0,0,0,0.8)",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  minWidth: 0,
+                }}
+              >
+                {btn.label}
+              </span>
+            )}
+            <span
+              style={{
+                fontSize: 10,
+                fontWeight: 700,
+                letterSpacing: 0.4,
+                color: levelMuted ? "#f87171" : "rgba(255,255,255,0.82)",
+                textShadow: "0 1px 3px rgba(0,0,0,0.7)",
+                fontVariantNumeric: "tabular-nums",
+                flexShrink: 0,
+              }}
+            >
+              {levelMuted ? "MUTED" : `${level}%`}
+            </span>
+          </div>
           <span
             style={{
               width: "100%",
