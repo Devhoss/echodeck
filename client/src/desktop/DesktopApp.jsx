@@ -16,6 +16,7 @@ import deckIcon from "/deck-icon.png";
 import {
   DndContext,
   closestCenter,
+  pointerWithin,
   DragOverlay,
   PointerSensor,
   useDraggable,
@@ -210,6 +211,10 @@ export default function DesktopApp({
   // FEATURE: Auto-switch rules moved out of the sidebar — they are configured
   // occasionally, so they no longer hold permanent canvas space.
   const [showRules, setShowRules] = useState(false);
+  // Lifted so the page rail's + can open the profile menu straight into its
+  // "name this profile" state — before, it set addingPage on a closed menu and
+  // looked like it did nothing.
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [connectedDevices, setConnectedDevices] = useState([]);
   // FEATURE: Pairing — devices that hold a persisted credential. Distinct from
   // connectedDevices, which is only the sockets open right now.
@@ -235,6 +240,15 @@ export default function DesktopApp({
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   );
+
+  // Dragging an action must only land on something the pointer is actually
+  // over — closestCenter always returns the nearest droppable, which meant
+  // releasing anywhere replaced whichever key happened to be closest.
+  // Reordering keys keeps closestCenter, where "nearest" is what you want.
+  const collisionDetection = useCallback((args) => {
+    if (String(args.active.id).startsWith("action:")) return pointerWithin(args);
+    return closestCenter(args);
+  }, []);
 
   // FEATURE: Soundboard — enumerate playback devices, refreshing when the user
   // plugs in or removes hardware. Labels are only populated once the media
@@ -826,13 +840,15 @@ export default function DesktopApp({
         {/* ── CANVAS COLUMN ── */}
         <DndContext
           sensors={sensors}
-          collisionDetection={closestCenter}
+          collisionDetection={collisionDetection}
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
         >
         <div style={styles.canvasCol}>
           <div style={styles.canvasHead}>
             <ProfileMenu
+              open={profileMenuOpen}
+              setOpen={setProfileMenuOpen}
               pages={pages}
               currentPage={currentPage}
               buttons={buttons}
@@ -891,6 +907,7 @@ export default function DesktopApp({
                       muted={muted}
                       onSelect={selectBtn}
                       showLabels={showLabels}
+                      droppingAction={!!activeAction}
                     />
                   ))}
                   {/* Empty well — click to add, or drop an action to create */}
@@ -924,7 +941,10 @@ export default function DesktopApp({
               switchPage(id);
               setSelectedBtn(null);
             }}
-            onAddPage={() => setAddingPage(true)}
+            onAddPage={() => {
+              setAddingPage(true);
+              setProfileMenuOpen(true);
+            }}
           />
 
           {/* ── Inspector: sits under the canvas, like the deck's own panel ── */}
@@ -1911,6 +1931,8 @@ function ActionLibrary() {
 }
 
 function ProfileMenu({
+  open,
+  setOpen,
   pages,
   currentPage,
   buttons,
@@ -1925,7 +1947,6 @@ function ProfileMenu({
   newPageName,
   setNewPageName,
 }) {
-  const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
   const inputRef = useRef(null);
   const current = pages.find((p) => p.id === currentPage);
@@ -1945,7 +1966,7 @@ function ProfileMenu({
       document.removeEventListener("pointerdown", onDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open]);
+  }, [open, setOpen]);
 
   useEffect(() => {
     if (addingPage) setTimeout(() => inputRef.current?.focus(), 50);
@@ -2512,6 +2533,7 @@ const DesktopSortableButton = memo(function DesktopSortableButton({
   muted,
   onSelect,
   showLabels,
+  droppingAction,
 }) {
   const {
     attributes,
@@ -2520,7 +2542,12 @@ const DesktopSortableButton = memo(function DesktopSortableButton({
     transform,
     transition,
     isDragging,
+    isOver,
   } = useSortable({ id: btn.id });
+
+  // Only light up while an action is being dragged — during a reorder every
+  // key passes under the cursor and flashing them all would be noise.
+  const isDropTarget = isOver && droppingAction;
 
   return (
     <div
@@ -2529,9 +2556,24 @@ const DesktopSortableButton = memo(function DesktopSortableButton({
       {...listeners}
       style={{
         transform: CSS.Transform.toString(transform),
-        transition,
         zIndex: isDragging ? 999 : "auto",
         opacity: isDragging ? 0.3 : 1,
+        borderRadius: 14,
+        // Longhands, not the `outline` shorthand: a var() inside a shorthand set
+        // through inline styles becomes a pending-substitution value and
+        // computes to transparent, so the highlight never painted.
+        outlineStyle: "solid",
+        outlineWidth: 2,
+        outlineColor: isDropTarget ? "var(--accent)" : "transparent",
+        outlineOffset: 2,
+        boxShadow: isDropTarget ? "0 0 0 6px rgba(59,130,246,0.20)" : "none",
+        transition: [
+          transition,
+          "outline-color 140ms var(--ease-out)",
+          "box-shadow 140ms var(--ease-out)",
+        ]
+          .filter(Boolean)
+          .join(", "),
         ...(btn.size === "2x2"
           ? { gridColumn: "span 2", gridRow: "span 2" }
           : {}),
@@ -2883,15 +2925,15 @@ function PropertyPanel({
         <div style={styles.previewRow}>
           <div
             style={{
-              width: 68,
-              height: 68,
-              borderRadius: 14,
+              width: 46,
+              height: 46,
+              borderRadius: 11,
               background: `linear-gradient(160deg, ${form.color}28, ${form.color}12)`,
               border: `1.5px solid ${form.color}50`,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              fontSize: 30,
+              fontSize: 22,
               position: "relative",
               overflow: "hidden",
               flexShrink: 0,
@@ -3669,7 +3711,7 @@ const styles = {
     alignItems: "flex-start",
     justifyContent: "space-between",
     gap: 12,
-    padding: "14px 20px 10px",
+    padding: "10px 20px 6px",
     flexShrink: 0,
   },
   canvasHeadActions: { display: "flex", gap: 6, paddingTop: 2 },
@@ -3690,7 +3732,7 @@ const styles = {
     transition: "background var(--duration-base) var(--ease-out)",
   },
   profileName: {
-    fontSize: 17,
+    fontSize: 15,
     fontWeight: 700,
     letterSpacing: "-0.01em",
     maxWidth: 280,
@@ -3699,7 +3741,7 @@ const styles = {
     whiteSpace: "nowrap",
   },
   profileMeta: {
-    fontSize: 12,
+    fontSize: 11,
     color: "var(--text-muted)",
     paddingLeft: 0,
     marginTop: 1,
@@ -4208,9 +4250,9 @@ const styles = {
     gridColumn: "1 / -1",
     display: "flex",
     alignItems: "center",
-    gap: 16,
-    paddingBottom: 12,
-    marginBottom: 12,
+    gap: 14,
+    paddingBottom: 10,
+    marginBottom: 10,
     borderBottom: "1px solid var(--border-subtle)",
   },
   headerActions: { marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 },
