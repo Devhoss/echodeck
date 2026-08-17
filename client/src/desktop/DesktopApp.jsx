@@ -1754,7 +1754,9 @@ function VolChip({ volume, muted }) {
             width: "100%",
             transformOrigin: "left center",
             transform: `scaleX(${(muted ? 0 : volume) / 100})`,
-            background: muted ? "#f87171" : volume > 95 ? "#fb923c" : "#4ade80",
+            // Level is a quantity, not a health status — neutral white, with red
+              // kept for muted, which is a state worth flagging.
+              background: muted ? "#f87171" : "rgba(255,255,255,0.85)",
             borderRadius: 2,
             transition: "transform 0.15s",
           }}
@@ -2783,46 +2785,51 @@ function ButtonTile({
         <div
           style={{
             position: "absolute",
-            inset: 0,
+            left: 9,
+            right: 9,
+            bottom: 7,
+            pointerEvents: "none",
+            zIndex: 3,
             display: "flex",
             flexDirection: "column",
-            justifyContent: "flex-end",
-            pointerEvents: "none",
-            zIndex: 2,
-            borderRadius: 14,
-            overflow: "hidden",
+            gap: 3,
+            alignItems: "center",
           }}
         >
-          <div
+          <span
             style={{
-              width: "100%",
-              height: "100%",
-              flexShrink: 0,
-              transformOrigin: "bottom center",
-              transform: `scaleY(${(muted ? 0 : volume) / 100})`,
-              background: muted
-                ? "rgba(248,113,113,0.25)"
-                : volume > 95
-                  ? "rgba(251,146,60,0.2)"
-                  : "rgba(74,222,128,0.15)",
-              transition: "transform 0.12s ease",
-            }}
-          />
-          <div
-            style={{
-              position: "absolute",
-              bottom: 8,
-              left: 0,
-              right: 0,
-              textAlign: "center",
-              fontSize: 10,
+              fontSize: 9,
               fontWeight: 700,
-              color: muted ? "#f87171" : "#fff",
-              textShadow: "0 1px 3px rgba(0,0,0,0.9)",
+              letterSpacing: 0.3,
+              color: muted ? "#f87171" : "rgba(255,255,255,0.8)",
+              textShadow: "0 1px 3px rgba(0,0,0,0.7)",
+              fontVariantNumeric: "tabular-nums",
             }}
           >
-            {muted ? "MUTE" : `${volume}%`}
-          </div>
+            {muted ? "MUTED" : `${volume}%`}
+          </span>
+          <span
+            style={{
+              width: "100%",
+              height: 3,
+              borderRadius: 2,
+              background: "rgba(255,255,255,0.14)",
+              overflow: "hidden",
+            }}
+          >
+            <span
+              style={{
+                display: "block",
+                width: "100%",
+                height: "100%",
+                borderRadius: 2,
+                transformOrigin: "left center",
+                transform: `scaleX(${(muted ? 0 : volume) / 100})`,
+                background: muted ? "#f87171" : "rgba(255,255,255,0.92)",
+                transition: "transform 0.12s ease, background 0.12s ease",
+              }}
+            />
+          </span>
         </div>
       )}
 
