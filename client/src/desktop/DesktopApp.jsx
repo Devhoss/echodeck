@@ -18,6 +18,8 @@ import {
   closestCenter,
   DragOverlay,
   PointerSensor,
+  useDraggable,
+  useDroppable,
   useSensor,
   useSensors,
 } from "@dnd-kit/core";
@@ -28,7 +30,7 @@ import {
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Icon } from "../icons.jsx";
+import { ActionIcon, Icon } from "../icons.jsx";
 import {
   ACTION_BY_ID,
   ACTION_CATEGORIES,
@@ -430,6 +432,71 @@ export default function DesktopApp({
     if (newest) selectBtn(newest);
   }
 
+  // Dropping an action onto a key rewrites that key's action, keeping its
+  // label, icon and colour — you are changing what the key does, not replacing
+  // the key. A key that already does something asks first.
+  const assignAction = useCallback(
+    async (buttonId, actionType) => {
+      const target = buttons.find((b) => b.id === buttonId);
+      if (!target) return;
+
+      const apply = async () => {
+        const patch = applyActionTypeDefaults(
+          { action_type: target.action_type, action_value: target.action_value },
+          actionType,
+        );
+        await fetch(`${api()}/buttons/${buttonId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(patch),
+        });
+        const data = await reloadPages();
+        const page = data.find((p) => p.id === currentPage);
+        setButtons(page?.buttons || []);
+        const updated = (page?.buttons || []).find((b) => b.id === buttonId);
+        if (updated) selectBtn(updated);
+      };
+
+      const isBlank = !target.action_value && target.action_type === "keystroke";
+      if (isBlank) return apply();
+
+      askConfirm(
+        `Replace “${target.label}” with ${actionTypeLabel(actionType)}?`,
+        apply,
+      );
+    },
+    [buttons, currentPage, selectBtn, reloadPages, setButtons],
+  );
+
+  // Dropping onto the empty well creates a key already set to that action.
+  const createWithAction = useCallback(
+    async (actionType) => {
+      if (!currentPage) return;
+      const res = await fetch(`${api()}/buttons`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ page_id: currentPage }),
+      });
+      const created = await res.json().catch(() => null);
+      if (created?.id) {
+        await fetch(`${api()}/buttons/${created.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(
+            applyActionTypeDefaults({}, actionType),
+          ),
+        });
+      }
+      const data = await reloadPages();
+      const page = data.find((p) => p.id === currentPage);
+      const btns = page?.buttons || [];
+      setButtons(btns);
+      const newest = btns.find((b) => b.id === created?.id) ?? btns[btns.length - 1];
+      if (newest) selectBtn(newest);
+    },
+    [currentPage, selectBtn, reloadPages, setButtons],
+  );
+
   async function saveButton() {
     if (!resolvedSelected) return;
     setSaving(true);
@@ -643,7 +710,19 @@ export default function DesktopApp({
   const handleDragEnd = useCallback(
     ({ active, over }) => {
       setActiveId(null);
-      if (!over || active.id === over.id) return;
+      if (!over) return;
+
+      // Library rows carry an `action:` prefix so they can be told apart from
+      // keys, which are dragged for reordering.
+      const dragged = String(active.id);
+      if (dragged.startsWith("action:")) {
+        const actionType = dragged.slice("action:".length);
+        if (over.id === ADD_SLOT_ID) createWithAction(actionType);
+        else assignAction(String(over.id), actionType);
+        return;
+      }
+
+      if (active.id === over.id) return;
       setButtons((prev) => {
         const oldIndex = prev.findIndex((b) => b.id === active.id);
         const newIndex = prev.findIndex((b) => b.id === over.id);
@@ -667,7 +746,7 @@ export default function DesktopApp({
         return reordered;
       });
     },
-    [wsRef, setButtons],
+    [wsRef, setButtons, assignAction, createWithAction],
   );
 
   // ── Derived ───────────────────────────────────────────────────────────────
@@ -676,6 +755,10 @@ export default function DesktopApp({
   const selectedBtnData = buttons.find((b) => b.id === resolvedSelected);
   const buttonIds = buttons.map((b) => b.id);
   const activeBtn = buttons.find((b) => b.id === activeId);
+  // A library row is being dragged rather than a key — used for the ghost.
+  const activeAction = String(activeId ?? "").startsWith("action:")
+    ? ACTION_BY_ID[String(activeId).slice("action:".length)]
+    : null;
   const currentRule = profileRules.find((r) => r.page_id === currentPage);
   const phoneDevices = useMemo(
     () =>
@@ -741,6 +824,12 @@ export default function DesktopApp({
       {/* ── Body ── */}
       <div style={styles.body}>
         {/* ── CANVAS COLUMN ── */}
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          onDragStart={handleDragStart}
+          onDragEnd={handleDragEnd}
+        >
         <div style={styles.canvasCol}>
           <div style={styles.canvasHead}>
             <ProfileMenu
@@ -790,12 +879,6 @@ export default function DesktopApp({
             </div>
           </div>
 
-          <DndContext
-            sensors={sensors}
-            collisionDetection={closestCenter}
-            onDragStart={handleDragStart}
-            onDragEnd={handleDragEnd}
-          >
             <SortableContext items={buttonIds} strategy={rectSortingStrategy}>
               <div style={styles.canvas}>
                 <div style={styles.grid}>
@@ -810,14 +893,8 @@ export default function DesktopApp({
                       showLabels={showLabels}
                     />
                   ))}
-                  {/* Empty well — also the drop target for a new action */}
-                  <button
-                    style={styles.addSlot}
-                    onClick={addButton}
-                    aria-label="Add a button"
-                  >
-                    <Icon name="add" size={20} />
-                  </button>
+                  {/* Empty well — click to add, or drop an action to create */}
+                  <AddSlot onClick={addButton} />
                 </div>
               </div>
             </SortableContext>
@@ -832,9 +909,13 @@ export default function DesktopApp({
                   muted={muted}
                   ghost
                 />
+              ) : activeAction ? (
+                <div style={styles.actionGhost}>
+                  <ActionIcon name={activeAction.icon} size={15} />
+                  {activeAction.name}
+                </div>
               ) : null}
             </DragOverlay>
-          </DndContext>
 
           <PageRail
             pages={pages}
@@ -862,6 +943,9 @@ export default function DesktopApp({
             onDeleteSound={deleteSound}
           />
         </div>
+
+        <ActionLibrary />
+        </DndContext>
       </div>
       {showQR && (
         <div
@@ -1676,6 +1760,156 @@ function VolChip({ volume, muted }) {
  * action so it sits one click away; creating, deleting and auto-switch rules are
  * occasional, so they live at the bottom of the menu rather than on screen.
  */
+/** Drop target id for the empty well at the end of the deck. */
+const ADD_SLOT_ID = "__add_slot__";
+
+/** The empty well: click to add a blank key, or drop an action to create one. */
+function AddSlot({ onClick }) {
+  const { setNodeRef, isOver } = useDroppable({ id: ADD_SLOT_ID });
+  return (
+    <button
+      ref={setNodeRef}
+      style={{
+        ...styles.addSlot,
+        ...(isOver ? styles.addSlotOver : {}),
+      }}
+      onClick={onClick}
+      aria-label="Add a key"
+    >
+      <Icon name="add" size={20} />
+    </button>
+  );
+}
+
+/** One draggable row in the library. */
+function ActionRow({ action }) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `action:${action.id}`,
+  });
+  return (
+    <div
+      ref={setNodeRef}
+      {...listeners}
+      {...attributes}
+      style={{
+        ...styles.actionRow,
+        ...(isDragging ? styles.actionRowDragging : {}),
+      }}
+      title={action.name}
+    >
+      <ActionIcon name={action.icon} size={15} />
+      <span style={styles.actionRowName}>{action.name}</span>
+      <span style={styles.actionRowGrip}>
+        <Icon name="drag" size={13} />
+      </span>
+    </div>
+  );
+}
+
+/**
+ * The actions library. Search filters across action and category names; each
+ * category collapses so a long list stays navigable. Searching expands
+ * everything that matched, because a hit hidden inside a collapsed group reads
+ * as no result at all.
+ */
+function ActionLibrary() {
+  const [query, setQuery] = useState("");
+  const [collapsed, setCollapsed] = useState(() => new Set());
+
+  const q = query.trim().toLowerCase();
+  const groups = ACTION_CATEGORIES.map((cat) => ({
+    label: cat.label,
+    actions: q
+      ? cat.actions.filter(
+          (a) =>
+            a.name.toLowerCase().includes(q) ||
+            cat.label.toLowerCase().includes(q),
+        )
+      : cat.actions,
+  })).filter((g) => g.actions.length > 0);
+
+  const total = groups.reduce((n, g) => n + g.actions.length, 0);
+
+  return (
+    <aside style={styles.library} aria-label="Actions library">
+      <div style={styles.libraryHead}>
+        <div style={styles.searchWrap}>
+          <span style={styles.searchIcon}>
+            <Icon name="search" size={14} />
+          </span>
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search actions"
+            aria-label="Search actions"
+            style={styles.searchInput}
+          />
+          {query ? (
+            <button
+              style={styles.searchClear}
+              onClick={() => setQuery("")}
+              aria-label="Clear search"
+            >
+              <Icon name="close" size={13} />
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      <div style={styles.libraryList}>
+        {total === 0 ? (
+          <div style={styles.libraryEmpty}>
+            No actions match “{query}”
+          </div>
+        ) : (
+          groups.map((group) => {
+            const isOpen = q ? true : !collapsed.has(group.label);
+            return (
+              <div key={group.label}>
+                <button
+                  style={styles.catHead}
+                  aria-expanded={isOpen}
+                  onClick={() =>
+                    setCollapsed((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(group.label)) next.delete(group.label);
+                      else next.add(group.label);
+                      return next;
+                    })
+                  }
+                >
+                  <span
+                    style={{
+                      ...styles.catChevron,
+                      transform: isOpen ? "rotate(90deg)" : "none",
+                    }}
+                  >
+                    <Icon name="chevronRight" size={13} />
+                  </span>
+                  <span style={styles.catName}>{group.label}</span>
+                  <span style={styles.catCount}>{group.actions.length}</span>
+                </button>
+
+                {isOpen ? (
+                  <div style={styles.catItems}>
+                    {group.actions.map((action) => (
+                      <ActionRow key={action.id} action={action} />
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      <div style={styles.libraryHint}>
+        Drag an action onto a key, or onto the empty well to make a new one.
+      </div>
+    </aside>
+  );
+}
+
 function ProfileMenu({
   pages,
   currentPage,
@@ -3639,6 +3873,131 @@ const styles = {
     borderRadius: "var(--radius-md)",
     color: "var(--text-secondary)",
     cursor: "pointer",
+  },
+
+  // ── Actions library ──
+  library: {
+    width: "var(--library-width)",
+    flexShrink: 0,
+    display: "flex",
+    flexDirection: "column",
+    background: "var(--bg-surface)",
+    borderLeft: "1px solid var(--border-subtle)",
+    minHeight: 0,
+  },
+  libraryHead: {
+    padding: 12,
+    borderBottom: "1px solid var(--border-subtle)",
+    flexShrink: 0,
+  },
+  searchWrap: { position: "relative", display: "flex", alignItems: "center" },
+  searchIcon: {
+    position: "absolute",
+    left: 10,
+    display: "grid",
+    color: "var(--text-muted)",
+    pointerEvents: "none",
+  },
+  searchInput: {
+    width: "100%",
+    background: "var(--bg-base)",
+    border: "1px solid var(--border-strong)",
+    borderRadius: "var(--radius-md)",
+    color: "var(--text-primary)",
+    padding: "8px 30px 8px 32px",
+    fontSize: 13,
+  },
+  searchClear: {
+    position: "absolute",
+    right: 6,
+    display: "grid",
+    placeItems: "center",
+    width: 22,
+    height: 22,
+    background: "transparent",
+    border: 0,
+    borderRadius: "var(--radius-sm)",
+    color: "var(--text-muted)",
+    cursor: "pointer",
+  },
+  libraryList: { flex: 1, minHeight: 0, overflowY: "auto", padding: 6 },
+  libraryEmpty: {
+    padding: "28px 12px",
+    textAlign: "center",
+    color: "var(--text-muted)",
+    fontSize: 13,
+  },
+  libraryHint: {
+    padding: "10px 14px",
+    borderTop: "1px solid var(--border-subtle)",
+    color: "var(--text-muted)",
+    fontSize: 11,
+    lineHeight: 1.5,
+    flexShrink: 0,
+  },
+  catHead: {
+    width: "100%",
+    display: "flex",
+    alignItems: "center",
+    gap: 9,
+    padding: "9px 10px",
+    background: "transparent",
+    border: 0,
+    borderRadius: "var(--radius-md)",
+    color: "var(--text-primary)",
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: "pointer",
+    textAlign: "left",
+  },
+  catChevron: {
+    display: "grid",
+    color: "var(--text-muted)",
+    transition: "transform var(--duration-base) var(--ease-out)",
+  },
+  catName: { flex: 1, minWidth: 0 },
+  catCount: { fontSize: 11, color: "var(--text-muted)", fontWeight: 600 },
+  catItems: { padding: "2px 0 6px 14px" },
+  actionRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 9,
+    padding: "7px 10px",
+    borderRadius: "var(--radius-md)",
+    color: "var(--text-secondary)",
+    fontSize: 13,
+    cursor: "grab",
+    userSelect: "none",
+    transition: "background var(--duration-base) var(--ease-out)",
+  },
+  actionRowDragging: { opacity: 0.4, cursor: "grabbing" },
+  actionRowName: {
+    flex: 1,
+    minWidth: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  actionRowGrip: { display: "grid", color: "var(--text-muted)", opacity: 0.5 },
+
+  actionGhost: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    padding: "8px 12px",
+    borderRadius: "var(--radius-md)",
+    background: "var(--bg-elevated)",
+    border: "1px solid var(--accent)",
+    color: "var(--text-primary)",
+    fontSize: 13,
+    fontWeight: 600,
+    boxShadow: "var(--shadow-md)",
+    cursor: "grabbing",
+  },
+  addSlotOver: {
+    borderColor: "var(--accent)",
+    background: "var(--accent-soft)",
+    color: "var(--accent)",
   },
 
   // ── Rule editor modal ──
