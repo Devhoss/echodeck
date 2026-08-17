@@ -554,6 +554,10 @@ export default function App() {
     swipeRef.current = { x: e.clientX, y: e.clientY };
   }, []);
 
+  const onDeckPointerCancel = useCallback(() => {
+    swipeRef.current = null;
+  }, []);
+
   const onDeckPointerUp = useCallback(
     (e) => {
       const startPt = swipeRef.current;
@@ -788,6 +792,7 @@ export default function App() {
             ref={deckRef}
             onPointerDown={onDeckPointerDown}
             onPointerUp={onDeckPointerUp}
+            onPointerCancel={onDeckPointerCancel}
             style={{
               flex: 1,
               minHeight: 0,
@@ -796,6 +801,9 @@ export default function App() {
               paddingRight: "max(env(safe-area-inset-right), 10px)",
               paddingTop: 4,
               paddingBottom: 4,
+              // The browser must not claim horizontal drags as scrolls: it
+              // cancels the pointer sequence and the swipe never completes.
+              touchAction: "none",
               display: "grid",
               placeContent: "center",
               gridTemplateColumns: `repeat(${layout.cols}, ${keySize}px)`,
