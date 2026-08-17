@@ -64,9 +64,9 @@ const VOLUME_ACTIONS = new Set(
   ),
 );
 const SOUND_TARGETS = [
-  { value: "phone", label: "📱 Phone" },
-  { value: "pc", label: "🖥️ PC" },
-  { value: "both", label: "📱+🖥️ Both" },
+  { value: "phone", label: "Phone", icon: "phone" },
+  { value: "pc", label: "PC", icon: "desktop" },
+  { value: "both", label: "Both", icon: "pages" },
 ];
 
 const CONDITION_TYPES = [
@@ -845,23 +845,23 @@ export default function DesktopApp({
             }}
             onAddPage={() => setAddingPage(true)}
           />
-        </div>
 
-        {/* ── RIGHT: Property panel ── */}
-        <PropertyPanel
-          btn={selectedBtnData}
-          form={resolvedForm}
-          saving={saving}
-          saved={saved}
-          dirty={isDirty}
-          audioDevices={audioDevices}
-          onPatch={patchForm}
-          onSave={saveButton}
-          onDelete={deleteButton}
-          onUploadIcon={uploadIcon}
-          onUploadSound={uploadSound}
-          onDeleteSound={deleteSound}
-        />
+          {/* ── Inspector: sits under the canvas, like the deck's own panel ── */}
+          <PropertyPanel
+            btn={selectedBtnData}
+            form={resolvedForm}
+            saving={saving}
+            saved={saved}
+            dirty={isDirty}
+            audioDevices={audioDevices}
+            onPatch={patchForm}
+            onSave={saveButton}
+            onDelete={deleteButton}
+            onUploadIcon={uploadIcon}
+            onUploadSound={uploadSound}
+            onDeleteSound={deleteSound}
+          />
+        </div>
       </div>
       {showQR && (
         <div
@@ -1016,7 +1016,7 @@ export default function DesktopApp({
                   padding: "2px 6px",
                 }}
               >
-                ✕
+                <Icon name="close" size={14} />
               </button>
             </div>
             <div
@@ -1229,7 +1229,7 @@ export default function DesktopApp({
                   padding: "2px 6px",
                 }}
               >
-                ✕
+                <Icon name="close" size={14} />
               </button>
             </div>
             <div style={{ padding: "20px 20px 24px" }}>
@@ -1250,7 +1250,7 @@ export default function DesktopApp({
                     marginBottom: 6,
                   }}
                 >
-                  🖥️ PC Soundboard Output Device
+                  PC Soundboard Output Device
                 </div>
                 <div
                   style={{
@@ -1358,7 +1358,7 @@ export default function DesktopApp({
                     cursor: "pointer",
                   }}
                 >
-                  {audioSettingsSaved ? "✓ Saved!" : "Save"}
+                  {audioSettingsSaved ? "Saved" : "Save"}
                 </button>
               </div>
             </div>
@@ -2187,7 +2187,7 @@ function AutoSwitchRuleEditor({
             disabled={conditions.length === 1}
             title="Remove condition"
           >
-            ✕
+            <Icon name="close" size={14} />
           </button>
         </div>
       ))}
@@ -2230,7 +2230,7 @@ function AutoSwitchRuleEditor({
           <div style={rs.pickerHeader}>
             <span>Running apps</span>
             <button style={rs.pickerClose} onClick={onClosePicker}>
-              ✕
+              <Icon name="close" size={14} />
             </button>
           </div>
           <div style={rs.pickerList}>
@@ -2620,11 +2620,11 @@ function PropertyPanel({
             <Icon name="settings" size={26} />
           </div>
           <div style={styles.panelEmptyText}>
-            Select a button
-            <br />
-            to configure it
+            Select a key to configure it
           </div>
-          <div style={styles.panelEmptyHint}>Drag buttons to reorder</div>
+          <div style={styles.panelEmptyHint}>
+            Drag a key to reorder the deck
+          </div>
         </div>
       </div>
     );
@@ -2715,7 +2715,7 @@ function PropertyPanel({
               onClick={() => iconRef.current?.click()}
               title="Upload image/GIF/video"
             >
-              📁
+              <Icon name="upload" size={14} />
             </button>
             {form.icon_data && (
               <button
@@ -2723,7 +2723,7 @@ function PropertyPanel({
                 onClick={() => onPatch({ icon_data: null })}
                 title="Remove image"
               >
-                ✕
+                <Icon name="close" size={14} />
               </button>
             )}
           </div>
@@ -2960,7 +2960,7 @@ function PropertyPanel({
                   onClick={onDeleteSound}
                   title="Remove sound"
                 >
-                  ✕
+                  <Icon name="close" size={14} />
                 </button>
               </div>
             ) : (
@@ -2997,6 +2997,7 @@ function PropertyPanel({
                   }}
                   onClick={() => onPatch({ sound_target: t.value })}
                 >
+                  <Icon name={t.icon} size={12} />
                   {t.label}
                 </button>
               ))}
@@ -3013,6 +3014,7 @@ function PropertyPanel({
         {dirty && !saving ? (
           <div
             style={{
+              gridColumn: "1 / -1",
               display: "flex",
               alignItems: "center",
               gap: 6,
@@ -3059,7 +3061,7 @@ function PropertyPanel({
             {saving
               ? "Saving…"
               : saved
-                ? "✓ Saved"
+                ? "Saved"
                 : dirty
                   ? "Save Changes"
                   : "No changes"}
@@ -3195,7 +3197,7 @@ function ActionField({ field, action, onChange, audioDevices }) {
           {audioDevices.map((d) => (
             <option key={d.id} value={d.name}>
               {d.name}
-              {d.isDefault ? " ✓" : ""}
+              {d.isDefault ? " (default)" : ""}
             </option>
           ))}
         </select>
@@ -3224,7 +3226,7 @@ function ActionField({ field, action, onChange, audioDevices }) {
               }
             }}
           >
-            📁
+            <Icon name="upload" size={14} />
           </button>
         </div>
       </Field>
@@ -3283,7 +3285,7 @@ function ActionStackEditor({ title, actions, onChange, audioDevices }) {
                   onChange(safeActions.filter((_, i) => i !== index))
                 }
               >
-                ✕
+                <Icon name="close" size={14} />
               </button>
             </div>
             <ActionTypeSelect
@@ -3712,20 +3714,26 @@ const styles = {
   },
 
   // ── Property panel ──
+  // ── Inspector drawer ──
+  // Short and wide beneath the canvas rather than a tall column beside it, so
+  // the deck gets the full window width and the fields flow into columns.
   panel: {
-    width: 262,
     flexShrink: 0,
-    background: "#0f0f14",
-    borderLeft: "1px solid #1e1e28",
+    height: "var(--inspector-height)",
+    background: "var(--bg-surface)",
+    borderTop: "1px solid var(--border-subtle)",
     overflowY: "auto",
     display: "flex",
     flexDirection: "column",
   },
+  // Multi-column flow: the same fields as before, laid across instead of down.
+  // auto-fill keeps it sensible from a narrow window up to a wide one.
   panelInner: {
-    padding: "14px 14px",
-    display: "flex",
-    flexDirection: "column",
-    gap: 1,
+    padding: "14px 20px 18px",
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))",
+    alignContent: "start",
+    gap: "2px 24px",
     animation: "slideIn 0.16s ease",
   },
   panelEmpty: {
@@ -3738,20 +3746,28 @@ const styles = {
     padding: 24,
   },
   panelEmptyText: {
-    fontSize: 12,
-    color: "#44444e",
+    fontSize: 13,
+    color: "var(--text-muted)",
     textAlign: "center",
     lineHeight: 1.7,
   },
   panelEmptyHint: {
-    fontSize: 10,
-    color: "#2a2a38",
+    fontSize: 12,
+    color: "var(--text-muted)",
+    opacity: 0.7,
     textAlign: "center",
     marginTop: 4,
   },
-  panelDivider: { height: 1, background: "#1e1e28", margin: "10px 0" },
+  // A column separator would be wrong in a grid, so dividers span the full row.
+  panelDivider: {
+    gridColumn: "1 / -1",
+    height: 1,
+    background: "var(--border-subtle)",
+    margin: "10px 0",
+  },
 
   previewRow: {
+    gridColumn: "1 / -1",
     display: "flex",
     gap: 12,
     alignItems: "center",
@@ -3780,6 +3796,10 @@ const styles = {
   },
 
   segBtn: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 5,
     padding: "5px 11px",
     borderRadius: 7,
     fontSize: 11,
@@ -3832,7 +3852,15 @@ const styles = {
     transition: "all 0.12s",
   },
 
-  panelActions: { display: "flex", gap: 8, marginTop: 6 },
+  // Save/Delete span the drawer so they stay findable regardless of how many
+  // columns the fields happen to flow into.
+  panelActions: {
+    gridColumn: "1 / -1",
+    display: "flex",
+    gap: 8,
+    marginTop: 10,
+    maxWidth: 420,
+  },
   saveBtn: {
     flex: 1,
     padding: "9px 16px",
