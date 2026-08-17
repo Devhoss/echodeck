@@ -50,7 +50,7 @@ export default function PairingScreen({ onPaired }) {
       parsePairUrl(barcodes[0].rawValue);
     } catch (err) {
       setScanning(false);
-      console.error("SCAN ERROR:", err);
+      console.error("QR scan failed:", err?.message ?? err);
       if (err?.message?.includes("cancel")) {
         // user dismissed — no error shown
       } else {
@@ -61,7 +61,6 @@ export default function PairingScreen({ onPaired }) {
 
   function parsePairUrl(raw) {
     const cleaned = raw.trim();
-    console.log("RAW QR:", cleaned);
 
     try {
       const queryString = cleaned.includes("?")
@@ -72,11 +71,10 @@ export default function PairingScreen({ onPaired }) {
       const port = parseInt(params.get("port") || "9001", 10);
       const token = params.get("token");
 
-      console.log("PAIR PARAMS:", { host, port, token });
       if (!host || !token) throw new Error("No host or pairing code in QR");
       connectAndPair(host, port, token);
     } catch (err) {
-      console.error("PARSE ERROR:", err, cleaned);
+      console.error("Could not read the pairing QR:", err?.message ?? err);
       setError(
         "Invalid QR code. Make sure you scan the EchoDeck pairing code.",
       );

@@ -30,6 +30,18 @@ export function ActionIcon({ name, size = 16, ...rest }) {
  * accessible name. Without it the icon is treated as decorative and hidden from
  * assistive tech, which is correct when adjacent text already names the control.
  */
+/**
+ * A button's face. `icon` is a free text field, so it holds either an action's
+ * registry name (set automatically when an action is assigned) or whatever the
+ * user typed — usually an emoji. Registry names are drawn; everything else is
+ * shown as the text it is.
+ */
+export function ButtonFace({ icon, size, style }) {
+  const Glyph = ACTION_ICONS[icon];
+  if (Glyph) return <Glyph size={size} strokeWidth={1.5} aria-hidden="true" />;
+  return <span style={style}>{icon}</span>;
+}
+
 export function Icon({ name, size = 16, label, ...rest }) {
   const Glyph = Icons[name];
   if (!Glyph) return null;

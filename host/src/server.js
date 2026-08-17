@@ -14,6 +14,10 @@ const {
   executeSequence,
   getVolume,
   getMuted,
+  getMicVolume,
+  getMicMuted,
+  getAudioSessions,
+  getAudioSessionsSync,
   getAudioDevices,
   playAudioOnDevice,
 } = require("./actions");
@@ -136,9 +140,19 @@ app.delete("/api/paired-devices/:id", (req, res) => {
   res.json({ ok: removed });
 });
 
+app.get("/api/audio-sessions", async (req, res) => {
+  try {
+    res.json(await getAudioSessions());
+  } catch (e) {
+    console.error("audio-sessions error:", e.message);
+    res.json([]);
+  }
+});
+
 app.get("/api/audio-devices", async (req, res) => {
   try {
-    res.json(await getAudioDevices());
+    // Defaults to output so the existing callers keep working unchanged.
+    res.json(await getAudioDevices(req.query.direction === "input" ? "input" : "output"));
   } catch (e) {
     console.error("audio-devices error:", e.message);
     res.json([]);
@@ -152,13 +166,19 @@ app.get("/api/settings", (req, res) => {
   const pc_monitor_device = db.getSetting("pc_monitor_device") ?? "";
   const auto_profile_switching = db.getSetting("auto_profile_switching") ?? "1";
   const auto_switch_delay = db.getSetting("auto_switch_delay") ?? "0";
+  const deck_show_labels = db.getSetting("deck_show_labels") ?? "0";
   res.json({
     pc_sound_device,
     pc_monitor_device,
     auto_profile_switching: auto_profile_switching === "1",
     auto_switch_delay: Number(auto_switch_delay),
+    deck_show_labels: deck_show_labels === "1",
   });
 });
+
+// Settings that change what a client renders, as opposed to how the host
+// behaves. These are broadcast; the rest are read on demand.
+const DECK_SETTINGS = new Set(["deck_show_labels"]);
 
 app.post("/api/settings", (req, res) => {
   const { key, value } = req.body;
@@ -167,17 +187,23 @@ app.post("/api/settings", (req, res) => {
     "pc_monitor_device",
     "auto_profile_switching",
     "auto_switch_delay",
+    "deck_show_labels",
   ];
   if (!allowed.includes(key))
     return res.status(400).json({ error: "Unknown setting" });
   db.setSetting(
     key,
-    key === "auto_profile_switching"
+    key === "auto_profile_switching" || key === "deck_show_labels"
       ? value
         ? "1"
         : "0"
       : String(value ?? ""),
   );
+  // Some settings describe the deck itself rather than the host, so every
+  // connected client needs to hear about them. Without this the phone only
+  // picked up a label change on the next button save, which is what made the
+  // toggle look like it did nothing.
+  if (DECK_SETTINGS.has(key)) broadcastState();
   res.json({ ok: true });
 });
 
@@ -441,6 +467,21 @@ function broadcastClients() {
   });
 }
 
+// Only the three fields a key face needs. The full session objects carry a pid,
+// a display name and a state that nothing on the client reads, and this goes
+// out every three seconds to every device.
+function sessionLevels() {
+  try {
+    return getAudioSessionsSync().map((s) => ({
+      app: s.processName,
+      volume: s.volume,
+      muted: s.muted,
+    }));
+  } catch {
+    return [];
+  }
+}
+
 const statsInterval = setInterval(async () => {
   if (clients.size === 0) return;
   let volume, muted;
@@ -466,20 +507,22 @@ const statsInterval = setInterval(async () => {
     }),
     volume: volume ?? null,
     muted: muted ?? null,
+    // Synchronous native reads, unlike the speaker pair above which may await
+    // Voicemeeter — so these need no try/catch of their own and cannot stall
+    // the tick.
+    mic_volume: getMicVolume(),
+    mic_muted: getMicMuted(),
+    sessions: sessionLevels(),
   });
   clients.forEach((ws) => {
-    if (ws.readyState !== 1) {
-      console.log(
-        `[statsInterval] skipping client ${ws.clientId} (${ws.clientIp}) — readyState ${ws.readyState}`,
-      );
-      return;
-    }
+    if (ws.readyState !== 1) return;
     try {
       ws.send(msg);
-      console.log(`[statsInterval] sent to ${ws.clientId} (${ws.clientIp})`);
     } catch (e) {
+      // A failed send is worth hearing about; a successful one fires every
+      // three seconds per client and drowns everything else.
       console.error(
-        `[statsInterval] send FAILED for ${ws.clientId} (${ws.clientIp}):`,
+        `Stats push failed for ${ws.clientId} (${ws.clientIp}):`,
         e.message,
       );
     }
@@ -666,10 +709,19 @@ wss.on("connection", (ws, req) => {
         20,
         Math.max(1, parseInt(msg.step, 10) || 5),
       );
-      const actionType = direction === "up" ? "volume_up" : "volume_down";
+      // Older phone builds predate mic keys and send no target at all, so the
+      // speaker has to remain the default.
+      const isMic = msg.target === "mic";
+      const actionType = isMic
+        ? direction === "up"
+          ? "mic_volume_up"
+          : "mic_volume_down"
+        : direction === "up"
+          ? "volume_up"
+          : "volume_down";
 
       // One real OS read to seed our local estimate
-      let localVolume = (await getVolume()) ?? 50;
+      let localVolume = (isMic ? getMicVolume() : await getVolume()) ?? 50;
 
       // Released or restarted while that read was in flight — installing the
       // interval now would strand it, so leave without starting anything.
@@ -681,11 +733,11 @@ wss.on("connection", (ws, req) => {
           direction === "up"
             ? Math.min(100, localVolume + step)
             : Math.max(0, localVolume - step);
-        const msgOut = JSON.stringify({
-          t: "volume",
-          volume: localVolume,
-          muted: false,
-        });
+        const msgOut = JSON.stringify(
+          isMic
+            ? { t: "volume", mic_volume: localVolume, mic_muted: false }
+            : { t: "volume", volume: localVolume, muted: false },
+        );
         if (ws.readyState === 1) ws.send(msgOut); // only this client, optimistic
       };
 
@@ -739,7 +791,14 @@ wss.on("connection", (ws, req) => {
 async function broadcastVolumeNow() {
   if (clients.size === 0) return;
   const [volume, muted] = await Promise.all([getVolume(), getMuted()]);
-  const msg = JSON.stringify({ t: "volume", volume, muted });
+  const msg = JSON.stringify({
+    t: "volume",
+    volume,
+    muted,
+    mic_volume: getMicVolume(),
+    mic_muted: getMicMuted(),
+    sessions: sessionLevels(),
+  });
   clients.forEach((ws) => {
     if (ws.readyState === 1) ws.send(msg);
   });
@@ -756,6 +815,7 @@ function sendState(ws, page_id) {
       pages,
       current_page: targetPage,
       buttons,
+      show_labels: db.getSetting("deck_show_labels") === "1",
       auto_switch: {
         active_page: autoPageId,
         active_rule: activeRuleId,

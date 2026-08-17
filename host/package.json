@@ -63,7 +63,9 @@
   "dependencies": {
     "active-win": "^8.2.1",
     "better-sqlite3": "^12.10.0",
+    "echoaudio": "file:native/echoaudio",
     "express": "^5.2.1",
+    "node-addon-api": "^8.9.2",
     "robotjs": "^0.7.1",
     "uuid": "^8.3.2",
     "voicemeeter-connector": "^2.2.0",

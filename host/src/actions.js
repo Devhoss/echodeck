@@ -27,8 +27,9 @@ function hasVoicemeeterRemoteRegistry() {
 // package shelled out to a helper .exe per call, which piled up hundreds of
 // processes during a volume hold and made read-modify-write non-atomic.
 let speaker;
+let mic;
 try {
-  ({ speaker } = require("win-audio"));
+  ({ speaker, mic } = require("win-audio"));
 } catch {
   console.warn(
     "⚠️  win-audio not installed — volume actions won't work. Run: npm install win-audio",
@@ -177,339 +178,189 @@ async function getMuted() {
 }
 
 // ---------------------------------------------------------------------------
-// HELPERS
+// FEATURE: Microphone controls
+//
+// Deliberately not routed through Voicemeeter: bus 0 is an output bus, so the
+// Voicemeeter path above would move the wrong thing. The capture endpoint is
+// always read and written directly.
 // ---------------------------------------------------------------------------
 
-function psImportBlock() {
-  return `
-$_paths = @(
-  (Join-Path $env:USERPROFILE "Documents\\WindowsPowerShell\\Modules\\AudioDeviceCmdlets"),
-  (Join-Path $env:USERPROFILE "Documents\\PowerShell\\Modules\\AudioDeviceCmdlets"),
-  (Join-Path $env:ProgramFiles "WindowsPowerShell\\Modules\\AudioDeviceCmdlets"),
-  (Join-Path $env:ProgramFiles "PowerShell\\Modules\\AudioDeviceCmdlets")
-)
-$_loaded = $false
-foreach ($_p in $_paths) {
-  if (Test-Path $_p) {
-    try { Import-Module $_p -ErrorAction Stop; $_loaded = $true; break } catch {}
-  }
-}
-if (-not $_loaded) {
-  try { Import-Module AudioDeviceCmdlets -ErrorAction Stop; $_loaded = $true } catch {}
-}
-if (-not $_loaded) { Write-Output "ERROR:AudioDeviceCmdlets not found"; exit 1 }`.trim();
-}
-
-function writeTempScript(name, content) {
-  const p = path.join(os.tmpdir(), name);
-  fs.writeFileSync(p, content, "utf8");
-  return p;
-}
-
-let audioSwitchHelper = null;
-let audioSwitchHelperReady = null;
-let audioSwitchBuffer = "";
-let audioSwitchSeq = 0;
-const audioSwitchPending = new Map();
-let audioSwitchQueue = Promise.resolve();
-
-function resetAudioSwitchHelper(err) {
-  if (audioSwitchHelper) {
-    audioSwitchHelper.removeAllListeners();
-    audioSwitchHelper.stdout?.removeAllListeners();
-    audioSwitchHelper.stderr?.removeAllListeners();
-    try {
-      audioSwitchHelper.kill();
-    } catch {
-      /* ignore */
-    }
-  }
-  audioSwitchHelper = null;
-  audioSwitchHelperReady = null;
-  audioSwitchBuffer = "";
-
-  for (const pending of audioSwitchPending.values()) {
-    clearTimeout(pending.timer);
-    pending.resolve({
-      ok: false,
-      message: err?.message ?? "audio switch helper stopped",
-    });
-  }
-  audioSwitchPending.clear();
-}
-
-function handleAudioSwitchLine(line) {
-  const trimmed = line.trim();
-  if (!trimmed) return;
-  if (trimmed === "READY") return;
-
-  const [id, status, ...rest] = trimmed.split("|");
-  const pending = audioSwitchPending.get(id);
-  if (!pending) return;
-
-  audioSwitchPending.delete(id);
-  clearTimeout(pending.timer);
-  pending.resolve({
-    ok: status === "OK",
-    message: rest.join("|"),
-  });
-}
-
-async function getAudioSwitchHelper() {
-  if (audioSwitchHelperReady) {
-    await audioSwitchHelperReady;
-    return audioSwitchHelper;
-  }
-  if (audioSwitchHelper && !audioSwitchHelper.killed) return audioSwitchHelper;
-
-  audioSwitchHelperReady = new Promise((resolve, reject) => {
-    const { spawn } = require("child_process");
-    const script = `
-${psImportBlock()}
-Get-AudioDevice -List | Where-Object { $_.Type -eq "Playback" } | Out-Null
-[Console]::Out.WriteLine("READY")
-[Console]::Out.Flush()
-while ($null -ne ($line = [Console]::In.ReadLine())) {
+function getMicVolume() {
+  if (!mic) return null;
   try {
-    $sep = $line.IndexOf("|")
-    if ($sep -lt 1) { continue }
-    $id = $line.Substring(0, $sep)
-    $payload = $line.Substring($sep + 1)
-    $bytes = [Convert]::FromBase64String($payload)
-    $deviceName = [Text.Encoding]::UTF8.GetString($bytes)
-    $devs = Get-AudioDevice -List | Where-Object { $_.Type -eq "Playback" }
-    $dev = $devs | Where-Object { $_.Name -eq $deviceName } | Select-Object -First 1
-    if ($null -eq $dev) {
-      $dev = $devs | Where-Object { $_.Name -like "*$deviceName*" } | Select-Object -First 1
-    }
-    if ($null -eq $dev) {
-      [Console]::Out.WriteLine("$id|FAIL|device not found: $deviceName")
-      [Console]::Out.Flush()
-      continue
-    }
-    Set-AudioDevice -Index $dev.Index | Out-Null
-    Start-Sleep -Milliseconds 80
-    $current = Get-AudioDevice -Playback
-    if ($current.Name -like "*$($dev.Name)*" -or $dev.Name -like "*$($current.Name)*") {
-      [Console]::Out.WriteLine("$id|OK|$($current.Name)")
-      [Console]::Out.Flush()
-    } else {
-      [Console]::Out.WriteLine("$id|FAIL|default is still $($current.Name)")
-      [Console]::Out.Flush()
-    }
+    return mic.get();
   } catch {
-    [Console]::Out.WriteLine("$id|FAIL|$($_.Exception.Message)")
-    [Console]::Out.Flush()
+    return null;
   }
-}`.trim();
-
-    let scriptPath;
-    try {
-      scriptPath = writeTempScript(
-        "streamdeck_audio_switch_helper.ps1",
-        script,
-      );
-    } catch (e) {
-      audioSwitchHelperReady = null;
-      reject(e);
-      return;
-    }
-
-    audioSwitchHelper = spawn(
-      "powershell",
-      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
-      { stdio: ["pipe", "pipe", "pipe"] },
-    );
-
-    const startupTimer = setTimeout(() => {
-      const err = new Error("audio switch helper startup timed out");
-      resetAudioSwitchHelper(err);
-      reject(err);
-    }, 20000);
-
-    audioSwitchHelper.stdout.on("data", (chunk) => {
-      audioSwitchBuffer += chunk.toString();
-      const lines = audioSwitchBuffer.split(/\r?\n/);
-      audioSwitchBuffer = lines.pop() ?? "";
-
-      for (const line of lines) {
-        if (line.trim() === "READY") {
-          clearTimeout(startupTimer);
-          resolve();
-        } else {
-          handleAudioSwitchLine(line);
-        }
-      }
-    });
-
-    audioSwitchHelper.stderr.on("data", (chunk) => {
-      const message = chunk.toString().trim();
-      if (message) console.warn("Audio switch helper:", message);
-    });
-
-    audioSwitchHelper.on("error", (e) => {
-      clearTimeout(startupTimer);
-      resetAudioSwitchHelper(e);
-      reject(e);
-    });
-
-    audioSwitchHelper.on("exit", () => {
-      clearTimeout(startupTimer);
-      resetAudioSwitchHelper();
-    });
-  });
-
-  await audioSwitchHelperReady;
-  return audioSwitchHelper;
 }
 
-async function switchAudioDeviceFast(deviceName) {
-  const helper = await getAudioSwitchHelper();
-  const id = String(++audioSwitchSeq);
-  const encoded = Buffer.from(deviceName, "utf8").toString("base64");
-
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      audioSwitchPending.delete(id);
-      resetAudioSwitchHelper(
-        new Error("audio switch helper request timed out"),
-      );
-      resolve({ ok: false, message: "request timed out" });
-    }, 15000);
-
-    audioSwitchPending.set(id, { resolve, timer });
-    helper.stdin.write(`${id}|${encoded}\n`);
-  });
-}
-
-// ---------------------------------------------------------------------------
-// FEATURE: Audio output switching — list Windows playback devices
-// ---------------------------------------------------------------------------
-async function getAudioDevices() {
-  return new Promise((resolve) => {
-    const { exec } = require("child_process");
-    const script = `
-${psImportBlock()}
-try {
-  $devs = Get-AudioDevice -List | Where-Object { $_.Type -eq 'Playback' }
-  $devs | ForEach-Object { "$($_.Index)|$($_.Name)|$($_.Default)" }
-} catch {
-  Write-Output "ERROR:$($_.Exception.Message)"
-}`.trim();
-
-    let scriptPath;
-    try {
-      scriptPath = writeTempScript("streamdeck_devices.ps1", script);
-    } catch (e) {
-      console.warn("⚠️  Could not write PS1:", e.message);
-      return resolve([]);
-    }
-
-    exec(
-      `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}"`,
-      (err, stdout) => {
-        const out = stdout?.trim() ?? "";
-        if (err || out.startsWith("ERROR")) {
-          console.warn(
-            "⚠️  Could not enumerate audio devices:",
-            err?.message ?? out,
-          );
-          return resolve([]);
-        }
-        const devices = out
-          .split("\n")
-          .filter(Boolean)
-          .map((line) => {
-            const [index, name, isDefault] = line.split("|");
-            return {
-              id: index?.trim(),
-              name: name?.trim() ?? "Unknown",
-              isDefault: isDefault?.trim() === "True",
-            };
-          })
-          .filter((d) => d.name);
-        resolve(devices);
-      },
-    );
-  });
-}
-
-// ---------------------------------------------------------------------------
-// FEATURE: Audio output switching — switch default Windows playback device
-// ---------------------------------------------------------------------------
-async function switchAudioDevice(deviceName) {
-  if (!deviceName) return;
-
-  audioSwitchQueue = audioSwitchQueue
-    .catch(() => {
-      /* keep the queue alive after a failed switch */
-    })
-    .then(() => switchAudioDeviceQueued(deviceName));
-
-  return audioSwitchQueue;
-}
-
-async function switchAudioDeviceQueued(deviceName) {
+function getMicMuted() {
+  if (!mic) return null;
   try {
-    const result = await switchAudioDeviceFast(deviceName);
-    if (result.ok) {
-      console.log(`🔊 Switched audio output to: ${result.message} (helper)`);
-      return;
-    }
-    console.warn("⚠️  Fast audio switch failed:", result.message);
-  } catch (e) {
-    console.warn("⚠️  Fast audio switch unavailable:", e.message);
+    return mic.isMuted();
+  } catch {
+    return null;
   }
-
-  await switchAudioDeviceWithPowerShell(deviceName);
 }
 
-function switchAudioDeviceWithPowerShell(deviceName) {
-  return new Promise((resolve) => {
-    const { exec } = require("child_process");
-    const safe = deviceName.replace(/'/g, "").replace(/"/g, "");
-    const script = `
-${psImportBlock()}
-try {
-  $devs = Get-AudioDevice -List | Where-Object { $_.Type -eq 'Playback' }
-  $dev = $devs | Where-Object { $_.Name -eq '${safe}' } | Select-Object -First 1
-  if ($null -eq $dev) {
-    $dev = $devs | Where-Object { $_.Name -like '*${safe}*' } | Select-Object -First 1
-  }
-  if ($null -eq $dev) { Write-Output "FAIL:device not found: ${safe}"; exit 1 }
-  Set-AudioDevice -Index $dev.Index | Out-Null
-  Start-Sleep -Milliseconds 150
-  $current = Get-AudioDevice -Playback
-  if ($current.Name -like "*$($dev.Name)*" -or $dev.Name -like "*$($current.Name)*") {
-    Write-Output "OK:$($current.Name)"
-  } else {
-    Write-Output "FAIL:default is still $($current.Name)"
-    exit 1
-  }
-} catch {
-  Write-Output "FAIL:$($_.Exception.Message)"
-}`.trim();
+// ---------------------------------------------------------------------------
+// FEATURE: Audio device switching — Windows Core Audio via the echoaudio addon
+//
+// This previously drove a long-lived PowerShell process that imported the
+// AudioDeviceCmdlets module. That module is a separate manual install, so the
+// action failed outright on any machine without it — including this one. The
+// helper also cost a process to supervise and a multi-second cold start on the
+// first press. The addon runs in-process, so neither applies.
+// ---------------------------------------------------------------------------
 
-    let scriptPath;
-    try {
-      scriptPath = writeTempScript("streamdeck_switch.ps1", script);
-    } catch {
-      return resolve();
+let nativeAudio = null;
+try {
+  nativeAudio = require("echoaudio");
+  if (!nativeAudio.available) {
+    console.warn(
+      "⚠️  Native audio support did not load — device switching is disabled:",
+      nativeAudio.loadError,
+    );
+  }
+} catch (e) {
+  console.warn(
+    "⚠️  echoaudio addon is missing — device switching is disabled:",
+    e.message,
+  );
+}
+
+function nativeAudioReady() {
+  return !!nativeAudio && nativeAudio.available;
+}
+
+// A device is usable if Windows can actually route to it right now. Devices in
+// any other state stay in the list so a button configured for a headset that is
+// currently off still shows its name, but they lose to a present device when
+// resolving an ambiguous name.
+function isPresent(device) {
+  return device.state === "active";
+}
+
+// ---------------------------------------------------------------------------
+// FEATURE: Audio device switching — list endpoints
+// ---------------------------------------------------------------------------
+async function getAudioDevices(direction = "output") {
+  if (!nativeAudioReady()) return [];
+  try {
+    return nativeAudio.listDevices(direction === "input" ? "input" : "output");
+  } catch (e) {
+    console.warn("⚠️  Could not enumerate audio devices:", e.message);
+    return [];
+  }
+}
+
+// Buttons save the device *name*, not its id — that is what the property panel
+// puts in the option value, and there are saved buttons in the wild already. So
+// a name has to keep resolving, and it has to survive Windows appending or
+// renumbering the interface part ("Speakers (2- Conexant)" today, "(3- ...)"
+// after a reinstall). Present devices win, so an off headset never shadows a
+// live one with a similar name.
+function findDevice(devices, wanted) {
+  if (!wanted) return null;
+  const needle = String(wanted).trim();
+  if (!needle) return null;
+  const lower = needle.toLowerCase();
+
+  const byRank = (matches) =>
+    matches.find(isPresent) ?? matches[0] ?? null;
+
+  const exactId = devices.filter((d) => d.id === needle);
+  if (exactId.length) return byRank(exactId);
+
+  const exactName = devices.filter((d) => d.name.toLowerCase() === lower);
+  if (exactName.length) return byRank(exactName);
+
+  const partial = devices.filter(
+    (d) =>
+      d.name.toLowerCase().includes(lower) ||
+      lower.includes(d.name.toLowerCase()),
+  );
+  return byRank(partial);
+}
+
+// ---------------------------------------------------------------------------
+// FEATURE: Audio device switching — move the default endpoint
+// ---------------------------------------------------------------------------
+async function switchAudioDevice(wanted, direction = "output") {
+  if (!wanted) return;
+  if (!nativeAudioReady()) {
+    console.error("⚠️  Audio switch failed: native audio support is unavailable.");
+    return;
+  }
+
+  const flow = direction === "input" ? "input" : "output";
+
+  try {
+    const devices = nativeAudio.listDevices(flow);
+    const match = findDevice(devices, wanted);
+
+    if (!match) {
+      console.error(`⚠️  Audio switch failed: no ${flow} device matching "${wanted}".`);
+      return;
+    }
+    if (!isPresent(match)) {
+      console.error(
+        `⚠️  Audio switch failed: "${match.name}" is ${match.state}, not connected.`,
+      );
+      return;
     }
 
-    exec(
-      `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}"`,
-      (err, stdout) => {
-        const out = stdout?.trim() ?? "";
-        if (!err && out.startsWith("OK:")) {
-          console.log(`🔊 Switched audio output to: ${out.slice(3)} (PS)`);
-          return resolve();
-        }
-        console.error("⚠️  Audio switch failed.", out || err?.message);
-        resolve();
-      },
+    nativeAudio.setDefaultDevice(match.id);
+    console.log(`🔊 Switched ${flow} to: ${match.name}`);
+  } catch (e) {
+    console.error("⚠️  Audio switch failed:", e.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// FEATURE: Per-application volume — Windows audio sessions
+//
+// A button stores "process.exe|amount" in its single action_value, because
+// actions also live inside multi-action stacks with no columns of their own.
+// See packAppValue in the client's actionRegistry.js.
+// ---------------------------------------------------------------------------
+
+function unpackAppValue(value) {
+  const [app = "", amount = ""] = String(value ?? "").split("|");
+  return { app: app.trim(), amount };
+}
+
+// The addon reads sessions synchronously. The async wrapper exists only so the
+// REST handler matches the shape of its neighbours; the broadcast path on the
+// stats interval needs the plain call, because it builds one JSON payload and
+// cannot await partway through.
+function getAudioSessionsSync() {
+  if (!nativeAudioReady()) return [];
+  try {
+    return nativeAudio.listSessions();
+  } catch (e) {
+    console.warn("⚠️  Could not enumerate audio sessions:", e.message);
+    return [];
+  }
+}
+
+async function getAudioSessions() {
+  return getAudioSessionsSync();
+}
+
+// Matching is by process name, not pid, so a button keeps working after the
+// application restarts. One process can own several sessions; the addon applies
+// the change to all of them.
+function currentAppVolume(app) {
+  try {
+    const sessions = nativeAudio.listSessions();
+    const match = sessions.find(
+      (s) => s.processName.toLowerCase() === app.toLowerCase(),
     );
-  });
+    return match ? match.volume : null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -611,10 +462,107 @@ function executeAction(type, value) {
     }
 
     if (type === "audio_switch_device") {
-      switchAudioDevice(value)
+      switchAudioDevice(value, "output")
         .then(resolve)
         .catch(() => resolve());
       return;
+    }
+
+    if (type === "mic_switch_device") {
+      switchAudioDevice(value, "input")
+        .then(resolve)
+        .catch(() => resolve());
+      return;
+    }
+
+    // FEATURE: Per-application volume
+    if (
+      type === "app_mute" ||
+      type === "app_volume_set" ||
+      type === "app_volume_up" ||
+      type === "app_volume_down"
+    ) {
+      const { app, amount } = unpackAppValue(value);
+      if (!app) {
+        console.warn(`⚠️  ${type}: no application selected.`);
+        return resolve();
+      }
+      if (!nativeAudioReady()) {
+        console.error(`⚠️  ${type} failed: native audio support is unavailable.`);
+        return resolve();
+      }
+
+      try {
+        let changed = 0;
+        if (type === "app_mute") {
+          changed = nativeAudio.setSessionMute(app);
+        } else if (type === "app_volume_set") {
+          const level = Math.max(0, Math.min(100, parseInt(amount) || 0));
+          changed = nativeAudio.setSessionVolume(app, level);
+        } else {
+          const step = Math.max(1, Math.min(20, parseInt(amount) || 5));
+          const current = currentAppVolume(app);
+          if (current === null) {
+            console.warn(`⚠️  ${type}: "${app}" is not playing audio right now.`);
+            return resolve();
+          }
+          const next =
+            type === "app_volume_up"
+              ? Math.min(100, current + step)
+              : Math.max(0, current - step);
+          changed = nativeAudio.setSessionVolume(app, next);
+        }
+
+        if (changed === 0) {
+          // Windows only exposes a session while an app holds the audio device,
+          // so a closed or silent app genuinely has nothing to set.
+          console.warn(`⚠️  ${type}: "${app}" is not playing audio right now.`);
+        }
+      } catch (e) {
+        console.error(`${type} failed:`, e.message);
+      }
+      return resolve();
+    }
+
+    // FEATURE: Microphone controls — always direct, never via Voicemeeter
+    if (type === "mic_mute") {
+      if (mic) {
+        try {
+          mic.isMuted() ? mic.unmute() : mic.mute();
+        } catch (e) {
+          console.error("Mic mute failed:", e.message);
+        }
+      }
+      return resolve();
+    }
+
+    if (type === "mic_volume_set") {
+      const level = Math.max(0, Math.min(100, parseInt(value) || 50));
+      if (mic) {
+        try {
+          mic.set(level);
+        } catch (e) {
+          console.error("Mic volume failed:", e.message);
+        }
+      }
+      return resolve();
+    }
+
+    if (type === "mic_volume_up" || type === "mic_volume_down") {
+      const step = Math.max(1, Math.min(20, parseInt(value) || 5));
+      if (mic) {
+        try {
+          const current = mic.get();
+          mic.set(
+            type === "mic_volume_up"
+              ? Math.min(100, current + step)
+              : Math.max(0, current - step),
+          );
+        } catch (e) {
+          console.error("Mic volume failed:", e.message);
+        }
+      }
+      return resolve();
     }
 
     // FEATURE: Volume controls — Voicemeeter-first, win-audio fallback
@@ -760,7 +708,11 @@ module.exports = {
   executeSequence,
   getVolume,
   getMuted,
+  getMicVolume,
+  getMicMuted,
   getAudioDevices,
+  getAudioSessions,
+  getAudioSessionsSync,
   switchAudioDevice,
   playAudioOnDevice,
 };
