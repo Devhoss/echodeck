@@ -330,7 +330,11 @@ function unpackAppValue(value) {
   return { app: app.trim(), amount };
 }
 
-async function getAudioSessions() {
+// The addon reads sessions synchronously. The async wrapper exists only so the
+// REST handler matches the shape of its neighbours; the broadcast path on the
+// stats interval needs the plain call, because it builds one JSON payload and
+// cannot await partway through.
+function getAudioSessionsSync() {
   if (!nativeAudioReady()) return [];
   try {
     return nativeAudio.listSessions();
@@ -338,6 +342,10 @@ async function getAudioSessions() {
     console.warn("⚠️  Could not enumerate audio sessions:", e.message);
     return [];
   }
+}
+
+async function getAudioSessions() {
+  return getAudioSessionsSync();
 }
 
 // Matching is by process name, not pid, so a button keeps working after the
@@ -704,6 +712,7 @@ module.exports = {
   getMicMuted,
   getAudioDevices,
   getAudioSessions,
+  getAudioSessionsSync,
   switchAudioDevice,
   playAudioOnDevice,
 };

@@ -21,8 +21,12 @@ import {
   clearPairConfig,
 } from "./constants.js";
 import PairingScreen from "./PairingScreen.jsx";
-import { Icon } from "./icons.jsx";
-import { HOLD_REPEAT_ACTIONS, levelTargetFor } from "./actionRegistry.js";
+import { ButtonFace, Icon } from "./icons.jsx";
+import {
+  HOLD_REPEAT_ACTIONS,
+  levelTargetFor,
+  unpackAppValue,
+} from "./actionRegistry.js";
 
 const globalStyles = `
   @keyframes pulse {
@@ -233,6 +237,7 @@ export default function App() {
   const [volume, setVolume] = useState(null);
   const [micVolume, setMicVolume] = useState(null);
   const [micMuted, setMicMuted] = useState(false);
+  const [sessions, setSessions] = useState([]);
   const [muted, setMuted] = useState(false);
 
   const [disconnectActive, setDisconnectActive] = useState(false);
@@ -315,6 +320,7 @@ export default function App() {
         setMicVolume(msg.mic_volume);
       if (msg.mic_muted !== null && msg.mic_muted !== undefined)
         setMicMuted(msg.mic_muted);
+      if (Array.isArray(msg.sessions)) setSessions(msg.sessions);
     };
 
     const onMessage = (e) => {
@@ -609,6 +615,7 @@ export default function App() {
         muted={muted}
         micVolume={micVolume}
         micMuted={micMuted}
+        sessions={sessions}
         wsRef={wsRef}
         switchPage={switchPage}
         pageButtonsCacheRef={pageButtonsCacheRef}
@@ -833,6 +840,7 @@ export default function App() {
             muted={muted}
             micVolume={micVolume}
             micMuted={micMuted}
+            sessions={sessions}
             onVolumeHoldStart={startVolumeHold}
             onVolumeHoldStop={stopVolumeHold}
             onConfirmHoldStart={beginConfirmHold}
@@ -1081,6 +1089,7 @@ const SortableButton = memo(function SortableButton({
   muted,
   micVolume,
   micMuted,
+  sessions,
   onVolumeHoldStart,
   onVolumeHoldStop,
   onConfirmHoldStart,
@@ -1107,8 +1116,25 @@ const SortableButton = memo(function SortableButton({
   const isMicBtn = levelTarget === "mic";
   const isVolumeBtn = levelTarget !== null;
   const isVolumeHoldBtn = HOLD_REPEAT_ACTIONS.has(btn.action_type);
-  const level = isMicBtn ? micVolume : volume;
-  const levelMuted = isMicBtn ? micMuted : muted;
+  // An app key reads the level of whichever application it targets, so a change
+  // to a silent app is still visible — without this an App Audio key looked
+  // like it did nothing at all.
+  const appSession =
+    levelTarget === "app"
+      ? sessions.find(
+          (s) =>
+            s.app.toLowerCase() ===
+            unpackAppValue(btn.action_value).app.toLowerCase(),
+        )
+      : null;
+  const level =
+    levelTarget === "app"
+      ? (appSession?.volume ?? null)
+      : isMicBtn
+        ? micVolume
+        : volume;
+  const levelMuted =
+    levelTarget === "app" ? !!appSession?.muted : isMicBtn ? micMuted : muted;
   const volumeStep = volumeStepFor(btn);
 
   // FEATURE: Hold to confirm — volume buttons own the pointer-hold gesture
@@ -1351,14 +1377,14 @@ const SortableButton = memo(function SortableButton({
             draggable={false}
           />
         ) : (
-          <span
+          <ButtonFace
+            icon={btn.icon}
+            size={btn.size === "2x2" ? 56 : 42}
             style={{
               fontSize:
                 btn.size === "2x2" ? "min(64px, 14vw)" : "min(48px, 11vw)",
             }}
-          >
-            {btn.icon}
-          </span>
+          />
         )}
       </div>
 

@@ -17,6 +17,7 @@ const {
   getMicVolume,
   getMicMuted,
   getAudioSessions,
+  getAudioSessionsSync,
   getAudioDevices,
   playAudioOnDevice,
 } = require("./actions");
@@ -454,6 +455,21 @@ function broadcastClients() {
   });
 }
 
+// Only the three fields a key face needs. The full session objects carry a pid,
+// a display name and a state that nothing on the client reads, and this goes
+// out every three seconds to every device.
+function sessionLevels() {
+  try {
+    return getAudioSessionsSync().map((s) => ({
+      app: s.processName,
+      volume: s.volume,
+      muted: s.muted,
+    }));
+  } catch {
+    return [];
+  }
+}
+
 const statsInterval = setInterval(async () => {
   if (clients.size === 0) return;
   let volume, muted;
@@ -484,6 +500,7 @@ const statsInterval = setInterval(async () => {
     // the tick.
     mic_volume: getMicVolume(),
     mic_muted: getMicMuted(),
+    sessions: sessionLevels(),
   });
   clients.forEach((ws) => {
     if (ws.readyState !== 1) {
@@ -772,6 +789,7 @@ async function broadcastVolumeNow() {
     muted,
     mic_volume: getMicVolume(),
     mic_muted: getMicMuted(),
+    sessions: sessionLevels(),
   });
   clients.forEach((ws) => {
     if (ws.readyState === 1) ws.send(msg);

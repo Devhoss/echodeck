@@ -392,9 +392,17 @@ export function unpackAppValue(value) {
   return { app, amount };
 }
 
+export const APP_LEVEL_ACTIONS = new Set([
+  "app_volume_up",
+  "app_volume_down",
+  "app_volume_set",
+  "app_mute",
+]);
+
 export function levelTargetFor(actionType) {
   if (MIC_LEVEL_ACTIONS.has(actionType)) return "mic";
   if (SPEAKER_LEVEL_ACTIONS.has(actionType)) return "speaker";
+  if (APP_LEVEL_ACTIONS.has(actionType)) return "app";
   return null;
 }
 
@@ -412,6 +420,21 @@ export const ACTION_CATEGORIES = [
 export function actionTypeLabel(type) {
   return ACTION_BY_ID[type]?.name || type || "Action";
 }
+
+/**
+ * The registry icon name for an action, used as a new key's default face.
+ *
+ * A button's `icon` is a free text field holding an emoji, so these names are
+ * stored in the same column and the tiles resolve any that match the registry
+ * to a drawn glyph. Anything else — an emoji, a letter — still renders as text,
+ * which keeps the field editable exactly as before.
+ */
+export function actionIconFor(type) {
+  return ACTION_BY_ID[type]?.icon ?? null;
+}
+
+/** The icon a freshly created button carries until an action is assigned. */
+export const DEFAULT_BUTTON_ICON = "⚡";
 
 export function applyActionTypeDefaults(action, actionType) {
   const meta = ACTION_BY_ID[actionType] || ACTION_BY_ID.keystroke;

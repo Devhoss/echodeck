@@ -10,7 +10,15 @@
  * All mutations go through the existing REST/WebSocket API — no new API surface.
  */
 
-import { useCallback, useEffect, useRef, useState, memo, useMemo } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  memo,
+  useMemo,
+} from "react";
 import QRCode from "qrcode";
 import deckIcon from "/deck-icon.png";
 import {
@@ -31,10 +39,12 @@ import {
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { ActionIcon, Icon } from "../icons.jsx";
+import { ActionIcon, ButtonFace, Icon } from "../icons.jsx";
 import {
   ACTION_BY_ID,
   ACTION_CATEGORIES,
+  actionIconFor,
+  DEFAULT_BUTTON_ICON,
   levelTargetFor,
   packAppValue,
   unpackAppValue,
@@ -164,10 +174,18 @@ export default function DesktopApp({
   muted,
   micVolume,
   micMuted,
+  sessions,
   wsRef,
   switchPage,
   pageButtonsCacheRef,
 }) {
+  const buttonCount = buttons.length;
+  const canvasRef = useRef(null);
+  // Keys are sized to the space the canvas actually has, so the whole deck is
+  // always visible. Previously they were a fixed 104px and the canvas scrolled,
+  // which meant adding a key could push it out of sight behind the drawer.
+  const [deckLayout, setDeckLayout] = useState({ cols: 1, size: 96 });
+
   const [selectedBtn, setSelectedBtn] = useState(null);
   const [form, setForm] = useState({});
   const [saving, setSaving] = useState(false);
@@ -226,6 +244,60 @@ export default function DesktopApp({
   const [savedForm, setSavedForm] = useState(null);
 
   // Derive button counts from the cache ref + live buttons for current page
+  // Try every column count and keep whichever yields the largest key: the
+  // window is freely resizable, so a fixed guess is wrong at most sizes. Capped
+  // at 8 across, mirroring a Stream Deck XL, and capped in size so a two-key
+  // profile does not blow its keys up to fill the window.
+  useLayoutEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+
+    const measure = () => {
+      const gap = 12;
+      const cs = getComputedStyle(el);
+      const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+      const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+      const box = el.getBoundingClientRect();
+      const w = box.width - padX;
+      const h = box.height - padY;
+      if (w <= 0 || h <= 0) return;
+
+      // +1 for the trailing add slot, which occupies a cell like any key.
+      const count = Math.max(1, buttonCount + 1);
+      let best = { cols: 1, size: 0 };
+      for (let cols = 1; cols <= Math.min(count, 8); cols++) {
+        const rows = Math.ceil(count / cols);
+        const size = Math.floor(
+          Math.min(
+            (w - (cols - 1) * gap) / cols,
+            (h - (rows - 1) * gap) / rows,
+          ),
+        );
+        // >= not >: several column counts often tie on size because the height
+        // is the binding constraint, and on a tie the widest deck is the right
+        // one. Strict > kept the first (narrowest) match and left the keys
+        // huddled in the middle of a wide window.
+        if (size >= best.size) best = { cols, size };
+      }
+
+      const size = Math.min(104, Math.max(48, best.size));
+      setDeckLayout((prev) =>
+        prev.cols === best.cols && Math.abs(prev.size - size) <= 1
+          ? prev
+          : { cols: best.cols, size },
+      );
+    };
+
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    window.addEventListener("resize", measure);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [buttonCount]);
+
   const pageButtonCounts = useMemo(() => {
     const m = {};
     if (pageButtonsCacheRef?.current) {
@@ -476,6 +548,17 @@ export default function DesktopApp({
           },
           actionType,
         );
+        // Follow the action only while the face is still untouched — the
+        // starting bolt, or the previous action's own glyph. A custom emoji or
+        // an uploaded image is the user's choice and is left alone.
+        const untouched =
+          !target.icon_data &&
+          (!target.icon ||
+            target.icon === DEFAULT_BUTTON_ICON ||
+            target.icon === actionIconFor(target.action_type));
+        if (untouched) {
+          patch.icon = actionIconFor(actionType) ?? DEFAULT_BUTTON_ICON;
+        }
         await fetch(`${api()}/buttons/${buttonId}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
@@ -504,19 +587,20 @@ export default function DesktopApp({
   const createWithAction = useCallback(
     async (actionType) => {
       if (!currentPage) return;
+      // One request, not a create-then-patch. The second round trip meant the
+      // key existed briefly as a blank default — it painted the bolt icon and
+      // "Hotkey" for a frame before becoming the action that was dropped.
       const res = await fetch(`${api()}/buttons`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ page_id: currentPage }),
+        body: JSON.stringify({
+          page_id: currentPage,
+          icon: actionIconFor(actionType) ?? DEFAULT_BUTTON_ICON,
+          ...applyActionTypeDefaults({}, actionType),
+        }),
       });
       const created = await res.json().catch(() => null);
-      if (created?.id) {
-        await fetch(`${api()}/buttons/${created.id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(applyActionTypeDefaults({}, actionType)),
-        });
-      }
+
       const data = await reloadPages();
       const page = data.find((p) => p.id === currentPage);
       const btns = page?.buttons || [];
@@ -845,6 +929,7 @@ export default function DesktopApp({
         muted={muted}
         micVolume={micVolume}
         micMuted={micMuted}
+        sessions={sessions}
         isConnected={isConnected}
         status={status}
         onPair={openPairQR}
@@ -915,8 +1000,14 @@ export default function DesktopApp({
             </div>
 
             <SortableContext items={buttonIds} strategy={rectSortingStrategy}>
-              <div style={styles.canvas}>
-                <div style={styles.grid}>
+              <div style={styles.canvas} ref={canvasRef}>
+                <div
+                  style={{
+                    ...styles.grid,
+                    gridTemplateColumns: `repeat(${deckLayout.cols}, ${deckLayout.size}px)`,
+                    gridAutoRows: `${deckLayout.size}px`,
+                  }}
+                >
                   {buttons.map((btn) => (
                     <DesktopSortableButton
                       key={btn.id}
@@ -926,6 +1017,7 @@ export default function DesktopApp({
                       muted={muted}
                       micVolume={micVolume}
                       micMuted={micMuted}
+                      sessions={sessions}
                       onSelect={selectBtn}
                       showLabels={showLabels}
                       droppingAction={!!activeAction}
@@ -947,6 +1039,7 @@ export default function DesktopApp({
                   muted={muted}
                   micVolume={micVolume}
                   micMuted={micMuted}
+                  sessions={sessions}
                   ghost
                 />
               ) : activeAction ? (
@@ -1765,9 +1858,14 @@ function VolChip({ volume, muted }) {
           : {}),
       }}
     >
-      <span style={{ fontSize: 10 }}>
-        <Icon name="sound" size={13} />
-      </span>
+      {/* No text wrapper: an inline SVG inside a span sits on that span's
+          baseline, which pushed the speaker glyph below the centre line of the
+          bar and the percentage next to it. */}
+      <Icon
+        name="sound"
+        size={13}
+        style={{ display: "block", flexShrink: 0 }}
+      />
       <div
         style={{
           width: 28,
@@ -2571,6 +2669,7 @@ const DesktopSortableButton = memo(function DesktopSortableButton({
   muted,
   micVolume,
   micMuted,
+  sessions,
   onSelect,
   showLabels,
   droppingAction,
@@ -2632,6 +2731,7 @@ const DesktopSortableButton = memo(function DesktopSortableButton({
         muted={muted}
         micVolume={micVolume}
         micMuted={micMuted}
+        sessions={sessions}
         showLabels={showLabels}
       />
     </div>
@@ -2645,6 +2745,7 @@ function ButtonTile({
   muted,
   micVolume,
   micMuted,
+  sessions,
   ghost,
   showLabels = true,
 }) {
@@ -2653,8 +2754,28 @@ function ButtonTile({
   const isToggle = Number(btn.is_toggle) === 1;
   const levelTarget = levelTargetFor(btn.action_type);
   const isVolumeBtn = levelTarget !== null;
-  const level = levelTarget === "mic" ? micVolume : volume;
-  const levelMuted = levelTarget === "mic" ? micMuted : muted;
+  // An app key reads the level of whichever application it targets, so a change
+  // to a silent app is still visible on the face.
+  const appSession =
+    levelTarget === "app"
+      ? (sessions || []).find(
+          (s) =>
+            s.app.toLowerCase() ===
+            unpackAppValue(btn.action_value).app.toLowerCase(),
+        )
+      : null;
+  const level =
+    levelTarget === "app"
+      ? (appSession?.volume ?? null)
+      : levelTarget === "mic"
+        ? micVolume
+        : volume;
+  const levelMuted =
+    levelTarget === "app"
+      ? !!appSession?.muted
+      : levelTarget === "mic"
+        ? micMuted
+        : muted;
   const isVideo = btn.icon_data?.startsWith("data:video/");
 
   const accentColor = btn.color || "#4f80ff";
@@ -2814,14 +2935,14 @@ function ButtonTile({
             }}
           />
         ) : (
-          <span
+          <ButtonFace
+            icon={btn.icon}
+            size={btn.size === "2x2" ? 48 : 32}
             style={{
               fontSize:
                 btn.size === "2x2" ? "min(48px,5.5vw)" : "min(34px,3.5vw)",
             }}
-          >
-            {btn.icon}
-          </span>
+          />
         )}
       </div>
 
@@ -3017,7 +3138,7 @@ function PropertyPanel({
                   />
                 )
               ) : (
-                <span>{form.icon}</span>
+                <ButtonFace icon={form.icon} size={26} />
               )}
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
@@ -4048,7 +4169,9 @@ const styles = {
   canvas: {
     flex: 1,
     minHeight: 0,
-    overflowY: "auto",
+    // No scrolling: keys are measured to fit this box, so the whole deck is
+    // always on screen. The library is the only scrolling region.
+    overflow: "hidden",
     display: "grid",
     // `safe` matters: plain centring clips the first row under the header once
     // the deck overflows, and no amount of scrolling brings it back.
@@ -4283,13 +4406,13 @@ const styles = {
   // of hardware rather than a responsive layout that reflows as you resize.
   // Up to 8 across, mirroring a Stream Deck XL, so a full deck is visible at
   // once instead of scrolling. Narrow windows simply fit fewer per row.
+  // Columns and key size are computed against the measured canvas and applied
+  // inline; only the invariants live here.
   grid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, 104px)",
-    gridAutoRows: "104px",
     gap: 12,
     justifyContent: "center",
-    maxWidth: 8 * 104 + 7 * 12,
+    alignContent: "center",
   },
   addSlot: {
     aspectRatio: "1/1",
@@ -4309,7 +4432,11 @@ const styles = {
   // the deck gets the full window width and the fields flow into columns.
   panel: {
     flexShrink: 0,
-    maxHeight: "50vh",
+    // A fixed height, not a content-driven one. When the drawer grew with its
+    // contents it pushed the deck up, so adding a key scrolled the one you just
+    // made out of sight. Fixed here means the canvas keeps a known area and
+    // sizes its keys to it; overflow scrolls inside the drawer instead.
+    height: 264,
     background: "var(--bg-surface)",
     borderTop: "1px solid var(--border-subtle)",
     overflowY: "auto",
