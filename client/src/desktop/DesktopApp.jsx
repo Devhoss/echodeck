@@ -133,14 +133,14 @@ const globalStyles = `
 
   ::-webkit-scrollbar { width:3px; height:3px; }
   ::-webkit-scrollbar-track { background:transparent; }
-  ::-webkit-scrollbar-thumb { background:#2a2a32; border-radius:3px; }
-  ::-webkit-scrollbar-thumb:hover { background:#3a3a48; }
+  ::-webkit-scrollbar-thumb { background:#2e2e2e; border-radius:3px; }
+  ::-webkit-scrollbar-thumb:hover { background:#414141; }
 
   input, select, textarea {
     color-scheme: dark;
-    background: #1e1e26;
-    color: #d0d0d8;
-    border: 1px solid #2c2c3a;
+    background: #222222;
+    color: #d4d4d4;
+    border: 1px solid #333333;
     border-radius: 7px;
     padding: 7px 10px;
     font-size: 12px;
@@ -150,11 +150,11 @@ const globalStyles = `
     transition: border-color 0.15s, box-shadow 0.15s;
   }
   input:focus, select:focus, textarea:focus {
-    border-color: #4f80ff;
+    border-color: #3d8fd6;
     box-shadow: 0 0 0 2px rgba(79,128,255,0.15);
   }
   input[type=color] { padding:2px; height:26px; width:26px; cursor:pointer; border-radius:5px; }
-  select option { background: #1e1e26; }
+  select option { background: #222222; }
 
   button { font-family: 'DM Sans', system-ui, sans-serif; }
 `;
@@ -453,7 +453,7 @@ export default function DesktopApp({
     const dataUrl = await QRCode.toDataURL(url, {
       width: 240,
       margin: 2,
-      color: { dark: "#ffffff", light: "#13131600" },
+      color: { dark: "#ffffff", light: "#14141400" },
     });
     setQrDataUrl(dataUrl);
     setShowQR(true);
@@ -1100,8 +1100,8 @@ export default function DesktopApp({
         >
           <div
             style={{
-              background: "#1a1a22",
-              border: "1px solid #2a2a35",
+              background: "#1e1e1e",
+              border: "1px solid #303030",
               borderRadius: 20,
               padding: 32,
               textAlign: "center",
@@ -1113,7 +1113,7 @@ export default function DesktopApp({
               style={{
                 fontSize: 13,
                 fontWeight: 700,
-                color: "#a5b4fc",
+                color: "#3d8fd6",
                 marginBottom: 4,
               }}
             >
@@ -1125,7 +1125,7 @@ export default function DesktopApp({
             {qrDataUrl && (
               <div
                 style={{
-                  background: "#0d0d10",
+                  background: "#0e0e0e",
                   borderRadius: 12,
                   padding: 12,
                   display: "inline-block",
@@ -1187,8 +1187,8 @@ export default function DesktopApp({
         >
           <div
             style={{
-              background: "#16161e",
-              border: "1px solid #2a2a38",
+              background: "#1a1a1a",
+              border: "1px solid #313131",
               borderRadius: 18,
               width: 420,
               maxWidth: "90vw",
@@ -1203,25 +1203,25 @@ export default function DesktopApp({
                 alignItems: "center",
                 justifyContent: "space-between",
                 padding: "16px 20px",
-                borderBottom: "1px solid #1e1e2c",
-                background: "#0f0f14",
+                borderBottom: "1px solid #252525",
+                background: "#121212",
               }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <Icon name="phone" size={17} />
                 <span
-                  style={{ fontWeight: 700, fontSize: 14, color: "#e0e0ec" }}
+                  style={{ fontWeight: 700, fontSize: 14, color: "#e6e6e6" }}
                 >
                   Paired Devices
                 </span>
                 <span
                   style={{
                     fontSize: 11,
-                    background: "#1a1a2a",
-                    border: "1px solid #2a2a3a",
+                    background: "#222222",
+                    border: "1px solid #323232",
                     borderRadius: 10,
                     padding: "1px 7px",
-                    color: "#6060a0",
+                    color: "#808080",
                   }}
                 >
                   {phoneDevices.length} online
@@ -1232,7 +1232,7 @@ export default function DesktopApp({
                 style={{
                   background: "none",
                   border: "none",
-                  color: "#44445a",
+                  color: "#4f4f4f",
                   cursor: "pointer",
                   fontSize: 16,
                   padding: "2px 6px",
@@ -1253,7 +1253,7 @@ export default function DesktopApp({
                   style={{
                     textAlign: "center",
                     padding: "32px 0",
-                    color: "#44445a",
+                    color: "#4f4f4f",
                     fontSize: 13,
                   }}
                 >
@@ -1275,8 +1275,8 @@ export default function DesktopApp({
                       <div
                         key={row.key}
                         style={{
-                          background: "#1a1a26",
-                          border: "1px solid #2a2a38",
+                          background: "#202020",
+                          border: "1px solid #313131",
                           borderRadius: 12,
                           padding: "12px 14px",
                           display: "flex",
@@ -1298,7 +1298,7 @@ export default function DesktopApp({
                             style={{
                               fontWeight: 700,
                               fontSize: 13,
-                              color: "#c0c0d8",
+                              color: "#cccccc",
                               marginBottom: 2,
                               display: "flex",
                               alignItems: "center",
@@ -1311,7 +1311,7 @@ export default function DesktopApp({
                                 height: 6,
                                 borderRadius: "50%",
                                 flexShrink: 0,
-                                background: online ? "#4ade80" : "#44445a",
+                                background: online ? "#4ade80" : "#4f4f4f",
                                 boxShadow: online ? "0 0 6px #4ade80" : "none",
                               }}
                             />
@@ -1319,7 +1319,7 @@ export default function DesktopApp({
                               ? `${row.name} — ${row.session.ip}`
                               : row.name}
                           </div>
-                          <div style={{ fontSize: 11, color: "#44445a" }}>
+                          <div style={{ fontSize: 11, color: "#4f4f4f" }}>
                             {online
                               ? `${
                                   connectedAgo === 0
@@ -1342,10 +1342,10 @@ export default function DesktopApp({
                               )
                             }
                             style={{
-                              background: "#16161e",
-                              border: "1px solid #2a2a38",
+                              background: "#1a1a1a",
+                              border: "1px solid #313131",
                               borderRadius: 8,
-                              color: "#8080a0",
+                              color: "#909090",
                               cursor: "pointer",
                               fontSize: 11,
                               padding: "5px 10px",
@@ -1388,7 +1388,7 @@ export default function DesktopApp({
                 style={{
                   marginTop: 14,
                   fontSize: 11,
-                  color: "#2a2a40",
+                  color: "#353535",
                   textAlign: "center",
                 }}
               >
@@ -1417,8 +1417,8 @@ export default function DesktopApp({
         >
           <div
             style={{
-              background: "#16161e",
-              border: "1px solid #2a2a38",
+              background: "#1a1a1a",
+              border: "1px solid #313131",
               borderRadius: 18,
               width: 440,
               maxWidth: "90vw",
@@ -1433,14 +1433,14 @@ export default function DesktopApp({
                 alignItems: "center",
                 justifyContent: "space-between",
                 padding: "16px 20px",
-                borderBottom: "1px solid #1e1e2c",
-                background: "#0f0f14",
+                borderBottom: "1px solid #252525",
+                background: "#121212",
               }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <Icon name="sound" size={17} />
                 <span
-                  style={{ fontWeight: 700, fontSize: 14, color: "#e0e0ec" }}
+                  style={{ fontWeight: 700, fontSize: 14, color: "#e6e6e6" }}
                 >
                   Audio Settings
                 </span>
@@ -1450,7 +1450,7 @@ export default function DesktopApp({
                 style={{
                   background: "none",
                   border: "none",
-                  color: "#44445a",
+                  color: "#4f4f4f",
                   cursor: "pointer",
                   fontSize: 16,
                   padding: "2px 6px",
@@ -1497,10 +1497,10 @@ export default function DesktopApp({
                   onChange={(e) => setPcSoundDevice(e.target.value)}
                   style={{
                     width: "100%",
-                    background: "#0f0f1a",
+                    background: "#141414",
                     border: "1px solid #3b1a5c",
                     borderRadius: 8,
-                    color: "#e0e0ec",
+                    color: "#e6e6e6",
                     padding: "8px 10px",
                     fontSize: 12,
                     marginBottom: 12,
@@ -1544,10 +1544,10 @@ export default function DesktopApp({
                   onChange={(e) => setPcMonitorDevice(e.target.value)}
                   style={{
                     width: "100%",
-                    background: "#0f0f1a",
+                    background: "#141414",
                     border: "1px solid #3b1a5c",
                     borderRadius: 8,
-                    color: "#e0e0ec",
+                    color: "#e6e6e6",
                     padding: "8px 10px",
                     fontSize: 12,
                     marginBottom: 12,
@@ -1578,7 +1578,7 @@ export default function DesktopApp({
                     fontWeight: 700,
                     background: audioSettingsSaved
                       ? "linear-gradient(135deg,#1a4a2a,#1a5c34)"
-                      : "linear-gradient(135deg,#7c3aed,#9333ea)",
+                      : "linear-gradient(135deg,#3d8fd6,#9333ea)",
                     border: "none",
                     color: audioSettingsSaved ? "#34d399" : "#fff",
                     cursor: "pointer",
@@ -1630,8 +1630,8 @@ export default function DesktopApp({
         >
           <div
             style={{
-              background: "#1a1a1f",
-              border: "1px solid #2a2a35",
+              background: "#1c1c1c",
+              border: "1px solid #303030",
               borderRadius: 14,
               padding: "24px 28px",
               minWidth: 300,
@@ -1660,8 +1660,8 @@ export default function DesktopApp({
                   borderRadius: 8,
                   fontSize: 12,
                   fontWeight: 600,
-                  background: "#1e1e28",
-                  border: "1px solid #2a2a35",
+                  background: "#232323",
+                  border: "1px solid #303030",
                   color: "#888",
                   cursor: "pointer",
                 }}
@@ -1826,7 +1826,7 @@ function StatChip({ label, value, warn }) {
       {label && (
         <span
           style={{
-            color: warn ? "#fb923c66" : "#44444e",
+            color: warn ? "#fb923c66" : "#494949",
             fontSize: 10,
             fontWeight: 600,
           }}
@@ -1836,7 +1836,7 @@ function StatChip({ label, value, warn }) {
       )}
       <span
         style={{
-          color: warn ? "#fb923c" : "#7a7a8a",
+          color: warn ? "#fb923c" : "#828282",
           fontSize: 11,
           fontWeight: 500,
           fontVariantNumeric: "tabular-nums",
@@ -1931,7 +1931,9 @@ function AddSlot({ onClick }) {
 }
 
 /** One draggable row in the library. */
-function ActionRow({ action }) {
+// Memoised: one row per action, each holding a dnd-kit draggable. Without this
+// all of them re-render on every keystroke in the property drawer.
+const ActionRow = memo(function ActionRow({ action }) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `action:${action.id}`,
   });
@@ -1953,7 +1955,7 @@ function ActionRow({ action }) {
       </span>
     </div>
   );
-}
+});
 
 /**
  * The actions library. Search filters across action and category names; each
@@ -1961,7 +1963,10 @@ function ActionRow({ action }) {
  * everything that matched, because a hit hidden inside a collapsed group reads
  * as no result at all.
  */
-function ActionLibrary() {
+// Takes no props at all, so memo pins it to a single render. It was rebuilding
+// its whole list — every category and every draggable row — each time an
+// unrelated piece of DesktopApp state changed.
+const ActionLibrary = memo(function ActionLibrary() {
   const [query, setQuery] = useState("");
   const [collapsed, setCollapsed] = useState(() => new Set());
 
@@ -2055,7 +2060,7 @@ function ActionLibrary() {
       </div>
     </aside>
   );
-}
+});
 
 function ProfileMenu({
   open,
@@ -2234,7 +2239,12 @@ function ProfileMenu({
 }
 
 /** Profile pills under the canvas — the fast switch, mirroring a deck's pages. */
-function PageRail({ pages, currentPage, onSelectPage, onAddPage }) {
+const PageRail = memo(function PageRail({
+  pages,
+  currentPage,
+  onSelectPage,
+  onAddPage,
+}) {
   return (
     <div style={styles.pageRail}>
       {pages.map((p, i) => (
@@ -2260,7 +2270,7 @@ function PageRail({ pages, currentPage, onSelectPage, onAddPage }) {
       </button>
     </div>
   );
-}
+});
 
 /**
  * Auto-switch rules in a modal. The editor itself is unchanged — only where it
@@ -2306,12 +2316,12 @@ function Toggle({ value, onChange }) {
         width: 34,
         height: 19,
         borderRadius: 10,
-        background: value ? "#3a6fff" : "#252530",
+        background: value ? "#3d8fd6" : "#2b2b2b",
         position: "relative",
         cursor: "pointer",
         transition: "background 0.18s",
         flexShrink: 0,
-        border: `1px solid ${value ? "#5a8fff" : "#2c2c3a"}`,
+        border: `1px solid ${value ? "#3d8fd6" : "#333333"}`,
       }}
       onClick={() => onChange(!value)}
     >
@@ -2416,7 +2426,7 @@ function AutoSwitchRuleEditor({
         <label style={rs.enabledRow}>
           <Toggle value={enabled} onChange={onToggleGlobal} />
           <span
-            style={{ fontSize: 11, color: enabled ? "#7aafff" : "#3a3a50" }}
+            style={{ fontSize: 11, color: enabled ? "#3d8fd6" : "#454545" }}
           >
             {enabled ? "On" : "Off"}
           </span>
@@ -2496,7 +2506,7 @@ function AutoSwitchRuleEditor({
           }}
         >
           <span style={rs.miniLabel}>⏱ Switch delay</span>
-          <span style={{ fontSize: 11, fontWeight: 700, color: "#7aafff" }}>
+          <span style={{ fontSize: 11, fontWeight: 700, color: "#3d8fd6" }}>
             {(localDraft.switch_delay ?? 0) === 0
               ? "Instant"
               : `${(localDraft.switch_delay ?? 0) / 1000}s`}
@@ -2509,9 +2519,9 @@ function AutoSwitchRuleEditor({
           step="500"
           value={localDraft.switch_delay ?? 0}
           onChange={(e) => patchDraft({ switch_delay: Number(e.target.value) })}
-          style={{ width: "100%", accentColor: "#3a6fff", cursor: "pointer" }}
+          style={{ width: "100%", accentColor: "#3d8fd6", cursor: "pointer" }}
         />
-        <div style={{ fontSize: 10, color: "#2c2c4a", marginTop: 3 }}>
+        <div style={{ fontSize: 10, color: "#3b3b3b", marginTop: 3 }}>
           Waits before switching — prevents flicker when alt-tabbing.
         </div>
       </div>
@@ -2559,7 +2569,7 @@ function AutoSwitchRuleEditor({
           />
           {/* Per-condition app picker button */}
           <button
-            style={{ ...rs.removeCondBtn, color: "#5a8fff", fontSize: 12 }}
+            style={{ ...rs.removeCondBtn, color: "#3d8fd6", fontSize: 12 }}
             title="Pick from running apps"
             onClick={() => {
               setPickerConditionIndex(index);
@@ -2604,10 +2614,10 @@ function AutoSwitchRuleEditor({
             fontSize: 11,
             fontWeight: 700,
             background: saving
-              ? "#1a1a2e"
-              : "linear-gradient(135deg,#3a5fff,#5b4fcf)",
+              ? "#242424"
+              : "linear-gradient(135deg,#3d8fd6,#3d8fd6)",
             border: "none",
-            color: saving ? "#44445a" : "#fff",
+            color: saving ? "#4f4f4f" : "#fff",
             cursor: saving ? "default" : "pointer",
           }}
         >
@@ -2697,7 +2707,7 @@ const DesktopSortableButton = memo(function DesktopSortableButton({
         transform: CSS.Transform.toString(transform),
         zIndex: isDragging ? 999 : "auto",
         opacity: isDragging ? 0.3 : 1,
-        borderRadius: 14,
+        borderRadius: 8,
         // Longhands, not the `outline` shorthand: a var() inside a shorthand set
         // through inline styles becomes a pending-substitution value and
         // computes to transparent, so the highlight never painted.
@@ -2778,13 +2788,13 @@ function ButtonTile({
         : muted;
   const isVideo = btn.icon_data?.startsWith("data:video/");
 
-  const accentColor = btn.color || "#4f80ff";
+  const accentColor = btn.color || "#3d8fd6";
 
   return (
     <div
       style={{
         aspectRatio: "1/1",
-        borderRadius: 14,
+        borderRadius: 8,
         cursor: "pointer",
         position: "relative",
         overflow: "hidden",
@@ -2793,13 +2803,13 @@ function ButtonTile({
         background: isToggleOn
           ? `linear-gradient(160deg, ${accentColor}38 0%, ${accentColor}18 100%)`
           : selected
-            ? "linear-gradient(160deg, #2a2a38 0%, #1c1c26 100%)"
-            : "linear-gradient(160deg, #232330 0%, #181820 100%)",
+            ? "linear-gradient(160deg, #313131 0%, #212121 100%)"
+            : "linear-gradient(160deg, #2a2a2a 0%, #1c1c1c 100%)",
         border: selected
-          ? `1.5px solid #4f80ff`
+          ? `1.5px solid #3d8fd6`
           : isToggleOn
             ? `1.5px solid ${accentColor}70`
-            : "1.5px solid #2c2c3a",
+            : "1.5px solid #333333",
         boxShadow: selected
           ? `0 0 0 3px rgba(79,128,255,0.2), 0 4px 16px rgba(0,0,0,0.5)`
           : isToggleOn
@@ -2821,7 +2831,7 @@ function ButtonTile({
           right: 0,
           height: 1,
           background: "rgba(255,255,255,0.07)",
-          borderRadius: "14px 14px 0 0",
+          borderRadius: "8px 8px 0 0",
           pointerEvents: "none",
           zIndex: 4,
         }}
@@ -2905,7 +2915,7 @@ function ButtonTile({
           alignItems: showLabels ? "center" : "center",
           justifyContent: "center",
           paddingBottom: showLabels ? 14 : 0,
-          borderRadius: 14,
+          borderRadius: 8,
           overflow: "hidden",
         }}
       >
@@ -3028,6 +3038,42 @@ function ButtonTile({
   );
 }
 
+// The native colour input streams an event on every pointer move while the OS
+// picker is open — far faster than a frame — and each one re-rendered the whole
+// editor. This coalesces them to roughly one per frame.
+//
+// A timer rather than requestAnimationFrame: rAF does not run while the window
+// is hidden or minimised, which would strand the last patch and silently lose
+// the colour the user picked. The input still reads straight from form.color,
+// so no local mirror of the value is needed.
+const FRAME_MS = 16;
+
+function useCoalescedPatch(onPatch) {
+  const timerRef = useRef(0);
+  const pendingRef = useRef(null);
+
+  useEffect(
+    () => () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  return useCallback(
+    (patch) => {
+      pendingRef.current = { ...pendingRef.current, ...patch };
+      if (timerRef.current) return;
+      timerRef.current = setTimeout(() => {
+        timerRef.current = 0;
+        const queued = pendingRef.current;
+        pendingRef.current = null;
+        if (queued) onPatch(queued);
+      }, FRAME_MS);
+    },
+    [onPatch],
+  );
+}
+
 // ─── Property Panel ───────────────────────────────────────────────────────────
 
 function PropertyPanel({
@@ -3048,6 +3094,7 @@ function PropertyPanel({
 }) {
   const iconRef = useRef();
   const soundRef = useRef();
+  const patchColor = useCoalescedPatch(onPatch);
 
   // Advanced stays shut for a plain key, but opens on its own when the key is
   // already using one of these — a configured setting must never be hidden.
@@ -3069,8 +3116,8 @@ function PropertyPanel({
               width: 52,
               height: 52,
               borderRadius: 14,
-              background: "linear-gradient(160deg, #232330, #181820)",
-              border: "1.5px solid #2c2c3a",
+              background: "linear-gradient(160deg, #2a2a2a, #1c1c1c)",
+              border: "1.5px solid #333333",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -3255,8 +3302,8 @@ function PropertyPanel({
             ))}
             <input
               type="color"
-              value={form.color || "#5B4FCF"}
-              onChange={(e) => onPatch({ color: e.target.value })}
+              value={form.color || "#3d8fd6"}
+              onChange={(e) => patchColor({ color: e.target.value })}
               style={{ width: 28, height: 22, padding: 2, borderRadius: 6 }}
             />
           </div>
@@ -3641,7 +3688,7 @@ function ActionField({
             value={current}
             onChange={(e) => onChange({ [field.key]: e.target.value })}
           />
-          <span style={{ minWidth: 34, fontSize: 11, color: "#7aafff" }}>
+          <span style={{ minWidth: 34, fontSize: 11, color: "#3d8fd6" }}>
             {current}
             {field.suffix || ""}
           </span>
@@ -3831,8 +3878,8 @@ function ActionStackEditor({
           <div
             key={index}
             style={{
-              background: "#111118",
-              border: "1px solid #252530",
+              background: "#141414",
+              border: "1px solid #2b2b2b",
               borderRadius: 8,
               padding: 8,
             }}
@@ -3845,7 +3892,7 @@ function ActionStackEditor({
                 marginBottom: 6,
               }}
             >
-              <span style={{ fontSize: 10, color: "#55556a" }}>
+              <span style={{ fontSize: 10, color: "#606060" }}>
                 Step {index + 1} · {actionTypeLabel(step.action_type)}
               </span>
               <button
@@ -3872,7 +3919,7 @@ function ActionStackEditor({
               audioSessions={audioSessions}
             />
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{ fontSize: 10, color: "#55556a" }}>Wait after</span>
+              <span style={{ fontSize: 10, color: "#606060" }}>Wait after</span>
               <input
                 type="number"
                 min="0"
@@ -3882,7 +3929,7 @@ function ActionStackEditor({
                   patchStep(index, { delay_ms: parseInt(e.target.value) || 0 })
                 }
               />
-              <span style={{ fontSize: 10, color: "#55556a" }}>ms</span>
+              <span style={{ fontSize: 10, color: "#606060" }}>ms</span>
             </div>
           </div>
         ))}
@@ -3909,9 +3956,9 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     height: "100dvh",
-    background: "#13131a",
+    background: "#161616",
     fontFamily: "'DM Sans', system-ui, sans-serif",
-    color: "#c8c8d4",
+    color: "#cecece",
     overflow: "hidden",
   },
 
@@ -3922,16 +3969,16 @@ const styles = {
     padding: "0 16px",
     height: 48,
     flexShrink: 0,
-    background: "#0f0f14",
-    borderBottom: "1px solid #1e1e28",
+    background: "#121212",
+    borderBottom: "1px solid #232323",
     gap: 10,
   },
   topBarLogo: { display: "flex", alignItems: "center", gap: 8, marginRight: 2 },
-  logoDivider: { width: 1, height: 20, background: "#2a2a36", marginLeft: 8 },
+  logoDivider: { width: 1, height: 20, background: "#303030", marginLeft: 8 },
   logoText: {
     fontWeight: 700,
     fontSize: 13,
-    color: "#e0e0ec",
+    color: "#e6e6e6",
     letterSpacing: 0.2,
   },
   topBarStats: { display: "flex", gap: 4, alignItems: "center" },
@@ -3947,9 +3994,9 @@ const styles = {
     gap: 5,
     padding: "4px 12px",
     background: "rgba(255,255,255,0.05)",
-    border: "1px solid #2c2c3a",
+    border: "1px solid #333333",
     borderRadius: 8,
-    color: "#8888a0",
+    color: "#949494",
     fontSize: 11,
     fontWeight: 600,
     cursor: "pointer",
@@ -3964,8 +4011,8 @@ const styles = {
     display: "flex",
     alignItems: "center",
     gap: 4,
-    background: "#1a1a22",
-    border: "1px solid #252530",
+    background: "#1e1e1e",
+    border: "1px solid #2b2b2b",
     borderRadius: 7,
     padding: "3px 8px",
   },
@@ -4416,8 +4463,8 @@ const styles = {
   },
   addSlot: {
     aspectRatio: "1/1",
-    borderRadius: 14,
-    border: "1.5px dashed #252530",
+    borderRadius: 8,
+    border: "1.5px dashed #2b2b2b",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
@@ -4495,13 +4542,13 @@ const styles = {
   previewLabel: {
     fontSize: 14,
     fontWeight: 700,
-    color: "#e0e0ec",
+    color: "#e6e6e6",
     marginBottom: 2,
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   },
-  previewAction: { fontSize: 11, color: "#44444e" },
+  previewAction: { fontSize: 11, color: "#494949" },
 
   field: { marginBottom: 6, minWidth: 0 },
   fieldLabel: {
@@ -4523,25 +4570,25 @@ const styles = {
     borderRadius: 7,
     fontSize: 11,
     fontWeight: 600,
-    background: "#1a1a22",
-    border: "1px solid #2c2c3a",
-    color: "#55556a",
+    background: "#1e1e1e",
+    border: "1px solid #333333",
+    color: "#606060",
     cursor: "pointer",
     transition: "all 0.1s",
   },
   segBtnActive: {
     background: "rgba(79,128,255,0.15)",
     border: "1px solid rgba(79,128,255,0.4)",
-    color: "#7aafff",
+    color: "#3d8fd6",
   },
 
   iconUploadBtn: {
     width: 30,
     height: 30,
     borderRadius: 7,
-    background: "#1a1a22",
-    border: "1px solid #2c2c3a",
-    color: "#7a7a8a",
+    background: "#1e1e1e",
+    border: "1px solid #333333",
+    color: "#828282",
     cursor: "pointer",
     fontSize: 13,
     display: "flex",
@@ -4564,9 +4611,9 @@ const styles = {
     padding: "7px 12px",
     borderRadius: 7,
     fontSize: 11,
-    background: "#1a1a22",
-    border: "1px dashed #2c2c3a",
-    color: "#55556a",
+    background: "#1e1e1e",
+    border: "1px dashed #333333",
+    color: "#606060",
     cursor: "pointer",
     transition: "all 0.12s",
   },
@@ -4643,7 +4690,7 @@ const styles = {
     borderRadius: 8,
     fontSize: 12,
     fontWeight: 700,
-    background: "linear-gradient(135deg, #3a6fff, #5b8fff)",
+    background: "linear-gradient(135deg, #3d8fd6, #3d8fd6)",
     border: "none",
     color: "#fff",
     cursor: "pointer",
@@ -4670,8 +4717,8 @@ const ruleStyles = {
     margin: "0 8px 12px",
     padding: "12px 10px",
     borderRadius: 10,
-    background: "#111118",
-    border: "1px solid #1e1e2c",
+    background: "#141414",
+    border: "1px solid #252525",
     display: "flex",
     flexDirection: "column",
     gap: 9,
@@ -4685,13 +4732,13 @@ const ruleStyles = {
   title: {
     fontSize: 11,
     fontWeight: 700,
-    color: "#7aafff",
+    color: "#3d8fd6",
     marginBottom: 2,
     letterSpacing: 0.3,
   },
   meta: {
     fontSize: 10,
-    color: "#3a3a58",
+    color: "#494949",
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
@@ -4710,10 +4757,10 @@ const ruleStyles = {
     flexWrap: "wrap",
   },
   smallBtn: {
-    background: "#1a1a26",
-    border: "1px solid #2c2c3a",
+    background: "#202020",
+    border: "1px solid #333333",
     borderRadius: 6,
-    color: "#8888a8",
+    color: "#989898",
     cursor: "pointer",
     padding: "4px 8px",
     fontSize: 10,
@@ -4739,15 +4786,15 @@ const ruleStyles = {
   },
   miniLabel: {
     fontSize: 10,
-    color: "#44445a",
+    color: "#4f4f4f",
     fontWeight: 700,
     fontFamily: "'DM Sans', system-ui, sans-serif",
   },
   compactSelect: {
-    background: "#1a1a26",
-    border: "1px solid #2c2c3a",
+    background: "#202020",
+    border: "1px solid #333333",
     borderRadius: 6,
-    color: "#c8c8d4",
+    color: "#cecece",
     padding: "4px 6px",
     fontSize: 11,
     outline: "none",
@@ -4755,10 +4802,10 @@ const ruleStyles = {
     boxSizing: "border-box",
   },
   compactInput: {
-    background: "#1a1a26",
-    border: "1px solid #2c2c3a",
+    background: "#202020",
+    border: "1px solid #333333",
     borderRadius: 6,
-    color: "#c8c8d4",
+    color: "#cecece",
     padding: "4px 6px",
     fontSize: 11,
     outline: "none",
@@ -4767,10 +4814,10 @@ const ruleStyles = {
     fontFamily: "'DM Sans', system-ui, sans-serif",
   },
   condSelect: {
-    background: "#1a1a26",
-    border: "1px solid #2c2c3a",
+    background: "#202020",
+    border: "1px solid #333333",
     borderRadius: 6,
-    color: "#c8c8d4",
+    color: "#cecece",
     padding: "5px 20px 5px 8px",
     fontSize: 11,
     outline: "none",
@@ -4794,10 +4841,10 @@ const ruleStyles = {
     width: "100%",
   },
   condInput: {
-    background: "#1a1a26",
-    border: "1px solid #2c2c3a",
+    background: "#202020",
+    border: "1px solid #333333",
     borderRadius: 6,
-    color: "#c8c8d4",
+    color: "#cecece",
     padding: "5px 8px",
     fontSize: 11,
     outline: "none",
@@ -4813,7 +4860,7 @@ const ruleStyles = {
     placeItems: "center",
     background: "transparent",
     border: "none",
-    color: "#5b5b70",
+    color: "#666666",
     fontSize: 11,
     cursor: "pointer",
     padding: 0,
@@ -4823,9 +4870,9 @@ const ruleStyles = {
   addCondBtn: {
     alignSelf: "flex-start",
     background: "none",
-    border: "1px dashed #2c2c3a",
+    border: "1px dashed #333333",
     borderRadius: 6,
-    color: "#44445a",
+    color: "#4f4f4f",
     cursor: "pointer",
     padding: "4px 8px",
     fontSize: 10,
@@ -4833,15 +4880,15 @@ const ruleStyles = {
     fontFamily: "'DM Sans', system-ui, sans-serif",
   },
   delayRow: {
-    background: "#111120",
-    border: "1px solid #252538",
+    background: "#181818",
+    border: "1px solid #2f2f2f",
     borderRadius: 7,
     padding: "8px 10px",
   },
   picker: {
     borderRadius: 8,
-    border: "1px solid #2c2c3a",
-    background: "#0d0d12",
+    border: "1px solid #333333",
+    background: "#101010",
     overflow: "hidden",
   },
   pickerHeader: {
@@ -4849,15 +4896,15 @@ const ruleStyles = {
     alignItems: "center",
     justifyContent: "space-between",
     padding: "7px 10px",
-    borderBottom: "1px solid #1e1e28",
-    color: "#c8c8d4",
+    borderBottom: "1px solid #232323",
+    color: "#cecece",
     fontSize: 11,
     fontWeight: 700,
   },
   pickerClose: {
     background: "none",
     border: "none",
-    color: "#44445a",
+    color: "#4f4f4f",
     cursor: "pointer",
     fontSize: 10,
   },
@@ -4874,8 +4921,8 @@ const ruleStyles = {
     textAlign: "left",
     background: "none",
     border: "none",
-    borderBottom: "1px solid #1a1a22",
-    color: "#c8c8d4",
+    borderBottom: "1px solid #1e1e1e",
+    color: "#cecece",
     cursor: "pointer",
     padding: "7px 10px",
     fontFamily: "'DM Sans', system-ui, sans-serif",
@@ -4883,14 +4930,14 @@ const ruleStyles = {
   pickerProcess: {
     fontSize: 11,
     fontWeight: 700,
-    color: "#7aafff",
+    color: "#3d8fd6",
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   },
   pickerTitle: {
     fontSize: 11,
-    color: "#9898a8",
+    color: "#a0a0a0",
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
@@ -4898,11 +4945,11 @@ const ruleStyles = {
   pickerPath: {
     gridColumn: "1 / -1",
     fontSize: 9,
-    color: "#3a3a50",
+    color: "#454545",
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
     marginTop: 1,
   },
-  pickerEmpty: { padding: 10, fontSize: 11, color: "#3a3a50" },
+  pickerEmpty: { padding: 10, fontSize: 11, color: "#454545" },
 };
