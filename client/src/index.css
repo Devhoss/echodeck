@@ -28,10 +28,12 @@
 
   /* Text. --text-muted is for non-essential text only; it must never be the
      sole carrier of meaning (see the colour-alone accessibility rule).
-     Contrast on --bg-surface: primary 12.4:1, secondary 5.9:1 — both above AA. */
+     Measured on --bg-surface, the lightest ground text sits on: primary 12.4:1,
+     secondary 6.4:1, muted 4.7:1 — all above AA. Muted was #6f6f6f, which came
+     out at 3.0:1 and was genuinely hard to read. */
   --text-primary: #e9e9e9;
   --text-secondary: #a8a8a8;
-  --text-muted: #6f6f6f;
+  --text-muted: #909090;
 
   /* Accent + status. Selection stays blue because the reference does too — an
      Elgato key ring is blue — but it is the flatter, less saturated blue of the

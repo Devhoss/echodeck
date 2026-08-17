@@ -1834,7 +1834,7 @@ function StatChip({ label, value, warn }) {
       {label && (
         <span
           style={{
-            color: warn ? "#fb923c66" : "#494949",
+            color: warn ? "var(--warning)" : "var(--text-muted)",
             fontSize: 10,
             fontWeight: 600,
           }}
@@ -1844,7 +1844,7 @@ function StatChip({ label, value, warn }) {
       )}
       <span
         style={{
-          color: warn ? "#fb923c" : "#828282",
+          color: warn ? "var(--warning)" : "var(--text-secondary)",
           fontSize: 11,
           fontWeight: 500,
           fontVariantNumeric: "tabular-nums",
@@ -1899,7 +1899,7 @@ function VolChip({ volume, muted }) {
       </div>
       <span
         style={{
-          color: muted ? "#f87171" : "#777",
+          color: muted ? "var(--danger)" : "var(--text-muted)",
           fontSize: 11,
           fontVariantNumeric: "tabular-nums",
         }}
@@ -4591,7 +4591,7 @@ const styles = {
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   },
-  previewAction: { fontSize: 11, color: "#494949" },
+  previewAction: { fontSize: 11, color: "var(--text-muted)" },
 
   field: { marginBottom: 6, minWidth: 0 },
   fieldLabel: {
@@ -4631,7 +4631,7 @@ const styles = {
     borderRadius: 7,
     background: "#1e1e1e",
     border: "1px solid #333333",
-    color: "#828282",
+    color: "var(--text-secondary)",
     cursor: "pointer",
     fontSize: 13,
     display: "flex",
@@ -4793,7 +4793,7 @@ const ruleStyles = {
   },
   meta: {
     fontSize: 10,
-    color: "#494949",
+    color: "var(--text-muted)",
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
