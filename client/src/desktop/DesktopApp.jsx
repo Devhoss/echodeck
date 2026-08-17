@@ -2598,6 +2598,17 @@ function PropertyPanel({
   const iconRef = useRef();
   const soundRef = useRef();
 
+  // Advanced stays shut for a plain key, but opens on its own when the key is
+  // already using one of these — a configured setting must never be hidden.
+  const usesAdvanced =
+    !!form.is_toggle ||
+    form.button_mode === "multi" ||
+    form.button_mode === "multi_switch" ||
+    form.actions?.length > 0 ||
+    !!form.sound_file;
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const advancedOpen = showAdvanced || usesAdvanced;
+
   if (!btn) {
     return (
       <div style={styles.panel}>
@@ -2634,6 +2645,7 @@ function PropertyPanel({
     <div style={styles.panel}>
       <div style={styles.panelInner}>
         {/* Preview */}
+        <div style={styles.headerBar}>
         <div style={styles.previewRow}>
           <div
             style={{
@@ -2680,7 +2692,28 @@ function PropertyPanel({
           </div>
         </div>
 
-        <div style={styles.panelDivider} />
+          <div style={styles.headerActions}>
+            {dirty && !saving ? (
+              <span style={styles.dirtyPip} title="Unsaved changes">
+                <span style={styles.dirtyDot} />
+                Unsaved
+              </span>
+            ) : null}
+            <button
+              style={{
+                ...styles.saveBtn,
+                ...(dirty || saving ? {} : styles.saveBtnClean),
+              }}
+              onClick={onSave}
+              disabled={saving || !dirty}
+            >
+              {saving ? "Saving…" : saved ? "Saved" : "Save"}
+            </button>
+            <button style={styles.deleteBtn} onClick={onDelete} aria-label="Delete key">
+              <Icon name="delete" size={15} />
+            </button>
+          </div>
+        </div>
 
         {/* Label */}
         <Field label="Label">
@@ -2743,9 +2776,9 @@ function PropertyPanel({
               <div
                 key={c}
                 style={{
-                  width: 22,
-                  height: 22,
-                  borderRadius: 6,
+                  width: 18,
+                  height: 18,
+                  borderRadius: 5,
                   background: c,
                   cursor: "pointer",
                   border:
@@ -2794,9 +2827,7 @@ function PropertyPanel({
               value={!!form.require_confirm}
               onChange={(v) => onPatch({ require_confirm: v ? 1 : 0 })}
             />
-            <span style={{ fontSize: 11, color: "#666" }}>
-              Phone must hold the button to fire it
-            </span>
+            <span style={styles.fieldHint}>Hold on phone to fire</span>
           </div>
         </Field>
 
@@ -2815,6 +2846,20 @@ function PropertyPanel({
           />
         ) : null}
 
+        <button
+          style={styles.disclosure}
+          onClick={() => setShowAdvanced((v) => !v)}
+          aria-expanded={advancedOpen}
+        >
+          <Icon name={advancedOpen ? "chevronDown" : "chevronRight"} size={14} />
+          Advanced
+          {usesAdvanced && !showAdvanced ? (
+            <span style={styles.disclosureNote}>in use</span>
+          ) : null}
+        </button>
+
+        {advancedOpen ? (
+          <>
         {/* Toggle */}
         <Field label="Toggle mode">
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -3004,72 +3049,11 @@ function PropertyPanel({
             </div>
           </div>
         </Field>
+          </>
+        ) : null}
 
         <div style={styles.panelDivider} />
 
-        {/* FEATURE: Editor — nothing in this panel applies until it is saved,
-            which is easy to miss on toggles and segmented controls that look
-            like they act immediately. Say so rather than relying on the
-            button's colour alone. */}
-        {dirty && !saving ? (
-          <div
-            style={{
-              gridColumn: "1 / -1",
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              margin: "0 0 8px",
-              padding: "7px 10px",
-              borderRadius: 8,
-              background: "rgba(251,191,36,0.10)",
-              border: "1px solid rgba(251,191,36,0.30)",
-              color: "#fbbf24",
-              fontSize: 11,
-              fontWeight: 600,
-            }}
-          >
-            <span
-              style={{
-                width: 6,
-                height: 6,
-                borderRadius: "50%",
-                background: "#fbbf24",
-                flexShrink: 0,
-              }}
-            />
-            Unsaved changes
-          </div>
-        ) : null}
-
-        {/* Save / Delete */}
-        <div style={styles.panelActions}>
-          <button
-            style={{
-              ...styles.saveBtn,
-              ...(dirty || saving
-                ? {}
-                : {
-                    background: "#16161e",
-                    border: "1px solid #2a2a38",
-                    color: "#44445a",
-                    cursor: "default",
-                  }),
-            }}
-            onClick={onSave}
-            disabled={saving || !dirty}
-          >
-            {saving
-              ? "Saving…"
-              : saved
-                ? "Saved"
-                : dirty
-                  ? "Save Changes"
-                  : "No changes"}
-          </button>
-          <button style={styles.deleteBtn} onClick={onDelete}>
-            Delete
-          </button>
-        </div>
       </div>
     </div>
   );
@@ -3590,8 +3574,11 @@ const styles = {
     minHeight: 0,
     overflowY: "auto",
     display: "grid",
-    placeContent: "center",
-    padding: "8px 20px 4px",
+    // `safe` matters: plain centring clips the first row under the header once
+    // the deck overflows, and no amount of scrolling brings it back.
+    alignContent: "safe center",
+    justifyContent: "safe center",
+    padding: "8px 20px 12px",
   },
 
   pageRail: {
@@ -3693,13 +3680,15 @@ const styles = {
 
   // Keys are a fixed size and the grid is centred, so the deck reads as a piece
   // of hardware rather than a responsive layout that reflows as you resize.
+  // Up to 8 across, mirroring a Stream Deck XL, so a full deck is visible at
+  // once instead of scrolling. Narrow windows simply fit fewer per row.
   grid: {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fill, 104px)",
     gridAutoRows: "104px",
     gap: 12,
     justifyContent: "center",
-    maxWidth: 4 * 104 + 3 * 12,
+    maxWidth: 8 * 104 + 7 * 12,
   },
   addSlot: {
     aspectRatio: "1/1",
@@ -3719,7 +3708,7 @@ const styles = {
   // the deck gets the full window width and the fields flow into columns.
   panel: {
     flexShrink: 0,
-    height: "var(--inspector-height)",
+    maxHeight: "50vh",
     background: "var(--bg-surface)",
     borderTop: "1px solid var(--border-subtle)",
     overflowY: "auto",
@@ -3729,11 +3718,11 @@ const styles = {
   // Multi-column flow: the same fields as before, laid across instead of down.
   // auto-fill keeps it sensible from a narrow window up to a wide one.
   panelInner: {
-    padding: "14px 20px 18px",
+    padding: "12px 20px 14px",
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))",
+    gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
     alignContent: "start",
-    gap: "2px 24px",
+    gap: "0 24px",
     animation: "slideIn 0.16s ease",
   },
   panelEmpty: {
@@ -3766,12 +3755,14 @@ const styles = {
     margin: "10px 0",
   },
 
+  // Sits in the flow as its own column, like the key preview on the left of
+  // Stream Deck's inspector, rather than claiming a whole row.
   previewRow: {
-    gridColumn: "1 / -1",
     display: "flex",
     gap: 12,
     alignItems: "center",
     marginBottom: 6,
+    minWidth: 0,
   },
   previewLabel: {
     fontSize: 14,
@@ -3784,13 +3775,13 @@ const styles = {
   },
   previewAction: { fontSize: 11, color: "#44444e" },
 
-  field: { marginBottom: 9 },
+  field: { marginBottom: 6, minWidth: 0 },
   fieldLabel: {
     display: "block",
-    fontSize: 10,
-    fontWeight: 700,
-    color: "#3a3a50",
-    letterSpacing: 1,
+    fontSize: 11,
+    fontWeight: 600,
+    color: "var(--text-secondary)",
+    letterSpacing: "0.07em",
     marginBottom: 5,
     textTransform: "uppercase",
   },
@@ -3854,16 +3845,63 @@ const styles = {
 
   // Save/Delete span the drawer so they stay findable regardless of how many
   // columns the fields happen to flow into.
-  panelActions: {
+  headerBar: {
     gridColumn: "1 / -1",
     display: "flex",
-    gap: 8,
-    marginTop: 10,
-    maxWidth: 420,
+    alignItems: "center",
+    gap: 16,
+    paddingBottom: 12,
+    marginBottom: 12,
+    borderBottom: "1px solid var(--border-subtle)",
+  },
+  headerActions: { marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 },
+  dirtyPip: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    fontSize: 11,
+    fontWeight: 600,
+    color: "var(--warning)",
+    padding: "5px 10px",
+    borderRadius: "var(--radius-pill)",
+    background: "var(--warning-soft)",
+    border: "1px solid rgba(251,191,36,0.30)",
+  },
+  dirtyDot: { width: 6, height: 6, borderRadius: "50%", background: "var(--warning)" },
+  fieldHint: { fontSize: 11, color: "var(--text-muted)" },
+  disclosure: {
+    gridColumn: "1 / -1",
+    display: "flex",
+    alignItems: "center",
+    gap: 7,
+    width: "fit-content",
+    margin: "6px 0 10px",
+    padding: "6px 10px 6px 6px",
+    background: "transparent",
+    border: 0,
+    borderRadius: "var(--radius-md)",
+    color: "var(--text-secondary)",
+    fontSize: 11,
+    fontWeight: 600,
+    letterSpacing: "0.06em",
+    textTransform: "uppercase",
+    cursor: "pointer",
+  },
+  disclosureNote: {
+    textTransform: "none",
+    letterSpacing: 0,
+    fontWeight: 500,
+    fontSize: 11,
+    color: "var(--accent)",
+  },
+  saveBtnClean: {
+    background: "var(--bg-elevated)",
+    border: "1px solid var(--border-subtle)",
+    color: "var(--text-muted)",
+    cursor: "default",
   },
   saveBtn: {
-    flex: 1,
-    padding: "9px 16px",
+    padding: "8px 18px",
     borderRadius: 8,
     fontSize: 12,
     fontWeight: 700,
