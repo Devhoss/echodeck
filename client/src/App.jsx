@@ -1460,8 +1460,6 @@ const SortableButton = memo(function SortableButton({
           </div>
         </>
       )}
-
-      <style>{`div:hover > .drag-handle { opacity: 0.35 !important; } div:active > .drag-handle { opacity: 0 !important; }`}</style>
     </div>
   );
 });
