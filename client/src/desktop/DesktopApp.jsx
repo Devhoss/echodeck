@@ -145,7 +145,7 @@ const globalStyles = `
     border-radius: 7px;
     padding: 7px 10px;
     font-size: 12px;
-    font-family: 'DM Sans', system-ui, sans-serif;
+    font-family: var(--font-sans);
     width: 100%;
     outline: none;
     transition: border-color 0.15s, box-shadow 0.15s;
@@ -157,7 +157,7 @@ const globalStyles = `
   input[type=color] { padding:2px; height:26px; width:26px; cursor:pointer; border-radius:5px; }
   select option { background: #222222; }
 
-  button { font-family: 'DM Sans', system-ui, sans-serif; }
+  button { font-family: var(--font-sans); }
 `;
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -532,13 +532,16 @@ export default function DesktopApp({
     }
   }
 
-  async function reloadPages() {
+  // Memoised because two useCallbacks below depend on it. As a plain function
+  // in the component body it was a new reference every render, so those two
+  // memoised nothing at all — they were recreated on every keystroke in the
+  // property drawer along with everything that depended on them.
+  const reloadPages = useCallback(async () => {
     const res = await fetch(`${api()}/pages`);
     const data = await res.json();
     setPages(data);
-
     return data;
-  }
+  }, [setPages]);
 
   async function deletePage(id) {
     askConfirm("Delete this page and all its buttons?", async () => {
@@ -3213,7 +3216,7 @@ function ButtonTile({
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
             borderRadius: "0 0 13px 13px",
-            fontFamily: "'DM Sans', system-ui, sans-serif",
+            fontFamily: "var(--font-sans)",
           }}
         >
           {btn.label}
@@ -4312,7 +4315,7 @@ const styles = {
     flexDirection: "column",
     height: "100dvh",
     background: "#161616",
-    fontFamily: "'DM Sans', system-ui, sans-serif",
+    fontFamily: "var(--font-sans)",
     color: "#cecece",
     overflow: "hidden",
   },
@@ -5177,7 +5180,7 @@ const ruleStyles = {
     padding: "4px 8px",
     fontSize: 10,
     fontWeight: 600,
-    fontFamily: "'DM Sans', system-ui, sans-serif",
+    fontFamily: "var(--font-sans)",
   },
   dangerBtn: {
     background: "#1f0a0a",
@@ -5188,7 +5191,7 @@ const ruleStyles = {
     padding: "4px 8px",
     fontSize: 10,
     fontWeight: 600,
-    fontFamily: "'DM Sans', system-ui, sans-serif",
+    fontFamily: "var(--font-sans)",
   },
   settingsRow: {
     display: "grid",
@@ -5200,7 +5203,7 @@ const ruleStyles = {
     fontSize: 10,
     color: "#4f4f4f",
     fontWeight: 700,
-    fontFamily: "'DM Sans', system-ui, sans-serif",
+    fontFamily: "var(--font-sans)",
   },
   compactSelect: {
     background: "#202020",
@@ -5210,7 +5213,7 @@ const ruleStyles = {
     padding: "4px 6px",
     fontSize: 11,
     outline: "none",
-    fontFamily: "'DM Sans', system-ui, sans-serif",
+    fontFamily: "var(--font-sans)",
     boxSizing: "border-box",
   },
   compactInput: {
@@ -5223,7 +5226,7 @@ const ruleStyles = {
     outline: "none",
     width: 52,
     boxSizing: "border-box",
-    fontFamily: "'DM Sans', system-ui, sans-serif",
+    fontFamily: "var(--font-sans)",
   },
   condSelect: {
     background: "#202020",
@@ -5263,7 +5266,7 @@ const ruleStyles = {
     boxSizing: "border-box",
     width: "100%",
     minWidth: 0,
-    fontFamily: "DM Sans, system-ui, sans-serif",
+    fontFamily: "var(--font-sans)",
   },
   removeCondBtn: {
     width: 14,
@@ -5289,7 +5292,7 @@ const ruleStyles = {
     padding: "4px 8px",
     fontSize: 10,
     fontWeight: 600,
-    fontFamily: "'DM Sans', system-ui, sans-serif",
+    fontFamily: "var(--font-sans)",
   },
   delayRow: {
     background: "#181818",
@@ -5337,7 +5340,7 @@ const ruleStyles = {
     color: "#cecece",
     cursor: "pointer",
     padding: "7px 10px",
-    fontFamily: "'DM Sans', system-ui, sans-serif",
+    fontFamily: "var(--font-sans)",
   },
   pickerProcess: {
     fontSize: 11,
