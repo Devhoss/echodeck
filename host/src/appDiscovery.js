@@ -102,8 +102,16 @@ async function listApplications({ refresh = false } = {}) {
   // Concurrent callers share one enumeration rather than each paying 3 seconds.
   if (!inFlight) {
     inFlight = runDiscovery().then((apps) => {
-      cache = apps;
-      cachedAt = Date.now();
+      // A real Windows machine never has zero launchable applications, so an
+      // empty result means the enumeration failed rather than that the list
+      // is genuinely empty. Leaving `cache` unset lets the next call retry
+      // instead of an early failure (e.g. antivirus scanning the freshly
+      // spawned powershell.exe on a cold app launch) permanently poisoning
+      // the picker until someone notices and hits Rescan.
+      if (apps.length) {
+        cache = apps;
+        cachedAt = Date.now();
+      }
       inFlight = null;
       return apps;
     });
@@ -119,9 +127,21 @@ function applicationCacheAge() {
  * Warms the cache in the background so the first picker open is instant.
  * Deliberately not awaited by the caller: a slow enumeration must never delay
  * the host coming up.
+ *
+ * Retries on failure: the very first PowerShell spawn of a session is the one
+ * most likely to lose a race with antivirus scanning the freshly-launched
+ * powershell.exe, which previously left the picker silently empty until
+ * someone thought to hit Rescan. A cold Electron launch can afford a couple
+ * of seconds of patience here since nothing is blocked on it.
  */
-function primeApplicationCache() {
-  listApplications().catch(() => {});
+function primeApplicationCache(attempt = 1) {
+  listApplications()
+    .then((apps) => {
+      if (!apps.length && attempt < 3) {
+        setTimeout(() => primeApplicationCache(attempt + 1), 2000);
+      }
+    })
+    .catch(() => {});
 }
 
 

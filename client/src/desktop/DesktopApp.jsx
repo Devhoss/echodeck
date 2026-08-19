@@ -228,17 +228,22 @@ export default function DesktopApp({
       });
   }, []);
   // `refresh` rebuilds the host's cache, which costs a few seconds; the plain
-  // call serves whatever is already there.
-  const loadApplications = useCallback(
-    (refresh = false) =>
-      fetch(`${api()}/applications${refresh ? "?refresh=1" : ""}`)
-        .then((r) => r.json())
-        .then((apps) => {
-          if (Array.isArray(apps)) setApplications(apps);
-        })
-        .catch(() => {}),
-    [],
-  );
+  // call serves whatever is already there. On a cold host, the first plain
+  // call can land while the startup enumeration is still failing/retrying —
+  // an empty result here doesn't mean the machine has no apps, so retry a
+  // couple of times rather than leaving the library looking permanently bare.
+  const loadApplications = useCallback((refresh = false, attempt = 1) => {
+    fetch(`${api()}/applications${refresh ? "?refresh=1" : ""}`)
+      .then((r) => r.json())
+      .then((apps) => {
+        if (!Array.isArray(apps)) return;
+        if (apps.length) return setApplications(apps);
+        if (!refresh && attempt < 3) {
+          setTimeout(() => loadApplications(false, attempt + 1), 2500);
+        }
+      })
+      .catch(() => {});
+  }, []);
   const [profileRules, setProfileRules] = useState([]);
   const [ruleEditorKey, setRuleEditorKey] = useState(0);
   const [autoSwitch, setAutoSwitch] = useState(true);
