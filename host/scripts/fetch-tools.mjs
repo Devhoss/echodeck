@@ -23,11 +23,28 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const toolsDir = path.join(here, "..", "assets", "tools");
 const ffplayPath = path.join(toolsDir, "ffplay.exe");
 
-// Pinned rather than "latest" so a release is reproducible. The non-shared
-// build is used so ffplay.exe is self-contained and needs no sidecar DLLs.
-const RELEASE = "autobuild-2026-08-16-13-00";
-const ARCHIVE = "ffmpeg-n8.1.2-44-g7c533d0f86-win64-lgpl-8.1.zip";
-const URL = `https://github.com/BtbN/FFmpeg-Builds/releases/download/${RELEASE}/${ARCHIVE}`;
+// The primary is pinned so a release is reproducible. BtbN prunes old daily
+// builds, though, so a pin has a finite lifetime — the day it 404s, the whole
+// installer build dies with it. The `latest` release keeps a stable asset name
+// for exactly this reason, so it is the fallback rather than the primary: the
+// pin still wins while it lives, and a rotten one degrades to "whatever ffmpeg
+// master is current" instead of failing the build.
+// The non-shared build is used so ffplay.exe is self-contained and needs no
+// sidecar DLLs.
+const PINNED_RELEASE = "autobuild-2026-08-16-13-00";
+const PINNED_ARCHIVE = "ffmpeg-n8.1.2-44-g7c533d0f86-win64-lgpl-8.1.zip";
+const LATEST_RELEASE = "latest";
+const LATEST_ARCHIVE = "ffmpeg-master-latest-win64-lgpl.zip";
+const SOURCES = [
+  {
+    archive: PINNED_ARCHIVE,
+    url: `https://github.com/BtbN/FFmpeg-Builds/releases/download/${PINNED_RELEASE}/${PINNED_ARCHIVE}`,
+  },
+  {
+    archive: LATEST_ARCHIVE,
+    url: `https://github.com/BtbN/FFmpeg-Builds/releases/download/${LATEST_RELEASE}/${LATEST_ARCHIVE}`,
+  },
+];
 
 if (process.platform !== "win32") {
   console.log("fetch-tools: not Windows, nothing to do.");
@@ -46,10 +63,33 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "echodeck-tools-"));
 const zipPath = path.join(tmp, "ffmpeg.zip");
 
 try {
-  console.log(`fetch-tools: downloading ${ARCHIVE} …`);
-  const res = await fetch(URL, { redirect: "follow" });
-  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${URL}`);
-  fs.writeFileSync(zipPath, Buffer.from(await res.arrayBuffer()));
+  // Tried in order, so a pruned pin costs one wasted request rather than the
+  // build. `redirect: "follow"` is required: these URLs bounce through
+  // objects.githubusercontent.com.
+  let source = null;
+  let download = null;
+  for (const candidate of SOURCES) {
+    try {
+      const res = await fetch(candidate.url, { redirect: "follow" });
+      if (res.ok) {
+        source = candidate;
+        download = res;
+        break;
+      }
+      console.warn(
+        `fetch-tools: ${candidate.archive} unavailable (HTTP ${res.status})`,
+      );
+    } catch (e) {
+      console.warn(`fetch-tools: ${candidate.archive} failed — ${e.message}`);
+    }
+  }
+  if (!source)
+    throw new Error(
+      `no ffmpeg source reachable (tried ${SOURCES.map((s) => s.archive).join(", ")})`,
+    );
+
+  console.log(`fetch-tools: downloading ${source.archive} …`);
+  fs.writeFileSync(zipPath, Buffer.from(await download.arrayBuffer()));
 
   console.log("fetch-tools: extracting ffplay.exe …");
   // Windows 10+ ships bsdtar at System32\tar.exe, which understands drive
