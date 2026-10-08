@@ -238,7 +238,6 @@ export default function App() {
   const [micVolume, setMicVolume] = useState(null);
   const [micMuted, setMicMuted] = useState(false);
   const [sessions, setSessions] = useState([]);
-  const [showLabels, setShowLabels] = useState(false);
   const [muted, setMuted] = useState(false);
 
   const [disconnectActive, setDisconnectActive] = useState(false);
@@ -331,8 +330,6 @@ export default function App() {
         return;
       }
       if (msg.t === "state") {
-        if (typeof msg.show_labels === "boolean")
-          setShowLabels(msg.show_labels);
         setPages(msg.pages);
         setCurrentPage(msg.current_page);
         pageButtonsCacheRef.current.set(msg.current_page, msg.buttons);
@@ -431,6 +428,12 @@ export default function App() {
       ws.close();
     };
   }, [pairedHost, setUnpaired]);
+
+  // FEATURE: Key labels — a per-page preference, so read it off the page being
+  // viewed rather than remembering a deck-wide value. Held as state it lagged a
+  // page behind whenever a profile was switched from elsewhere (auto-switch
+  // rules, or the editor's own page rail).
+  const showLabels = !!pages.find((p) => p.id === currentPage)?.show_labels;
 
   // A deck key is square. Size it from whichever axis runs out first rather
   // than letting 1fr rows stretch it into a tall rectangle.

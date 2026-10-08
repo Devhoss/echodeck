@@ -558,7 +558,9 @@ export default function DesktopApp({
     await fetch(`${api()}/pages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
+      // FEATURE: Key labels — a new profile inherits the flag from the profile
+      // it was created from, so a variant of a labelled page stays labelled.
+      body: JSON.stringify({ name, from_page_id: currentPage }),
     });
     const data = await reloadPages();
     const newPage = data[data.length - 1];
@@ -1070,16 +1072,15 @@ export default function DesktopApp({
                 onOpenRules={() => setShowRules(true)}
                 showLabels={showLabels}
                 onToggleLabels={() => {
-                  // No optimistic copy: the host broadcasts the change straight
-                  // back over the socket it is already holding open, so every
-                  // surface flips from the same message.
-                  fetch(`${api()}/settings`, {
-                    method: "POST",
+                  // Per page, not deck-wide: the flag lives on the profile
+                  // itself, so the host broadcasts it straight back over the
+                  // socket it already holds open and every surface — editor
+                  // included — flips from the same message.
+                  if (!currentPage) return;
+                  fetch(`${api()}/pages/${currentPage}`, {
+                    method: "PATCH",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      key: "deck_show_labels",
-                      value: !showLabels,
-                    }),
+                    body: JSON.stringify({ show_labels: !showLabels }),
                   }).catch(() => {});
                 }}
                 addingPage={addingPage}
@@ -2437,6 +2438,7 @@ function ProfileMenu({
             onClick={onToggleLabels}
             role="menuitemcheckbox"
             aria-checked={showLabels}
+            title={`Show key labels on ${current?.name || "this profile"}`}
           >
             {/* The check keeps its slot when unchecked, so the row does not
                 shift as it toggles. */}

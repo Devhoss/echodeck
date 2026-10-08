@@ -19,7 +19,10 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS pages (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    position INTEGER DEFAULT 0
+    position INTEGER DEFAULT 0,
+    -- FEATURE: Key labels — a per-page preference rather than a deck-wide one,
+    -- so turning labels on for one profile leaves the others untouched.
+    show_labels INTEGER DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS buttons (
@@ -123,10 +126,24 @@ if (!existingRuleCols.includes("switch_delay"))
     `ALTER TABLE profile_rules ADD COLUMN switch_delay INTEGER DEFAULT 0`,
   );
 
+// FEATURE: Key labels — the deck-wide `deck_show_labels` setting became a
+// per-page flag. An existing deck keeps its labels by inheriting that value,
+// and the setting is then deleted so a stale row cannot look like a live one.
+const existingPageCols = db.pragma("table_info(pages)").map((c) => c.name);
+if (!existingPageCols.includes("show_labels")) {
+  db.exec(`ALTER TABLE pages ADD COLUMN show_labels INTEGER DEFAULT 0`);
+  db.prepare("UPDATE pages SET show_labels=?").run(
+    getSetting("deck_show_labels") === "1" ? 1 : 0,
+  );
+  db.prepare("DELETE FROM settings WHERE key=?").run("deck_show_labels");
+}
+
 // --- Seed ---
 const pageCount = db.prepare("SELECT COUNT(*) as c FROM pages").get().c;
 if (pageCount === 0) {
-  db.prepare(`INSERT INTO pages VALUES ('page_main', 'Main', 0)`).run();
+  db.prepare(
+    `INSERT INTO pages (id, name, position, show_labels) VALUES ('page_main', 'Main', 0, 0)`,
+  ).run();
 
   const insertBtn = db.prepare(`
     INSERT INTO buttons (
@@ -301,8 +318,10 @@ function setSetting(key, value) {
 function getPages() {
   return db.prepare("SELECT * FROM pages ORDER BY position").all();
 }
-function createPage(id, name, position) {
-  db.prepare(`INSERT INTO pages VALUES (?,?,?)`).run(id, name, position);
+function createPage(id, name, position, show_labels = 0) {
+  db.prepare(
+    `INSERT INTO pages (id, name, position, show_labels) VALUES (?,?,?,?)`,
+  ).run(id, name, position, show_labels ? 1 : 0);
   return getPage(id);
 }
 function getPage(id) {
@@ -312,6 +331,31 @@ function deletePage(id) {
   db.prepare("DELETE FROM buttons WHERE page_id=?").run(id);
   db.prepare("DELETE FROM profile_rules WHERE page_id=?").run(id);
   db.prepare("DELETE FROM pages WHERE id=?").run(id);
+}
+
+// Fields the editor may change on a page. A whitelist rather than a passthrough:
+// the id is not rewritable, and `show_labels` has to be normalised to 0/1 so a
+// stray truthy value cannot end up stored as text.
+const PAGE_FIELDS = new Set(["name", "position", "show_labels"]);
+
+function updatePage(id, fields) {
+  const existing = getPage(id);
+  if (!existing) return null;
+  const toSave = {};
+  for (const key of Object.keys(fields)) {
+    if (!PAGE_FIELDS.has(key)) continue;
+    toSave[key] = key === "show_labels" ? (fields[key] ? 1 : 0) : fields[key];
+  }
+  if (!Object.keys(toSave).length) return existing;
+
+  const sql = Object.keys(toSave)
+    .map((k) => `${k}=?`)
+    .join(", ");
+  db.prepare(`UPDATE pages SET ${sql} WHERE id=?`).run(
+    ...Object.values(toSave),
+    id,
+  );
+  return getPage(id);
 }
 
 // --- Profile auto-switch rules ---
@@ -573,6 +617,7 @@ module.exports = {
   getPages,
   createPage,
   getPage,
+  updatePage,
   deletePage,
   createPairedDevice,
   getPairedDeviceTokens,

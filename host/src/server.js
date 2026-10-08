@@ -105,7 +105,9 @@ app.use("/api", (req, res, next) => {
 
 app.get("/api/pages", (req, res) => {
   const pages = db.getPages();
-  res.json(pages.map((p) => ({ ...p, buttons: db.getButtons(p.id) })));
+  res.json(
+    pages.map((p) => ({ ...toDeckPage(p), buttons: db.getButtons(p.id) })),
+  );
 });
 
 // Hands out the pairing token itself, so it must never answer a remote caller —
@@ -197,19 +199,13 @@ app.get("/api/settings", (req, res) => {
   const pc_monitor_device = db.getSetting("pc_monitor_device") ?? "";
   const auto_profile_switching = db.getSetting("auto_profile_switching") ?? "1";
   const auto_switch_delay = db.getSetting("auto_switch_delay") ?? "0";
-  const deck_show_labels = db.getSetting("deck_show_labels") ?? "0";
   res.json({
     pc_sound_device,
     pc_monitor_device,
     auto_profile_switching: auto_profile_switching === "1",
     auto_switch_delay: Number(auto_switch_delay),
-    deck_show_labels: deck_show_labels === "1",
   });
 });
-
-// Settings that change what a client renders, as opposed to how the host
-// behaves. These are broadcast; the rest are read on demand.
-const DECK_SETTINGS = new Set(["deck_show_labels"]);
 
 app.post("/api/settings", (req, res) => {
   const { key, value } = req.body;
@@ -218,23 +214,17 @@ app.post("/api/settings", (req, res) => {
     "pc_monitor_device",
     "auto_profile_switching",
     "auto_switch_delay",
-    "deck_show_labels",
   ];
   if (!allowed.includes(key))
     return res.status(400).json({ error: "Unknown setting" });
   db.setSetting(
     key,
-    key === "auto_profile_switching" || key === "deck_show_labels"
+    key === "auto_profile_switching"
       ? value
         ? "1"
         : "0"
       : String(value ?? ""),
   );
-  // Some settings describe the deck itself rather than the host, so every
-  // connected client needs to hear about them. Without this the phone only
-  // picked up a label change on the next button save, which is what made the
-  // toggle look like it did nothing.
-  if (DECK_SETTINGS.has(key)) broadcastState();
   res.json({ ok: true });
 });
 
@@ -334,8 +324,30 @@ Write-Output $f.FileName
 
 app.post("/api/pages", (req, res) => {
   const pages = db.getPages();
-  const page = db.createPage(uuid(), req.body.name || "New Page", pages.length);
-  res.json(page);
+  // FEATURE: Key labels — a new profile inherits the flag from the profile it
+  // was created from, so a variant of a labelled page does not have to be
+  // re-set by hand. Callers that name no parent get the stored default.
+  const parent = pages.find((p) => p.id === req.body.from_page_id);
+  const page = db.createPage(
+    uuid(),
+    req.body.name || "New Page",
+    pages.length,
+    parent ? parent.show_labels : req.body.show_labels,
+  );
+  // Broadcast: the new profile has to reach the phone's page dots too, which
+  // otherwise wait for the next unrelated edit to paint.
+  broadcastState();
+  res.json(toDeckPage(page));
+});
+
+app.patch("/api/pages/:id", (req, res) => {
+  const page = db.updatePage(req.params.id, req.body);
+  if (!page) return res.status(404).json({ error: "Page not found" });
+  // A label toggle is a per-page preference, so every surface — the editor it
+  // was toggled in and every phone currently on that page — redraws from this
+  // one broadcast.
+  broadcastState();
+  res.json(toDeckPage(page));
 });
 
 app.delete("/api/pages/:id", (req, res) => {
@@ -836,8 +848,9 @@ async function broadcastVolumeNow() {
 }
 
 function sendState(ws, page_id) {
-  const pages = db.getPages();
+  const pages = db.getPages().map(toDeckPage);
   const targetPage = page_id || autoPageId || pages[0]?.id;
+  const page = pages.find((p) => p.id === targetPage);
   const buttons = targetPage ? db.getButtons(targetPage).map(toDeckButton) : [];
   ws.send(
     JSON.stringify({
@@ -846,7 +859,10 @@ function sendState(ws, page_id) {
       pages,
       current_page: targetPage,
       buttons,
-      show_labels: db.getSetting("deck_show_labels") === "1",
+      // Kept for clients that predate per-page labels: it mirrors the flag of
+      // the page being sent, so those builds follow the page too rather than
+      // freezing on the last deck-wide value they were given.
+      show_labels: page?.show_labels === true,
       auto_switch: {
         active_page: autoPageId,
         active_rule: activeRuleId,
@@ -858,6 +874,10 @@ function sendState(ws, page_id) {
 
 function toDeckButton(btn) {
   return { ...btn, sound_file: !!btn.sound_file };
+}
+
+function toDeckPage(page) {
+  return { ...page, show_labels: Number(page.show_labels) === 1 };
 }
 
 function broadcastRules() {

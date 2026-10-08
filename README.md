@@ -443,6 +443,7 @@ If you want to build the APK locally without pushing a tag:
 - Delayed app capture (3-second countdown)
 - Full Electron desktop UI (Elgato-style layout)
 - Drag-to-reorder buttons
+- Per-profile key labels
 - Button toggle states
 - Icon & sound file uploads
 - QR code phone pairing
