@@ -1,6 +1,6 @@
 {
   "name": "echodeck",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Echo Deck",
   "main": "main.js",
   "author": "Hoss",
@@ -15,7 +15,8 @@
     "dist": "electron-builder",
     "dist:portable": "electron-builder --win portable",
     "postinstall": "electron-builder install-app-deps",
-    "fetch:tools": "node scripts/fetch-tools.mjs"
+    "fetch:tools": "node scripts/fetch-tools.mjs",
+    "test": "node --test"
   },
   "build": {
     "appId": "com.hoss.echodeck",
@@ -67,6 +68,8 @@
     "express": "^5.2.1",
     "node-addon-api": "^8.9.2",
     "robotjs": "^0.7.1",
+    "ssh2": "^1.17.0",
+    "systeminformation": "^5.33.15",
     "uuid": "^8.3.2",
     "voicemeeter-connector": "^2.2.0",
     "win-audio": "^3.0.5",
