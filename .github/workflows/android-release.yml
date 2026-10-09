@@ -9,9 +9,14 @@ jobs:
   # ── Job 0: unit tests on both packages ──────────────────────────────────
   # Runs first and fails fast: a broken normalisation rule should stop the
   # release before it spends ten minutes building native modules.
+  #
+  # Windows, not Ubuntu: the host package depends on echoaudio, a Windows-only
+  # native module, so `npm ci` refuses to install on Linux (EBADPLATFORM). The
+  # host tests themselves never load it — they cover pure logic and injected
+  # fakes — but the dependencies have to install for them to run at all.
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -25,8 +30,6 @@ jobs:
             client/package-lock.json
             host/package-lock.json
 
-      # Host tests are dependency-light (node:test, no native rebuild needed)
-      # because they cover pure logic and injected fakes.
       - name: Install host dependencies
         working-directory: host
         run: npm ci
