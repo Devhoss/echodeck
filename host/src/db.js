@@ -2,6 +2,13 @@ const Database = require("better-sqlite3");
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
+const {
+  buildWidgetUpdate,
+  buildSourceUpdate,
+  deserializeWidget,
+  widgetDefaults,
+  sourceDefaults,
+} = require("./widgets/widgetShape.js");
 
 const dbPath = path.join(
   os.homedir(),
@@ -81,6 +88,42 @@ db.exec(`
     conditions TEXT NOT NULL DEFAULT '[]',
     switch_delay INTEGER DEFAULT 0,
     FOREIGN KEY (page_id) REFERENCES pages(id)
+  );
+
+  -- FEATURE: Live widgets — a persistent tile that receives data instead of an
+  -- action. source_id is null for the local machine, otherwise a
+  -- widget_sources row, so several tiles can share one collector.
+  CREATE TABLE IF NOT EXISTS widgets (
+    id TEXT PRIMARY KEY,
+    page_id TEXT NOT NULL,
+    type TEXT DEFAULT 'system_monitor',
+    position INTEGER DEFAULT 0,
+    size TEXT DEFAULT '2x2',
+    label TEXT DEFAULT 'Widget',
+    icon TEXT DEFAULT 'server',
+    color TEXT DEFAULT '#185FA5',
+    source_id TEXT DEFAULT NULL,
+    config TEXT DEFAULT '{"metrics":["cpu","memory","disk","uptime"]}',
+    FOREIGN KEY (page_id) REFERENCES pages(id)
+  );
+
+  -- FEATURE: Live widgets — a data source, not a widget. Remote hosts live
+  -- here so a second tile can watch the same machine over one connection.
+  -- auth holds an encrypted passphrase blob (secureStore.js); there is
+  -- deliberately no password column anywhere in this schema.
+  CREATE TABLE IF NOT EXISTS widget_sources (
+    id TEXT PRIMARY KEY,
+    kind TEXT DEFAULT 'ssh',
+    name TEXT NOT NULL,
+    host TEXT DEFAULT '',
+    port INTEGER DEFAULT 22,
+    username TEXT DEFAULT '',
+    key_path TEXT DEFAULT '',
+    auth TEXT DEFAULT NULL,
+    use_agent INTEGER DEFAULT 0,
+    refresh_ms INTEGER DEFAULT 10000,
+    enabled INTEGER DEFAULT 1,
+    created_at TEXT
   );
 `);
 
@@ -330,6 +373,8 @@ function getPage(id) {
 function deletePage(id) {
   db.prepare("DELETE FROM buttons WHERE page_id=?").run(id);
   db.prepare("DELETE FROM profile_rules WHERE page_id=?").run(id);
+  // FEATURE: Live widgets — a deleted profile takes its tiles with it.
+  db.prepare("DELETE FROM widgets WHERE page_id=?").run(id);
   db.prepare("DELETE FROM pages WHERE id=?").run(id);
 }
 
@@ -613,6 +658,155 @@ function reorderButtons(buttons) {
   })(buttons);
 }
 
+// --- Live widgets ---
+// FEATURE: Live widgets — a tile that receives data rather than an action.
+// Deliberately shaped like a button (page_id, position, size, label, icon,
+// color) so the editor can treat them alike, minus everything action-shaped.
+
+function getWidgets(page_id) {
+  return db
+    .prepare("SELECT * FROM widgets WHERE page_id=? ORDER BY position, rowid ASC")
+    .all(page_id)
+    .map(deserializeWidget);
+}
+
+function getAllWidgets() {
+  return db
+    .prepare("SELECT * FROM widgets ORDER BY position, rowid ASC")
+    .all()
+    .map(deserializeWidget);
+}
+
+function getWidget(id) {
+  const row = db.prepare("SELECT * FROM widgets WHERE id=?").get(id);
+  return row ? deserializeWidget(row) : null;
+}
+
+function createWidget(widget) {
+  const defaults = widgetDefaults();
+  db.prepare(
+    `INSERT INTO widgets
+       (id, page_id, type, position, size, label, icon, color, source_id, config)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`,
+  ).run(
+    widget.id,
+    widget.page_id,
+    widget.type || defaults.type,
+    widget.position ?? 0,
+    widget.size || defaults.size,
+    widget.label ?? defaults.label,
+    widget.icon ?? defaults.icon,
+    widget.color ?? defaults.color,
+    widget.source_id ?? null,
+    typeof widget.config === "string"
+      ? widget.config
+      : JSON.stringify(widget.config ?? defaults.config),
+  );
+  return getWidget(widget.id);
+}
+
+function updateWidget(id, fields) {
+  const existing = getWidget(id);
+  if (!existing) return null;
+  const { values, keys } = buildWidgetUpdate(fields);
+  if (!keys) return existing;
+  const sql = keys.map((k) => `${k}=?`).join(", ");
+  db.prepare(`UPDATE widgets SET ${sql} WHERE id=?`).run(
+    ...keys.map((k) => values[k]),
+    id,
+  );
+  return getWidget(id);
+}
+
+function deleteWidget(id) {
+  db.prepare("DELETE FROM widgets WHERE id=?").run(id);
+}
+
+function reorderWidgets(widgets) {
+  const update = db.prepare("UPDATE widgets SET position=? WHERE id=?");
+  db.transaction((items) => {
+    for (const item of items) update.run(item.position, item.id);
+  })(widgets);
+}
+
+// --- Live widget data sources ---
+// FEATURE: Live widgets — a configured place metrics come from. The current
+// host is one source of them; the abstraction exists so a NAS or a VPS is a
+// new row rather than new code.
+
+function getSources() {
+  return db.prepare("SELECT * FROM widget_sources ORDER BY created_at").all();
+}
+
+function getSource(id) {
+  const row = db.prepare("SELECT * FROM widget_sources WHERE id=?").get(id);
+  return row || null;
+}
+
+/** Raw row, secret blob included. Internal only — never crosses the API. */
+function getSourceWithSecret(id) {
+  return getSource(id);
+}
+
+function createSource(source) {
+  const defaults = sourceDefaults();
+  const row = {
+    id: source.id,
+    kind: "ssh",
+    name: source.name || defaults.name,
+    host: source.host || "",
+    port: source.port ?? defaults.port,
+    username: source.username || "",
+    key_path: source.key_path || "",
+    auth: source.auth ?? null,
+    use_agent: source.use_agent ? 1 : 0,
+    refresh_ms: source.refresh_ms ?? defaults.refresh_ms,
+    enabled: source.enabled === false ? 0 : 1,
+    created_at: new Date().toISOString(),
+  };
+  db.prepare(
+    `INSERT INTO widget_sources
+       (id, kind, name, host, port, username, key_path, auth, use_agent,
+        refresh_ms, enabled, created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run(
+    row.id,
+    row.kind,
+    row.name,
+    row.host,
+    row.port,
+    row.username,
+    row.key_path,
+    row.auth,
+    row.use_agent,
+    row.refresh_ms,
+    row.enabled,
+    row.created_at,
+  );
+  return getSource(row.id);
+}
+
+function updateSource(id, fields) {
+  const existing = getSource(id);
+  if (!existing) return null;
+  const { values, keys } = buildSourceUpdate(fields);
+  if (!keys) return existing;
+  const sql = keys.map((k) => `${k}=?`).join(", ");
+  db.prepare(`UPDATE widget_sources SET ${sql} WHERE id=?`).run(
+    ...keys.map((k) => values[k]),
+    id,
+  );
+  return getSource(id);
+}
+
+function deleteSource(id) {
+  db.prepare("DELETE FROM widget_sources WHERE id=?").run(id);
+  // Widgets that pointed at it stay, but repoint at the local machine rather
+  // than dangling: a tile that silently stops updating is a worse outcome than
+  // one that shows the host it is running on.
+  db.prepare("UPDATE widgets SET source_id=NULL WHERE source_id=?").run(id);
+}
+
 module.exports = {
   getPages,
   createPage,
@@ -631,6 +825,19 @@ module.exports = {
   updateButton,
   deleteButton,
   reorderButtons,
+  getWidgets,
+  getAllWidgets,
+  getWidget,
+  createWidget,
+  updateWidget,
+  deleteWidget,
+  reorderWidgets,
+  getSources,
+  getSource,
+  getSourceWithSecret,
+  createSource,
+  updateSource,
+  deleteSource,
   getSetting,
   setSetting,
   getProfileRules,

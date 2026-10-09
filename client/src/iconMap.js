@@ -22,6 +22,12 @@ import {
   Volume1,
   Volume2,
   VolumeX,
+  // live-widget icons (a widget picks these the same way an action does)
+  Server,
+  HardDrive,
+  Network,
+  Thermometer,
+  Container,
   // interface chrome
   Check,
   ChevronDown,
@@ -60,6 +66,13 @@ export const ACTION_ICONS = {
   "volume-1": Volume1,
   "volume-2": Volume2,
   "volume-x": VolumeX,
+  // FEATURE: Live widgets — a widget's icon lives in this map too, so it can
+  // be drawn by ButtonFace in the deck, in the editor and in the library row.
+  server: Server,
+  "hard-drive": HardDrive,
+  network: Network,
+  thermometer: Thermometer,
+  container: Container,
 };
 
 /** Interface chrome, addressed by a stable semantic name rather than a glyph. */

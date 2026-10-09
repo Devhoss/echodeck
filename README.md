@@ -212,20 +212,79 @@ plays to both at once — the cable for the call, your headphones for you.
 
 ## Live Widgets
 
+A widget is a persistent tile that receives data rather than an action.
+Add one exactly like a key: drag it from the **Live widgets** group in the
+library onto the deck's add well.
+
 ### Current Widgets
 
-- CPU usage
-- RAM usage
-- Clock
-- Volume control
+**System Monitor** — two data sources, chosen per tile:
+
+| | |
+|---|---|
+| **This PC** | CPU, RAM, uptime, disk, network, temperature where the machine reports it |
+| **Remote host** | Any Linux host over SSH — hostname, username, private key, refresh interval, and which metrics to show |
+
+Remote hosts are configured as *sources*, not as special cases, so the same
+host can feed several tiles over one connection:
+
+```
+Homelab -> 192.168.100.36
+NAS     -> another IP
+VPS     -> another IP
+```
+
+Pick **＋ Add Remote Host…** in the widget's Source dropdown to add one: name,
+host, port, username, private-key path (pre-filled with your default
+`~/.ssh/id_ed25519` when it exists), optional agent auth and refresh interval.
+**Test connection** runs the real probe before anything is saved, and saving
+binds the host to the tile in the same step.
+
+### Reliability
+
+A remote host going away is a rendered state, not a dead tile. The widget keeps
+its last known values, dims them, and says how long ago they were real.
+Docker behaves the same way: if `docker` is missing or the daemon is
+unreachable, the row says so — "docker daemon unreachable — check the user is
+in the docker group" — rather than disappearing.
+
+```
+🟢 ONLINE          CPU 18%
+CPU 18%            RAM 2.4 / 4.0 GB
+RAM 2.4/4.0 GB     DISK 68%
+DISK 68%           NET ↓ 2.1 MB/s ↑ 0.4 MB/s
+NET ↓ 2.1 ↑ 0.4    UPTIME 3h 17m
+UPTIME 3h 17m
+
+                   🔴 OFFLINE
+                   Last seen: 12:41 AM
+```
+
+SSH timeouts, authentication failures, a host sleeping and network loss all
+land as `offline` / `auth_error` with the last values retained and flagged
+stale. One connection per source is reused across refreshes, and each refresh
+runs a single command rather than one per metric.
+
+### Authentication
+
+Public-key only — no password is ever stored. Point a source at a key file
+(defaults to `~/.ssh/id_ed25519` or `id_rsa`); the file's contents are never
+read into the UI or returned by the API. If the key is encrypted, the passphrase
+is stored through the OS credential store (Electron `safeStorage` / DPAPI) and
+is write-only over the API.
+
+The Windows OpenSSH agent can be used instead, but only when it is actually
+reachable — the editor checks the pipe before offering the toggle, and key-file
+authentication always remains available.
 
 ### Planned Widgets
 
 - Media playback
 - Live Browser (YouTube previews, Twitch chat, Home Assistant, security cameras)
 - OBS stats
+- Docker / service / uptime / disk monitors (reuse the same source model)
+- Tailscale status
 - AI widgets
-- Homelab monitoring
 
 ---
 
@@ -444,6 +503,7 @@ If you want to build the APK locally without pushing a tag:
 - Full Electron desktop UI (Elgato-style layout)
 - Drag-to-reorder buttons
 - Per-profile key labels
+- Configurable live widgets (System Monitor: this PC or any SSH host)
 - Button toggle states
 - Icon & sound file uploads
 - QR code phone pairing

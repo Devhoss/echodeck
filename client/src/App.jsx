@@ -19,9 +19,14 @@ import {
   getWsUrl,
   isElectron,
   clearPairConfig,
+  authFetch,
+  jsonArray,
 } from "./constants.js";
 import PairingScreen from "./PairingScreen.jsx";
 import { ButtonFace, Icon } from "./icons.jsx";
+import { columnsFor, spanStyle, totalCells } from "./widgets/layout.js";
+import { WidgetTile } from "./widgets/WidgetTile.jsx";
+import { SystemMonitorWidget } from "./widgets/SystemMonitorWidget.jsx";
 import {
   HOLD_REPEAT_ACTIONS,
   levelTargetFor,
@@ -239,6 +244,14 @@ export default function App() {
   const [micMuted, setMicMuted] = useState(false);
   const [sessions, setSessions] = useState([]);
   const [muted, setMuted] = useState(false);
+  // FEATURE: Live widgets — tile config arrives with `state`, and the numbers
+  // arrive separately as `widget_data`, so a reconnect repopulates both from
+  // the last thing the host knew.
+  const [widgets, setWidgets] = useState([]);
+  const [widgetData, setWidgetData] = useState({});
+  // The source list is what a tile prints as its host line. The phone never
+  // fetched it, so every remote tile was labelled "This PC" here.
+  const [widgetSources, setWidgetSources] = useState([]);
 
   const [disconnectActive, setDisconnectActive] = useState(false);
   const [keySize, setKeySize] = useState(84);
@@ -334,6 +347,18 @@ export default function App() {
         setCurrentPage(msg.current_page);
         pageButtonsCacheRef.current.set(msg.current_page, msg.buttons);
         setButtons(msg.buttons);
+        // FEATURE: Live widgets — tiles for the page being switched to, with the
+        // last known snapshot attached, so the first paint already has numbers.
+        setWidgets(Array.isArray(msg.widgets) ? msg.widgets : []);
+        const next = {};
+        for (const widget of msg.widgets || []) next[widget.id] = widget.data || {};
+        setWidgetData(next);
+      }
+      if (msg.t === "widget_data") {
+        // Merge rather than replace: the frame only carries the ticks whose
+        // source changed this round, and dropping the rest would blank tiles
+        // whose host is simply quiet.
+        setWidgetData((prev) => ({ ...prev, ...msg.data }));
       }
       if (msg.t === "update") {
         setButtons((prev) =>
@@ -429,20 +454,51 @@ export default function App() {
     };
   }, [pairedHost, setUnpaired]);
 
+  // FEATURE: Live widgets — the data sources a phone's tiles are bound to. Fetched
+  // here as well as on the desktop, because the tile's host line is drawn from
+  // this list on every render and a phone has no editor to trigger it.
+  //
+  // authFetch carries the pairing token: the host rejects a token-less remote
+  // request with a JSON object, and treating that as the source list used to
+  // crash the render the moment a widget page appeared.
+  useEffect(() => {
+    let cancelled = false;
+    authFetch("/widget-sources")
+      .then(jsonArray)
+      .then((list) => !cancelled && setWidgetSources(list))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [widgets, pairedHost]);
+
   // FEATURE: Key labels — a per-page preference, so read it off the page being
   // viewed rather than remembering a deck-wide value. Held as state it lagged a
   // page behind whenever a profile was switched from elsewhere (auto-switch
   // rules, or the editor's own page rail).
   const showLabels = !!pages.find((p) => p.id === currentPage)?.show_labels;
 
+  // FEATURE: Live widgets — tiles on the page being viewed, plus the latest
+  // frame received for each. The frame is only ever written here, never inside
+  // the tile, so a widget that just lost its source renders the last thing it
+  // was told rather than flickering back to a blank.
+  const widgetsForPage = useMemo(
+    () => widgets.filter((w) => w.page_id === currentPage),
+    [widgets, currentPage],
+  );
+
   // A deck key is square. Size it from whichever axis runs out first rather
   // than letting 1fr rows stretch it into a tall rectangle.
+  // FEATURE: Live widgets — cells, not items: a 2x2 widget is four keys' worth
+  // of space, and counting items would squeeze them into a grid that cannot
+  // hold them.
   const layout = useMemo(() => {
-    const count = Math.max(buttons.length, 1);
+    const pageWidgets = widgetsForPage;
+    const count = totalCells(buttons) + totalCells(pageWidgets);
     // Prefer the widest row that keeps keys reasonably large in landscape.
-    const cols = Math.min(count, count <= 8 ? 4 : count <= 15 ? 5 : 7);
-    return { cols, rows: Math.ceil(count / cols) };
-  }, [buttons.length]);
+    const cols = columnsFor([...buttons, ...pageWidgets], Math.max(count, 1));
+    return { cols, rows: Math.ceil(Math.max(count, 1) / cols) };
+  }, [buttons, widgetsForPage]);
 
   // Layout effect, not effect: the column count changes the moment a profile
   // switches, so the size has to be right before the browser paints or the deck
@@ -610,6 +666,8 @@ export default function App() {
         wsRef={wsRef}
         switchPage={switchPage}
         pageButtonsCacheRef={pageButtonsCacheRef}
+        widgets={widgets}
+        widgetData={widgetData}
       />
     );
   }
@@ -814,6 +872,22 @@ export default function App() {
             onVolumeHoldStop={stopVolumeHold}
             onConfirmHoldStart={beginConfirmHold}
           />
+        ))}
+        {/* FEATURE: Live widgets — tiles after the keys, in the same grid. They
+            are not pressable: a tile shows, it does not act. */}
+        {widgetsForPage.map((widget) => (
+          <div key={widget.id} style={spanStyle(widget.size)}>
+            <WidgetTile
+              widget={widget}
+              data={widgetData[widget.id]}
+              sources={widgetSources}
+            >
+              <SystemMonitorWidget
+                widget={widget}
+                data={widgetData[widget.id]}
+              />
+            </WidgetTile>
+          </div>
         ))}
       </div>
 

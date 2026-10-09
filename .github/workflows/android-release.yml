@@ -6,10 +6,48 @@ on:
       - "v*" # triggers on any tag like v1.0.0, v1.2.3, etc.
 
 jobs:
-  # ── Job 1: Android APK ───────────────────────────────────────────────────────
+  # ── Job 0: unit tests on both packages ──────────────────────────────────
+  # Runs first and fails fast: a broken normalisation rule should stop the
+  # release before it spends ten minutes building native modules.
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+          cache-dependency-path: |
+            client/package-lock.json
+            host/package-lock.json
+
+      # Host tests are dependency-light (node:test, no native rebuild needed)
+      # because they cover pure logic and injected fakes.
+      - name: Install host dependencies
+        working-directory: host
+        run: npm ci
+
+      - name: Host tests
+        working-directory: host
+        run: npm test
+
+      - name: Install client dependencies
+        working-directory: client
+        run: npm ci
+
+      - name: Client tests
+        working-directory: client
+        run: npm test
+
+  # ── Job 1: Android APK ───────────────────────────────────────────────────
   build-apk:
     name: Build Android APK
     runs-on: ubuntu-latest
+    needs: test
     permissions:
       contents: write
 
@@ -82,6 +120,7 @@ jobs:
   build-exe:
     name: Build Windows EXE
     runs-on: windows-latest
+    needs: test
     permissions:
       contents: write
 

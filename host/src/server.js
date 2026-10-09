@@ -14,6 +14,12 @@ const {
   getApplicationIcons,
 } = require("./appDiscovery");
 const { PORT, LAN_IP, LAN_URL } = require("./network");
+const systemStats = require("./systemStats");
+const { createWidgetManager } = require("./widgets/manager.js");
+const { deserializeWidget, deserializeSource } = require("./widgets/widgetShape.js");
+const { createSshSource, agentStatus } = require("./widgets/sources/sshSource.js");
+const { testSourceConfig } = require("./widgets/testSource.js");
+const { findDefaultKey } = require("./widgets/keyPath.js");
 const {
   executeAction,
   executeSequence,
@@ -45,7 +51,14 @@ app.use((req, res, next) => {
     "Access-Control-Allow-Methods",
     "GET, POST, PATCH, DELETE, OPTIONS",
   );
-  res.header("Access-Control-Allow-Headers", "Content-Type");
+  // X-EchoDeck-Token is here because the phone app's origin is
+  // http://localhost (Capacitor's androidScheme), so its REST calls are
+  // cross-origin and preflighted. Omitting the header made the browser reject
+  // every authenticated phone request before it was sent.
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Content-Type, X-EchoDeck-Token",
+  );
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
@@ -105,8 +118,16 @@ app.use("/api", (req, res, next) => {
 
 app.get("/api/pages", (req, res) => {
   const pages = db.getPages();
+  // FEATURE: Live widgets — nested here exactly like buttons, so the editor's
+  // reloadPages() finds a page's tiles with the same lookup it already uses for
+  // its keys. The live snapshot is deliberately not attached here: that arrives
+  // over the socket in the state frame, where it stays fresh.
   res.json(
-    pages.map((p) => ({ ...toDeckPage(p), buttons: db.getButtons(p.id) })),
+    pages.map((p) => ({
+      ...toDeckPage(p),
+      buttons: db.getButtons(p.id),
+      widgets: db.getWidgets(p.id),
+    })),
   );
 });
 
@@ -430,9 +451,112 @@ app.delete("/api/buttons/:id", (req, res) => {
   res.json({ ok: true });
 });
 
+// --- Live widgets ---
+// FEATURE: Live widgets — a tile that receives data instead of an action.
+// Deliberately shaped after the button endpoints: same validate-in-db pattern,
+// same broadcastState() after every mutation, so the editor and every phone
+// agree on what the deck looks like.
+
+app.get("/api/widgets", (req, res) => {
+  res.json(db.getAllWidgets().map(deserializeWidget));
+});
+
+app.get("/api/widgets/:id", (req, res) => {
+  const widget = db.getWidget(req.params.id);
+  if (!widget) return res.status(404).json({ error: "Widget not found" });
+  res.json(widget);
+});
+
+app.post("/api/widgets", (req, res) => {
+  const widget = db.createWidget({
+    id: uuid(),
+    page_id: req.body.page_id,
+    position: (db.getWidgets(req.body.page_id) || []).length,
+    ...req.body,
+  });
+  syncWidgets();
+  broadcastState();
+  res.json(widget);
+});
+
+app.patch("/api/widgets/:id", (req, res) => {
+  const widget = db.updateWidget(req.params.id, req.body);
+  if (!widget) return res.status(404).json({ error: "Widget not found" });
+  // A change of source, metrics or refresh interval has to rebuild the poller
+  // before the state frame goes out, or the frame would carry stale data.
+  syncWidgets();
+  broadcastState();
+  res.json(widget);
+});
+
+app.delete("/api/widgets/:id", (req, res) => {
+  db.deleteWidget(req.params.id);
+  syncWidgets();
+  broadcastState();
+  res.json({ ok: true });
+});
+
+// --- Live widget data sources ---
+// FEATURE: Live widgets — where metrics come from. `auth` (an encrypted
+// passphrase) is write-only here: PATCH may set it, GET never returns it.
+
+app.get("/api/widget-sources", (req, res) => {
+  res.json(db.getSources().map(deserializeSource));
+});
+
+app.post("/api/widget-sources", (req, res) => {
+  const source = db.createSource({ id: uuid(), ...req.body });
+  syncWidgets();
+  broadcastState();
+  res.json(deserializeSource(source));
+});
+
+app.patch("/api/widget-sources/:id", (req, res) => {
+  const source = db.updateSource(req.params.id, req.body);
+  if (!source) return res.status(404).json({ error: "Source not found" });
+  syncWidgets();
+  broadcastState();
+  res.json(deserializeSource(source));
+});
+
+app.delete("/api/widget-sources/:id", (req, res) => {
+  db.deleteSource(req.params.id);
+  syncWidgets();
+  broadcastState();
+  res.json({ ok: true });
+});
+
+// Runs the remote command once, on demand, so the editor can tell the user
+// whether a host is reachable before they walk away from the panel. The same
+// helper backs both routes: a host that is already saved, and one the user is
+// still filling in (which must be testable *before* it is written to disk).
+app.post("/api/widget-sources/:id/test", async (req, res) => {
+  const row = db.getSource(req.params.id);
+  if (!row) return res.status(404).json({ error: "Source not found" });
+  res.json(await testSourceConfig({ ...deserializeSource(row), auth: row.auth }));
+});
+
+app.post("/api/widget-sources/test", async (req, res) => {
+  res.json(await testSourceConfig(req.body || {}));
+});
+
+/** Whether the SSH agent can be used on this machine at all. */
+app.get("/api/widget-sources/agent-status", (req, res) => {
+  agentStatus()
+    .then((status) => res.json(status))
+    .catch(() => res.json({ supported: false, reachable: false }));
+});
+
+// Where a key file is expected by default, expanded to an absolute path. The
+// client cannot know this reliably — it depends on the profile the host runs
+// under — and handing ssh2 a `~` path it will not expand is exactly the bug
+// this endpoint exists to avoid.
+app.get("/api/widget-sources/default-key", (req, res) => {
+  res.json({ path: findDefaultKey() });
+});
+
 // --- WebSocket ---
 const clients = new Set();
-let lastCpuTimes = os.cpus().map((c) => c.times);
 let activeWindow = null;
 let autoPageId = null;
 let activeRuleId = null;
@@ -463,30 +587,6 @@ function trySend(ws, buildFn) {
   }
 }
 
-function getCpuPercent() {
-  const current = os.cpus().map((c) => c.times);
-  let totalIdle = 0,
-    totalTick = 0;
-  for (let i = 0; i < current.length; i++) {
-    const prev = lastCpuTimes[i],
-      curr = current[i];
-    const idle = curr.idle - prev.idle;
-    const tick =
-      curr.user -
-      prev.user +
-      (curr.nice - prev.nice) +
-      (curr.sys - prev.sys) +
-      (curr.idle - prev.idle) +
-      (curr.irq - prev.irq);
-    totalIdle += idle;
-    totalTick += tick;
-  }
-  lastCpuTimes = current;
-  return totalTick === 0
-    ? 0
-    : Math.round(((totalTick - totalIdle) / totalTick) * 100);
-}
-
 function broadcastClients() {
   const list = [];
   clients.forEach((ws) => {
@@ -503,7 +603,6 @@ function broadcastClients() {
       });
     }
   });
-
   const msg = JSON.stringify({ t: "clients", clients: list });
   clients.forEach((ws) => {
     if (ws.readyState === 1 && ws.isDesktop) ws.send(msg);
@@ -513,6 +612,57 @@ function broadcastClients() {
 // Only the three fields a key face needs. The full session objects carry a pid,
 // a display name and a state that nothing on the client reads, and this goes
 // out every three seconds to every device.
+// --- Live widgets ---
+// FEATURE: Live widgets — one manager owns every source, and every client hears
+// about the sources its own page uses. Reuses the existing socket and the
+// existing debounced broadcast rather than growing a second push path.
+
+// Widget ids per page, and the source key behind each widget. Both are cached
+// because the fan-out below runs on every source tick, for every client.
+let widgetIdsByPage = new Map();
+let sourceKeyByWidget = new Map();
+
+function currentWidgetIds(page_id) {
+  if (!page_id) return [];
+  return widgetIdsByPage.get(page_id) || [];
+}
+
+function refreshWidgetIndex() {
+  const byPage = new Map();
+  const byWidget = new Map();
+  for (const widget of db.getAllWidgets()) {
+    if (!byPage.has(widget.page_id)) byPage.set(widget.page_id, []);
+    byPage.get(widget.page_id).push(widget.id);
+    byWidget.set(widget.id, widgetManager.keyFor(widget.source_id));
+  }
+  widgetIdsByPage = byPage;
+  sourceKeyByWidget = byWidget;
+}
+
+const widgetManager = createWidgetManager({ db });
+
+/** Rebuilds the pollers from the database and refreshes the page index. */
+function syncWidgets() {
+  refreshWidgetIndex();
+  widgetManager.startAll(db.getAllWidgets());
+}
+
+// A source tick only interests clients looking at a page with a widget fed by
+// it, so the frame is filtered per socket. The manager keys its snapshot by
+// source; this maps back to the widget ids that consume it.
+widgetManager.onChange((changed) => {
+  clients.forEach((ws) => {
+    if (ws.readyState !== 1) return;
+    const data = {};
+    for (const id of currentWidgetIds(ws.currentPage)) {
+      const sourceKey = sourceKeyByWidget.get(id);
+      if (sourceKey && changed.has(sourceKey)) data[id] = changed.get(sourceKey);
+    }
+    if (!Object.keys(data).length) return;
+    trySend(ws, () => ws.send(JSON.stringify({ t: "widget_data", data })));
+  });
+});
+
 function sessionLevels() {
   try {
     return getAudioSessionsSync().map((s) => ({
@@ -537,13 +687,17 @@ const statsInterval = setInterval(async () => {
     );
     return; // previously this would have silently aborted before reaching clients.forEach
   }
-  const totalMem = os.totalmem();
-  const usedMem = totalMem - os.freemem();
+  // FEATURE: Live widgets — one local collector now feeds both this tick and
+  // the System Monitor widget, so the header pills and a tile can never
+  // disagree about CPU or RAM. cheap() only: the expensive tier (disk, network,
+  // temperature) costs a PowerShell process and belongs to a widget refresh,
+  // not to a tick that runs every three seconds.
+  const { cpu, memory } = systemStats.cheap();
   const msg = JSON.stringify({
     t: "stats",
-    cpu: getCpuPercent(),
-    ram_used: Math.round((usedMem / 1024 / 1024 / 1024) * 10) / 10,
-    ram_total: Math.round((totalMem / 1024 / 1024 / 1024) * 10) / 10,
+    cpu,
+    ram_used: Math.round((memory.used / 1024 / 1024 / 1024) * 10) / 10,
+    ram_total: Math.round((memory.total / 1024 / 1024 / 1024) * 10) / 10,
     time: new Date().toLocaleTimeString([], {
       hour: "2-digit",
       minute: "2-digit",
@@ -850,8 +1004,33 @@ async function broadcastVolumeNow() {
 function sendState(ws, page_id) {
   const pages = db.getPages().map(toDeckPage);
   const targetPage = page_id || autoPageId || pages[0]?.id;
+  // Remember the page this socket is actually looking at. It is what the
+  // widget fan-out filters on, and without it a freshly connected client has
+  // no page and silently receives no live data until it switches.
+  if (targetPage) ws.currentPage = targetPage;
   const page = pages.find((p) => p.id === targetPage);
   const buttons = targetPage ? db.getButtons(targetPage).map(toDeckButton) : [];
+  // FEATURE: Live widgets — the tiles on this page, each carrying the last
+  // known snapshot with its status. A fresh connection therefore paints real
+  // numbers immediately, including a host that is currently offline: the last
+  // values plus the fact that they are stale is exactly what the tile should
+  // show while it waits for the next tick.
+  const widgets = targetPage
+    ? db.getWidgets(targetPage).map((widget) => {
+        const sourceKey = widgetManager.keyFor(widget.source_id);
+        const snapshot = widgetManager.snapshotFor(widget.source_id);
+        const status = widgetManager.status(widget.source_id);
+        return {
+          ...widget,
+          data: snapshot,
+          status: status.status,
+          stale: status.stale,
+          lastError: status.lastError,
+          lastSeen: status.lastSeen,
+          sourceKey,
+        };
+      })
+    : [];
   ws.send(
     JSON.stringify({
       v: 1,
@@ -859,6 +1038,7 @@ function sendState(ws, page_id) {
       pages,
       current_page: targetPage,
       buttons,
+      widgets,
       // Kept for clients that predate per-page labels: it mirrors the flag of
       // the page being sent, so those builds follow the page too rather than
       // freezing on the last deck-wide value they were given.
@@ -956,6 +1136,10 @@ app.use(express.static(clientPath));
 app.use((req, res) => res.sendFile(path.join(clientPath, "index.html")));
 
 server.listen(PORT, "0.0.0.0", () => {
+  // FEATURE: Live widgets — build the pollers before the first client can
+  // connect, so a phone that opens a page with a widget on it never waits a
+  // whole refresh interval for its first numbers.
+  syncWidgets();
   // Warm the application list in the background so the first time someone opens
   // the picker it is already there. Never awaited: a slow enumeration must not
   // hold up the host.

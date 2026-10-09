@@ -40,6 +40,11 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { ActionIcon, ButtonFace, Icon } from "../icons.jsx";
+import { WIDGET_TYPES, widgetTypeById } from "../widgets/registry.js";
+import { spanStyle, totalCells } from "../widgets/layout.js";
+import { WidgetTile } from "../widgets/WidgetTile.jsx";
+import { SystemMonitorWidget } from "../widgets/SystemMonitorWidget.jsx";
+import WidgetPanel from "../widgets/WidgetPanel.jsx";
 import {
   ACTION_BY_ID,
   ACTION_CATEGORIES,
@@ -180,6 +185,11 @@ export default function DesktopApp({
   wsRef,
   switchPage,
   pageButtonsCacheRef,
+  // FEATURE: Live widgets — tile config and the latest frame per tile, both
+  // forwarded from the socket owner in App.jsx exactly like stats and volume,
+  // so the editor tiles tick at the same rate as the phone's.
+  widgets,
+  widgetData,
 }) {
   const buttonCount = buttons.length;
   const canvasRef = useRef(null);
@@ -192,6 +202,27 @@ export default function DesktopApp({
   const [form, setForm] = useState({});
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  // FEATURE: Live widgets — the tile drawer's state, kept beside the key
+  // drawer's so a click can never leave both selected at once.
+  const [selectedWidgetId, setSelectedWidgetId] = useState(null);
+  const [widgetForm, setWidgetForm] = useState({});
+  const [savedWidgetForm, setSavedWidgetForm] = useState(null);
+  const [widgetSources, setWidgetSources] = useState([]);
+  const [agentInfo, setAgentInfo] = useState(null);
+  const [testingSource, setTestingSource] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+  // FEATURE: Live widgets — "add a remote host" lives in a draft until it is
+  // saved, so a half-typed hostname can never reach the database.
+  const [addingSource, setAddingSource] = useState(false);
+  const [sourceDraft, setSourceDraft] = useState(() => ({
+    name: "New host",
+    host: "",
+    port: 22,
+    username: "",
+    key_path: "",
+    use_agent: false,
+    refresh_ms: 10000,
+  }));
   const [activeId, setActiveId] = useState(null); // dnd drag overlay
   const [audioDevices, setAudioDevices] = useState([]);
   const [inputDevices, setInputDevices] = useState([]);
@@ -285,6 +316,20 @@ export default function DesktopApp({
   // toggle look like it applied instantly.
   const [savedForm, setSavedForm] = useState(null);
 
+  // FEATURE: Live widgets — the page's tiles, taken from the same top-level list
+  // the phone uses. `pages` carries no widget of its own: the host sends widgets
+  // beside `buttons` in the state frame, exactly as `buttons` arrives.
+  //
+  // Declared here, before the layout effect that consumes it: a const declared
+  // later in the same component body is in its temporal dead zone for the whole
+  // render, and the effect's measure() runs inside that render. Referencing it
+  // from below where it is defined crashed the deck with "Cannot access 'Ft'
+  // before initialization" and a blank window.
+  const widgetsForPage = useMemo(
+    () => widgets.filter((w) => w.page_id === currentPage),
+    [widgets, currentPage],
+  );
+
   // Derive button counts from the cache ref + live buttons for current page
   // Try every column count and keep whichever yields the largest key: the
   // window is freely resizable, so a fixed guess is wrong at most sizes. Capped
@@ -305,7 +350,11 @@ export default function DesktopApp({
       if (w <= 0 || h <= 0) return;
 
       // +1 for the trailing add slot, which occupies a cell like any key.
-      const count = Math.max(1, buttonCount + 1);
+      // FEATURE: Live widgets — cells, not items. The old formula counted keys,
+      // which silently under-counted a 2x2 key (it is four cells' worth) and
+      // would have squeezed a 2x2 widget into a row that cannot hold it. The
+      // trailing +1 is the add slot, which occupies a cell like any key.
+      const count = 1 + totalCells(buttons) + totalCells(widgetsForPage);
       let best = { cols: 1, size: 0 };
       for (let cols = 1; cols <= Math.min(count, 8); cols++) {
         const rows = Math.ceil(count / cols);
@@ -338,7 +387,10 @@ export default function DesktopApp({
       ro.disconnect();
       window.removeEventListener("resize", measure);
     };
-  }, [buttonCount]);
+  // widgetsForPage is a memoised array, so listing it is enough; `buttons` is
+  // what the count is derived from and is already tracked via buttonCount.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [buttonCount, widgetsForPage]);
 
   const pageButtonCounts = useMemo(() => {
     const m = {};
@@ -360,11 +412,11 @@ export default function DesktopApp({
   // over — closestCenter always returns the nearest droppable, which meant
   // releasing anywhere replaced whichever key happened to be closest.
   // Reordering keys keeps closestCenter, where "nearest" is what you want.
-  // Library rows — actions and applications alike — are dropped by pointer
-  // position; keys being reordered use the centre-distance strategy.
+  // Library rows — actions, applications and widgets alike — are dropped by
+  // pointer position; keys being reordered use the centre-distance strategy.
   const collisionDetection = useCallback((args) => {
     const id = String(args.active.id);
-    if (id.startsWith("action:") || id.startsWith("app:"))
+    if (id.startsWith("action:") || id.startsWith("app:") || id.startsWith("widget:"))
       return pointerWithin(args);
     return closestCenter(args);
   }, []);
@@ -455,6 +507,7 @@ export default function DesktopApp({
   // When a different button is selected, populate the form
   const selectBtn = useCallback(
     (btn) => {
+      setSelectedWidgetId(null);
       setSelectedBtn(btn.id);
       setSelectedPage(currentPage);
       const nextForm = {
@@ -547,6 +600,236 @@ export default function DesktopApp({
       );
     return norm(resolvedForm) !== norm(savedForm);
   }, [resolvedForm, savedForm, resolvedSelected]);
+
+  const selectedWidget = useMemo(
+    () => widgetsForPage.find((w) => w.id === selectedWidgetId) || null,
+    [widgetsForPage, selectedWidgetId],
+  );
+
+  const widgetDirty = useMemo(() => {
+    if (!savedWidgetForm) return false;
+    return JSON.stringify(widgetForm) !== JSON.stringify(savedWidgetForm);
+  }, [widgetForm, savedWidgetForm]);
+
+  // The source list is needed to draw ANY tile's host line, which every tile
+  // draws on every render — including before anything is selected. Fetching it
+  // on selection only meant a fresh start showed "This PC" above every remote
+  // tile until you happened to click one, which read as the widget having lost
+  // its configuration. It is also re-read when the widget set changes, since a
+  // page switch can bring in tiles bound to a host this client has not seen.
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      // Normalised to a list: this client is loopback and bypasses the host's
+      // token gate, but a payload that is not an array must still not be able to
+      // reach state — the same shape crashed the phone entirely.
+      fetch(`${api()}/widget-sources`)
+        .then((r) => r.json())
+        .then((list) => !cancelled && setWidgetSources(Array.isArray(list) ? list : []))
+        .catch(() => {});
+      fetch(`${api()}/widget-sources/agent-status`)
+        .then((r) => r.json())
+        .then((info) => !cancelled && setAgentInfo(info))
+        .catch(() => !cancelled && setAgentInfo(null));
+    };
+    load();
+    // Redundant with selection, and deliberately so: opening the drawer wants
+    // the freshest list, and a selected tile is not guaranteed to change.
+    if (selectedWidget) load();
+    // `load` is defined inside the effect on purpose: it closes over `cancelled`,
+    // so listing it as a dependency would defeat the guard.
+    return () => {
+      cancelled = true;
+    };
+  }, [widgets, selectedWidget]);
+
+  // ── Live widgets ─────────────────────────────────────────────────────────
+  // FEATURE: Live widgets — tiles are created from the library like keys, and
+  // edited in their own drawer. Both live here so the deck stays a single
+  // surface with two kinds of occupant.
+
+  async function createWidget(typeId) {
+    if (!currentPage) return;
+    const type = widgetTypeById(typeId);
+    // Defaults to the local machine: a new widget shows something immediately,
+    // and the editor is where you point it at a host.
+    const created = await fetch(`${api()}/widgets`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        page_id: currentPage,
+        type: type.id,
+        label: type.name,
+        icon: type.icon,
+        size: type.defaultSize,
+        source_id: null,
+        config: { metrics: type.defaultMetrics },
+      }),
+    }).then((r) => r.json());
+
+    const data = await reloadPages();
+    // Widgets arrive nested inside pages from GET /api/pages, the same way
+    // buttons do, so the refresh looks there rather than in `buttons`.
+    const widget = (data.find((p) => p.id === currentPage)?.widgets || []).find(
+      (w) => w.id === created?.id,
+    );
+    if (widget) selectWidget(widget);
+  }
+
+  function selectWidget(widget) {
+    setSelectedBtn(null);
+    setSelectedWidgetId(widget.id);
+    setSelectedPage(currentPage);
+    const initial = {
+      label: widget.label || "",
+      icon: widget.icon || "server",
+      color: widget.color || "#185FA5",
+      size: widget.size || "2x2",
+      source_id: widget.source_id ?? null,
+      config: { metrics: widget.config?.metrics || [] },
+    };
+    setWidgetForm(initial);
+    setSavedWidgetForm(initial);
+    setTestResult(null);
+  }
+
+  /**
+   * Saves the widget drawer. `overrides` lets a caller stamp a value that the
+   * form state does not have yet — adding a host binds it in the same breath,
+   * and reading it from `widgetForm` would race React's state update.
+   */
+  async function saveWidget(overrides = {}) {
+    if (!selectedWidget) return;
+    const body = { ...widgetForm, ...overrides };
+    await fetch(`${api()}/widgets/${selectedWidget.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    // The widget itself arrives on the next state frame; the drawer shows its
+    // own optimistic copy until then.
+    setWidgetForm(body);
+    setSavedWidgetForm(body);
+  }
+
+  async function deleteWidget(id) {
+    askConfirm("Delete this widget?", async () => {
+      await fetch(`${api()}/widgets/${id}`, { method: "DELETE" });
+      setSelectedWidgetId(null);
+    });
+  }
+
+  async function deleteSource(id) {
+    askConfirm("Delete this data source?", async () => {
+      await fetch(`${api()}/widget-sources/${id}`, { method: "DELETE" });
+      const fresh = await fetch(`${api()}/widget-sources`).then((r) => r.json());
+      setWidgetSources(fresh);
+      // A widget pointing at it is repointed at the local machine by the host,
+      // so mirror that here rather than leaving the drawer showing a dead id.
+      patchWidgetSelectionAfterSourceDelete(id, fresh);
+    });
+  }
+
+  function patchWidgetSelectionAfterSourceDelete(id, sources) {
+    if (selectedWidget && selectedWidget.source_id === id) {
+      setWidgetForm((f) => ({ ...f, source_id: null }));
+    }
+    void sources;
+  }
+
+  async function testSelectedSource() {
+    const sourceId = widgetForm.source_id;
+    if (!sourceId) return;
+    setTestingSource(true);
+    setTestResult(null);
+    try {
+      const result = await fetch(`${api()}/widget-sources/${sourceId}/test`, {
+        method: "POST",
+      }).then((r) => r.json());
+      setTestResult(result);
+    } catch (e) {
+      setTestResult({ ok: false, reason: e.message });
+    } finally {
+      setTestingSource(false);
+    }
+  }
+
+  /**
+   * Tests the host being typed, before it exists. Same collector and same probe
+   * the poller uses — the editor just reaches it without a saved row, so the
+   * user can find a bad key path or a firewall before saving anything.
+   */
+  async function testSourceDraft() {
+    setTestingSource(true);
+    setTestResult(null);
+    try {
+      const result = await fetch(`${api()}/widget-sources/test`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(sourceDraft),
+      }).then((r) => r.json());
+      setTestResult(result);
+    } catch (e) {
+      setTestResult({ ok: false, reason: e.message });
+    } finally {
+      setTestingSource(false);
+    }
+  }
+
+  /**
+   * Saves the draft host, then binds it to the widget in the same breath.
+   *
+   * The bind is deliberate: without it a user who adds a host and closes the
+   * drawer has a configured host that no tile is using, which looks like the
+   * feature did nothing. The widget is written immediately rather than waiting
+   * for the Save button, so the tile starts reporting as soon as the host
+   * exists.
+   */
+  async function saveSourceDraft() {
+    const created = await fetch(`${api()}/widget-sources`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(sourceDraft),
+    }).then((r) => r.json());
+    if (!created?.id) {
+      setTestResult({ ok: false, reason: "the host could not be saved" });
+      return;
+    }
+
+    // It has to appear in the dropdown at once: an edit that only takes effect
+    // after a reload reads as broken.
+    const fresh = await fetch(`${api()}/widget-sources`).then((r) => r.json());
+    setWidgetSources(fresh);
+    setAddingSource(false);
+    setTestResult(null);
+
+    await saveWidget({ source_id: created.id });
+    const savedWidget = fetch(`${api()}/widgets/${selectedWidget?.id}`)
+      .then((r) => r.json())
+      .catch(() => null);
+    void savedWidget;
+  }
+
+  /** Opens the host form with the default key path already filled in. */
+  async function startAddSource() {
+    setTestResult(null);
+    setAddingSource(true);
+    // The host resolves this, because only it knows the profile it runs under
+    // — and handing ssh2 a `~` it will not expand is the classic failure.
+    try {
+      const { path } = await fetch(`${api()}/widget-sources/default-key`).then((r) =>
+        r.json(),
+      );
+      setSourceDraft((d) => ({ ...d, key_path: path || d.key_path }));
+    } catch {
+      /* leave whatever was there; the field is editable either way */
+    }
+  }
+
+  function cancelAddSource() {
+    setAddingSource(false);
+    setTestResult(null);
+  }
 
   // ── CRUD ──────────────────────────────────────────────────────────────────
 
@@ -929,6 +1212,13 @@ export default function DesktopApp({
         return;
       }
 
+      // FEATURE: Live widgets — a widget type drops as a tile, never as a key.
+      // It goes to its own endpoint because it has no action to execute.
+      if (dragged.startsWith("widget:")) {
+        createWidget(dragged.slice("widget:".length));
+        return;
+      }
+
       if (active.id === over.id) return;
       setButtons((prev) => {
         const oldIndex = prev.findIndex((b) => b.id === active.id);
@@ -955,7 +1245,11 @@ export default function DesktopApp({
     },
     // `applications` matters: the handler looks the dropped app's name up to
     // label the key, so a stale list would silently drop back to "New Button"
-    // for anything installed since this callback was made.
+    // for anything installed since this callback was made. `createWidget` is a
+    // plain async function in the component body, so it is recreated on every
+    // render and listing it would defeat the memo entirely — it closes over the
+    // same state this callback already depends on.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [wsRef, setButtons, assignAction, createWithAction, applications],
   );
 
@@ -967,7 +1261,9 @@ export default function DesktopApp({
   const activeBtn = buttons.find((b) => b.id === activeId);
   // A library row is being dragged rather than a key — used for the ghost and
   // for lighting up drop targets. Applications count: they drop onto keys the
-  // same way actions do.
+  // same way actions do. Widgets count too, though they only ever land on the
+  // add slot: a widget is a tile, so dropping one over a key would be asking a
+  // question the drag never posed.
   const activeIdStr = String(activeId ?? "");
   const activeAction = activeIdStr.startsWith("action:")
     ? ACTION_BY_ID[activeIdStr.slice("action:".length)]
@@ -978,7 +1274,12 @@ export default function DesktopApp({
               ?.name ?? "Application",
           icon: "rocket",
         }
-      : null;
+      : activeIdStr.startsWith("widget:")
+        ? {
+            name: widgetTypeById(activeIdStr.slice("widget:".length)).name,
+            icon: widgetTypeById(activeIdStr.slice("widget:".length)).icon,
+          }
+        : null;
   const currentRule = profileRules.find((r) => r.page_id === currentPage);
   const phoneDevices = useMemo(
     () =>
@@ -1114,6 +1415,37 @@ export default function DesktopApp({
                       droppingAction={!!activeAction}
                     />
                   ))}
+                  {/* FEATURE: Live widgets — tiles after the keys, in the same
+                      grid, so a deck reads as one surface. They are not keys,
+                      so they sit outside the SortableContext: ordering them
+                      among the keys is a separate concern and the AddSlot is
+                      the drop target for a new one. */}
+                  {widgetsForPage.map((widget) => (
+                    <div
+                      key={widget.id}
+                      style={{
+                        ...spanStyle(widget.size),
+                        minWidth: 0,
+                        minHeight: 0,
+                      }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        selectWidget(widget);
+                      }}
+                    >
+                      <WidgetTile
+                        widget={widget}
+                        data={widgetData?.[widget.id] || widget.data || {}}
+                        sources={widgetSources}
+                        selected={selectedWidgetId === widget.id}
+                      >
+                        <SystemMonitorWidget
+                          widget={widget}
+                          data={widgetData?.[widget.id] || widget.data || {}}
+                        />
+                      </WidgetTile>
+                    </div>
+                  ))}
                   {/* Empty well — click to add, or drop an action to create */}
                   <AddSlot onClick={addButton} />
                 </div>
@@ -1154,28 +1486,58 @@ export default function DesktopApp({
               }}
             />
 
-            {/* ── Inspector: sits under the canvas, like the deck's own panel ── */}
-            <PropertyPanel
-              btn={selectedBtnData}
-              form={resolvedForm}
-              saving={saving}
-              saved={saved}
-              dirty={isDirty}
-              audioDevices={audioDevices}
-              inputDevices={inputDevices}
-              audioSessions={audioSessions}
-              applications={applications}
-              appIcons={appIcons}
-              onNeedIcons={ensureAppIcons}
-              onRefreshApplications={() => loadApplications(true)}
-              onPatch={patchForm}
-              onSave={saveButton}
-              onRevert={revertForm}
-              onDelete={deleteButton}
-              onUploadIcon={uploadIcon}
-              onUploadSound={uploadSound}
-              onDeleteSound={deleteSound}
-            />
+            {/* ── Inspector: sits under the canvas, like the deck's own panel ──
+                FEATURE: Live widgets — one drawer, two editors. A selected tile
+                takes the drawer over, because a key and a tile are never
+                selected at once and the panel geometry is the same. */}
+            {selectedWidget ? (
+              <WidgetPanel
+                widget={selectedWidget}
+                form={widgetForm}
+                dirty={widgetDirty}
+                sources={widgetSources}
+                agentInfo={agentInfo}
+                testing={testingSource}
+                testResult={testResult}
+                onPatch={(patch) => setWidgetForm((f) => ({ ...f, ...patch }))}
+                onSetSources={setWidgetSources}
+                onTest={() =>
+                  addingSource ? testSourceDraft() : testSelectedSource()
+                }
+                onSave={() => saveWidget()}
+                onRevert={() => setWidgetForm(savedWidgetForm || {})}
+                onDelete={() => deleteWidget(selectedWidget.id)}
+                onDeleteSource={deleteSource}
+                addingSource={addingSource}
+                draft={sourceDraft}
+                onStartAddSource={startAddSource}
+                onDraft={setSourceDraft}
+                onCancelAddSource={cancelAddSource}
+                onSaveSource={saveSourceDraft}
+              />
+            ) : (
+              <PropertyPanel
+                btn={selectedBtnData}
+                form={resolvedForm}
+                saving={saving}
+                saved={saved}
+                dirty={isDirty}
+                audioDevices={audioDevices}
+                inputDevices={inputDevices}
+                audioSessions={audioSessions}
+                applications={applications}
+                appIcons={appIcons}
+                onNeedIcons={ensureAppIcons}
+                onRefreshApplications={() => loadApplications(true)}
+                onPatch={patchForm}
+                onSave={saveButton}
+                onRevert={revertForm}
+                onDelete={deleteButton}
+                onUploadIcon={uploadIcon}
+                onUploadSound={uploadSound}
+                onDeleteSound={deleteSound}
+              />
+            )}
           </div>
 
           <ActionLibrary
@@ -2107,6 +2469,32 @@ const AppRow = memo(function AppRow({ app, icon }) {
 
 // Unsearched, the list is capped: a few hundred rows is not something anyone
 // scrolls, and the search field above is the way in.
+/** A live-widget type in the library. Draggable onto the add well. */
+function WidgetTypeRow({ type }) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `widget:${type.id}`,
+  });
+  return (
+    <div
+      ref={setNodeRef}
+      {...listeners}
+      {...attributes}
+      title={type.description}
+      style={{
+        ...styles.actionRow,
+        ...(isDragging ? styles.actionRowDragging : {}),
+      }}
+    >
+      <ActionIcon name={type.icon} size={15} />
+      <span style={styles.actionRowName}>{type.name}</span>
+      <span style={styles.appTag}>live</span>
+      <span style={styles.actionRowGrip}>
+        <Icon name="drag" size={13} />
+      </span>
+    </div>
+  );
+}
+
 const APP_PREVIEW_LIMIT = 30;
 
 const ActionLibrary = memo(function ActionLibrary({
@@ -2223,6 +2611,28 @@ const ActionLibrary = memo(function ActionLibrary({
             );
           })
         )}
+
+        {/* FEATURE: Live widgets — a separate group rather than entries in
+            ACTION_CATEGORIES, because an action becomes a pressable key and
+            executes an action; a widget becomes a tile and receives data. */}
+        <div>
+          <button
+            style={styles.catHead}
+            aria-expanded
+            onClick={() => setAppsExpanded((v) => !v)}
+          >
+            <span style={{ ...styles.catChevron, transform: "rotate(90deg)" }}>
+              <Icon name="chevronRight" size={13} />
+            </span>
+            <span style={styles.catName}>Live widgets</span>
+            <span style={styles.catCount}>{WIDGET_TYPES.length}</span>
+          </button>
+          <div style={styles.catItems}>
+            {WIDGET_TYPES.map((type) => (
+              <WidgetTypeRow key={type.id} type={type} />
+            ))}
+          </div>
+        </div>
 
         {appMatches.length > 0 ? (
           <div>

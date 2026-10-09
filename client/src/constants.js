@@ -135,6 +135,39 @@ export function getApiUrl() {
   return `http://${host}:${resolvePort()}/api`;
 }
 
+/**
+ * A phone-side REST call that carries this device's credential.
+ *
+ * The host gates every /api route behind a token for anything that is not
+ * loopback, so a phone's plain fetch() is answered 401 with a JSON *object* —
+ * and a caller that assumes an array then poisons its state with it. The
+ * desktop does not need this (it is loopback and bypasses the gate), which is
+ * exactly why the bug only ever showed on Android.
+ */
+export function authFetch(path, options = {}) {
+  loadPairConfig();
+  const base = getApiUrl();
+  if (!base) return Promise.reject(new Error("not paired"));
+
+  const headers = { ...(options.headers || {}) };
+  const token = getPairedToken();
+  if (token) headers["X-EchoDeck-Token"] = token;
+  if (options.body !== undefined && !headers["Content-Type"])
+    headers["Content-Type"] = "application/json";
+
+  return fetch(`${base}${path}`, { ...options, headers });
+}
+
+/** A JSON body that is guaranteed to be an array, whatever arrived. */
+export async function jsonArray(response) {
+  try {
+    const body = await response.json();
+    return Array.isArray(body) ? body : [];
+  } catch {
+    return [];
+  }
+}
+
 export function isElectron() {
   return typeof window !== "undefined" && !!window.__ECHODECK__?.isElectron;
 }
