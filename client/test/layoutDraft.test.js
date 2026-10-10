@@ -204,9 +204,20 @@ test("moveToPage re-parents the tile, records a move, and re-densifies BOTH page
     { kind: "button", id: 2, fromPage: 1, toPage: 2, toSlot: 2 },
   ]);
   assert.deepEqual(diff.detachments, []);
-  // Membership changed on both pages, so no pure-permutation reorder is emitted
-  // (the host move route re-densifies; applyReorder rejects partial coverage).
-  assert.deepEqual(diff.reordersByPage, {});
+  // Membership changed on both pages, so BOTH are affected pages and each gets
+  // its authoritative dense batch. The host applies moves first, then each
+  // batch — which covers exactly the post-move membership (complete permutation).
+  assert.deepEqual(diff.reordersByPage, {
+    1: [
+      { kind: "button", id: 1, slot: 0 },
+      { kind: "button", id: 3, slot: 1 },
+    ],
+    2: [
+      { kind: "widget", id: 50, slot: 0 },
+      { kind: "widget", id: 51, slot: 1 },
+      { kind: "button", id: 2, slot: 2 },
+    ],
+  });
 });
 
 test("moveToPage to the current page is a no-op", () => {
@@ -247,6 +258,14 @@ test("detach targets the Unfiled page via a lazily-called callback", () => {
   assert.deepEqual(diff.moves, [
     { kind: "widget", id: 9, fromPage: 1, toPage: 7, toSlot: 0 },
   ]);
+  // Pages 1 (lost two tiles), 7 (gained one) and 999 (the Unfiled page) all
+  // have a final ordered membership that differs from base -> each gets its
+  // authoritative dense batch, covering exactly the post-move membership.
+  assert.deepEqual(diff.reordersByPage, {
+    1: [{ kind: "button", id: 2, slot: 0 }],
+    7: [{ kind: "widget", id: 9, slot: 0 }],
+    999: [{ kind: "button", id: 1, slot: 0 }],
+  });
 });
 
 test("detach of an unknown id does not call the callback", () => {
@@ -275,8 +294,10 @@ test("diff: touching one tile of 20 produces exactly one sizePatch and no other-
 
   assert.equal(diff.sizePatches.length, 1);
   assert.deepEqual(diff.sizePatches, [{ kind: "button", id: 15, size: "2x2" }]);
-  // A size change must never reshuffle slots on OTHER pages.
-  for (const p of Object.keys(diff.reordersByPage)) assert.equal(p, "2");
+  // A pure size change alters no page's order or membership: NO reorder batch
+  // at all (on ANY page). deepEqual, not a keys-loop — the loop is vacuously
+  // true when reordersByPage is {}.
+  assert.deepEqual(diff.reordersByPage, {});
   assert.deepEqual(diff.moves, []);
   assert.deepEqual(diff.detachments, []);
 });
@@ -314,4 +335,107 @@ test("diff: two no-op drafts from the same base report all four keys empty", () 
   const b = reorder(base, key("button", 1), key("button", 1)); // active === over
   assert.deepEqual(diffDraft(base, a), EMPTY);
   assert.deepEqual(diffDraft(base, b), EMPTY);
+});
+
+// ---- diffDraft fidelity: reorder + move combinations (review fix) -----------
+// The finding: a page that was reordered AND gained/lost a tile previously got
+// no reorder batch (membership-gated), silently losing the survivor permutation
+// on host replay. diffDraft now emits the draft's full dense order for EVERY
+// affected page. These tests pin that contract, including a host-replay check.
+
+// Simulate the host's Save order: apply moves/detachments (re-parent), then
+// each page's reorder batch as an authoritative complete permutation (the host's
+// applyReorder replaces the page's order wholesale). Result: page_id -> key list.
+const replayDiff = (base, diff) => {
+  const pages = new Map();
+  const list = (p) => {
+    if (!pages.has(p)) pages.set(p, []);
+    return pages.get(p);
+  };
+  for (const it of base.items) list(it.page_id).push(it.key);
+  for (const m of [...diff.moves, ...diff.detachments]) {
+    const from = list(m.fromPage);
+    const i = from.indexOf(key(m.kind, m.id));
+    if (i >= 0) from.splice(i, 1);
+  }
+  for (const m of diff.moves) list(m.toPage).push(key(m.kind, m.id));
+  for (const [pageId, batch] of Object.entries(diff.reordersByPage)) {
+    pages.set(Number(pageId), batch.map((e) => key(e.kind, e.id)));
+  }
+  return pages;
+};
+
+test("diff fidelity: survivor reorder + move-off on the SAME page emits both batches", () => {
+  // Page 1: A(0), B(1), C(2); page 2: W(0). User reorders survivors to C,A and
+  // moves B to page 2 in one session — exactly the scenario that lost data.
+  const base = createDraft([
+    { kind: "button", id: 1, page_id: 1, slot: 0, size: "1x1" }, // A
+    { kind: "button", id: 2, page_id: 1, slot: 1, size: "1x1" }, // B
+    { kind: "button", id: 3, page_id: 1, slot: 2, size: "1x1" }, // C
+    { kind: "widget", id: 50, page_id: 2, slot: 0, size: "2x2" }, // W
+  ]);
+  const draft = moveToPage(reorder(base, key("button", 3), key("button", 1)), key("button", 2), 2);
+  assert.deepEqual(pageKeys(draft, 1), [key("button", 3), key("button", 1)]); // C, A
+  const diff = diffDraft(base, draft);
+
+  // The reorder batch for page 1 MUST be present and pin the survivor order.
+  assert.deepEqual(diff.reordersByPage["1"], [
+    { kind: "button", id: 3, slot: 0 },
+    { kind: "button", id: 1, slot: 1 },
+  ]);
+  // Page 2 gained B, so it is affected too and gets its authoritative batch.
+  assert.deepEqual(diff.reordersByPage["2"], [
+    { kind: "widget", id: 50, slot: 0 },
+    { kind: "button", id: 2, slot: 1 },
+  ]);
+  assert.deepEqual(diff.moves, [
+    { kind: "button", id: 2, fromPage: 1, toPage: 2, toSlot: 1 },
+  ]);
+  // Host replay must reproduce the draft exactly, page for page.
+  const replay = replayDiff(base, diff);
+  assert.deepEqual(replay.get(1), pageKeys(draft, 1));
+  assert.deepEqual(replay.get(2), pageKeys(draft, 2));
+});
+
+test("diff fidelity: page that GAINS a tile after a survivor reorder emits its batch", () => {
+  const base = createDraft([
+    { kind: "button", id: 1, page_id: 1, slot: 0, size: "1x1" },
+    { kind: "widget", id: 50, page_id: 2, slot: 0, size: "2x2" },
+    { kind: "widget", id: 51, page_id: 2, slot: 1, size: "2x2" },
+  ]);
+  // Reorder page 2 survivors (51 before 50), then move page 1's tile onto it.
+  const draft = moveToPage(reorder(base, key("widget", 51), key("widget", 50)), key("button", 1), 2);
+  const diff = diffDraft(base, draft);
+  assert.deepEqual(diff.reordersByPage["2"], [
+    { kind: "widget", id: 51, slot: 0 },
+    { kind: "widget", id: 50, slot: 1 },
+    { kind: "button", id: 1, slot: 2 },
+  ]);
+  // Page 1 lost its only tile: no batch (the move fully describes the empty page).
+  assert.ok(!("1" in diff.reordersByPage));
+  const replay = replayDiff(base, diff);
+  assert.deepEqual(replay.get(1), []);
+  assert.deepEqual(replay.get(2), pageKeys(draft, 2));
+});
+
+test("diff minimality: a page untouched by the draft emits no reorder batch", () => {
+  const base = createDraft([
+    { kind: "button", id: 1, page_id: 1, slot: 0, size: "1x1" },
+    { kind: "button", id: 2, page_id: 1, slot: 1, size: "1x1" },
+    { kind: "button", id: 3, page_id: 2, slot: 0, size: "1x1" },
+    { kind: "button", id: 4, page_id: 2, slot: 1, size: "1x1" },
+    { kind: "button", id: 5, page_id: 3, slot: 0, size: "1x1" },
+    { kind: "button", id: 6, page_id: 3, slot: 1, size: "1x1" },
+  ]);
+  let draft = reorder(base, key("button", 2), key("button", 1)); // page 1 reordered
+  draft = moveToPage(draft, key("button", 3), 9); // page 2 lost a tile, page 9 gained one
+  const diff = diffDraft(base, draft);
+  // Exactly the affected pages emit batches; the untouched page 3 emits nothing.
+  assert.deepEqual(Object.keys(diff.reordersByPage).sort(), ["1", "2", "9"]);
+  assert.equal(diff.reordersByPage["3"], undefined);
+  const replay = replayDiff(base, diff);
+  assert.deepEqual(replay.get(3), pageKeys(base, 3)); // unchanged stays unchanged
+  assert.deepEqual(replay.get(1), pageKeys(draft, 1));
+  assert.deepEqual(replay.get(2), pageKeys(draft, 2));
+  assert.deepEqual(replay.get(9), pageKeys(draft, 9));
 });

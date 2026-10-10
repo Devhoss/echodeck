@@ -66,11 +66,15 @@
  * The four top-level keys are the plan's contract. Value shapes (picked here,
  * consumed by Task 4.3 / Save):
  *   reordersByPage: { [String(pageId)]: [{ kind, id, slot }, …] }
- *       Only pages whose MEMBERSHIP is identical to base but whose slot ORDER
- *       changed. Each entry is the FULL dense 0..n-1 batch for that page — the
- *       host's applyReorder is all-or-nothing, so a page's reorder must cover
- *       every item on it. Pages whose membership changed (an item moved on/off)
- *       get NO reorder here; their re-densification rides the host move route.
+ *       Every AFFECTED page — its ordered {kind,id} membership in the draft
+ *       differs from base (pure reorder, gained/lost a tile via moveToPage or
+ *       detach, or BOTH in one session) — gets its FULL dense 0..n-1 order
+ *       batch; untouched pages emit nothing. The host applies moves and
+ *       detachments first (re-parenting tiles), then each per-page batch;
+ *       because a batch equals the draft's final dense order it covers exactly
+ *       the post-move membership of that page, satisfying the host's
+ *       all-or-nothing applyReorder (complete-permutation) rule. A page with
+ *       no items left in the draft emits nothing (the moves fully describe it).
  *   sizePatches:    [{ kind, id, size }, …]  one per tile whose size changed.
  *   moves:          [{ kind, id, fromPage, toPage, toSlot }, …]
  *       Cross-page moves; excludes detaches. `toSlot` is the tile's dense slot
@@ -247,17 +251,16 @@ export function diffDraft(base, draft) {
     ...draft.items.map((it) => it.page_id),
   ]);
   for (const page of pages) {
-    const baseList = pageOf(base, page).map((it) => it.key);
     const draftPage = pageOf(draft, page);
-    const draftList = draftPage.map((it) => it.key);
-
-    const sameMembership =
-      baseList.length === draftList.length &&
-      draftList.every((k) => baseList.includes(k));
-    const orderChanged =
-      sameMembership && baseList.some((k, i) => k !== draftList[i]);
-
-    if (orderChanged) {
+    if (draftPage.length === 0) continue; // emptied by moves/detaches: no order to pin
+    const basePage = pageOf(base, page);
+    // Affected = the draft's ordered {kind,id} membership differs from base's:
+    // order changed, membership changed (move/detach on or off), or both. Emit
+    // the draft's full dense batch so a reorder+move session round-trips fully.
+    const affected =
+      basePage.length !== draftPage.length ||
+      basePage.some((it, i) => it.key !== draftPage[i].key);
+    if (affected) {
       reordersByPage[String(page)] = draftPage.map((it, i) => ({
         kind: it.kind,
         id: it.id,
