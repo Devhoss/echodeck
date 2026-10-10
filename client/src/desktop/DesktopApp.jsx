@@ -13,7 +13,6 @@
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useRef,
   useState,
   memo,
@@ -41,8 +40,10 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { ActionIcon, ButtonFace, Icon } from "../icons.jsx";
 import { WIDGET_TYPES, widgetTypeById } from "../widgets/registry.js";
-import { spanStyle, totalCells } from "../widgets/layout.js";
 import { WidgetTile } from "../widgets/WidgetTile.jsx";
+import { TILE_SIZES } from "../layout/deckLayout.js";
+import { useDeckLayout } from "../layout/useDeckLayout.js";
+import { mergeLayout } from "../layout/layoutSettings.js";
 import { SystemMonitorWidget } from "../widgets/SystemMonitorWidget.jsx";
 import WidgetPanel from "../widgets/WidgetPanel.jsx";
 import {
@@ -105,6 +106,28 @@ const emptyCondition = () => ({
   operator: "equals",
   value: "",
 });
+
+// Sortable dnd id for a deck tile. Buttons keep their raw id so the action/app
+// drop paths that read `over.id` as a button id are unchanged; widgets are
+// namespaced so a numeric widget id can never collide with a numeric button id,
+// and so a reorderable tile ("widgettile:<id>") is never mistaken for a library
+// drag of a widget type ("widget:<type>").
+const WIDGET_TILE_PREFIX = "widgettile:";
+function tileSortKey(it) {
+  return it.kind === "widget" ? `${WIDGET_TILE_PREFIX}${it.id}` : it.id;
+}
+
+// Order-independent membership stamp of a deck (sorted "kind:id" keys). The
+// optimistic reorder overlay carries it so deckItems can tell whether the
+// overlay still describes THIS set of tiles — a slot permutation from the host
+// keeps the set (overlay agrees or is harmless), while any add/remove changes
+// it and the overlay is ignored so real slots take over. No effect needed.
+function deckSignature(list) {
+  return list
+    .map((it) => `${it.kind}:${it.id}`)
+    .sort()
+    .join(",");
+}
 
 function parseDeviceName(userAgent) {
   if (!userAgent) return "Phone";
@@ -191,12 +214,17 @@ export default function DesktopApp({
   widgets,
   widgetData,
 }) {
-  const buttonCount = buttons.length;
   const canvasRef = useRef(null);
-  // Keys are sized to the space the canvas actually has, so the whole deck is
-  // always visible. Previously they were a fixed 104px and the canvas scrolled,
-  // which meant adding a key could push it out of sight behind the drawer.
-  const [deckLayout, setDeckLayout] = useState({ cols: 1, size: 96 });
+  // FEATURE: Responsive layout — the deck's columns/cell/gap and each tile's
+  // placement now come from the shared engine (useDeckLayout below), measured
+  // against this canvas and applied inline, replacing the old hand-rolled
+  // cols/size fit loop that could only ever place uniform 1x1 keys.
+  //
+  // Optimistic merged order. A drag between a key and a tile cannot be stored
+  // in `buttons` alone (widgets have no local setter here), so a reorder writes
+  // a `{ "kind:id": slot }` overlay that deckItems sorts on until the host's
+  // reorder_items echo lands and updates the real slots.
+  const [slotOverride, setSlotOverride] = useState(null);
 
   const [selectedBtn, setSelectedBtn] = useState(null);
   const [form, setForm] = useState({});
@@ -330,67 +358,62 @@ export default function DesktopApp({
     [widgets, currentPage],
   );
 
-  // Derive button counts from the cache ref + live buttons for current page
-  // Try every column count and keep whichever yields the largest key: the
-  // window is freely resizable, so a fixed guess is wrong at most sizes. Capped
-  // at 8 across, mirroring a Stream Deck XL, and capped in size so a two-key
-  // profile does not blow its keys up to fill the window.
-  useLayoutEffect(() => {
-    const el = canvasRef.current;
-    if (!el) return;
+  // FEATURE: Responsive layout — one slot-ordered list of every tile kind, so
+  // the engine interleaves buttons and widgets the way the host arranged them
+  // instead of drawing all keys first. The sort is stable (ES2019), so tied
+  // slots keep their merge order: buttons ahead of widgets. `position` is the
+  // fallback for talking to a host that predates `slot`.
+  //
+  // The optimistic overlay (a mixed drag cannot be stored in `buttons` alone)
+  // is applied only while the deck's membership matches the set it was written
+  // for, checked here at render rather than cleared in an effect: a host echo
+  // that permutes slots keeps the same ids (the overlay agrees with it, or is
+  // redundant), while any add/remove changes the membership and the overlay
+  // naturally stops applying so real `slot`s take over.
+  const deckItems = useMemo(() => {
+    const merged = [
+      ...buttons.map((b) => ({ ...b, kind: "button" })),
+      ...widgetsForPage.map((w) => ({ ...w, kind: "widget" })),
+    ];
+    const activeMap =
+      slotOverride && slotOverride.sig === deckSignature(merged)
+        ? slotOverride.map
+        : null;
+    const eff = (it) =>
+      activeMap?.[`${it.kind}:${it.id}`] ?? it.slot ?? it.position;
+    return merged.sort((a, b) => eff(a) - eff(b));
+  }, [buttons, widgetsForPage, slotOverride]);
 
-    const measure = () => {
-      const gap = 12;
-      const cs = getComputedStyle(el);
-      const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
-      const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
-      const box = el.getBoundingClientRect();
-      const w = box.width - padX;
-      const h = box.height - padY;
-      if (w <= 0 || h <= 0) return;
+  // Layout knobs: desktop resolves the current page's layout_config over
+  // DEFAULT_SETTINGS only (same 3.1 scope as the phone); Phase 6 widens the
+  // first argument to the global scope.
+  const layoutSettings = useMemo(
+    () =>
+      mergeLayout(
+        null,
+        pages.find((p) => p.id === currentPage)?.layout_config,
+      ),
+    [pages, currentPage],
+  );
 
-      // +1 for the trailing add slot, which occupies a cell like any key.
-      // FEATURE: Live widgets — cells, not items. The old formula counted keys,
-      // which silently under-counted a 2x2 key (it is four cells' worth) and
-      // would have squeezed a 2x2 widget into a row that cannot hold it. The
-      // trailing +1 is the add slot, which occupies a cell like any key.
-      const count = 1 + totalCells(buttons) + totalCells(widgetsForPage);
-      let best = { cols: 1, size: 0 };
-      for (let cols = 1; cols <= Math.min(count, 8); cols++) {
-        const rows = Math.ceil(count / cols);
-        const size = Math.floor(
-          Math.min(
-            (w - (cols - 1) * gap) / cols,
-            (h - (rows - 1) * gap) / rows,
-          ),
-        );
-        // >= not >: several column counts often tie on size because the height
-        // is the binding constraint, and on a tie the widest deck is the right
-        // one. Strict > kept the first (narrowest) match and left the keys
-        // huddled in the middle of a wide window.
-        if (size >= best.size) best = { cols, size };
-      }
+  // The engine contract {cols, cell, gap, placements, scrollY}, measured from
+  // canvasRef pre-paint and re-measured on resize by useDeckLayout. placements
+  // align with deckItems order; null until the first measure, so the render
+  // below guards on it.
+  const layout = useDeckLayout(canvasRef, {
+    items: deckItems,
+    settings: layoutSettings,
+  });
 
-      const size = Math.min(104, Math.max(48, best.size));
-      setDeckLayout((prev) =>
-        prev.cols === best.cols && Math.abs(prev.size - size) <= 1
-          ? prev
-          : { cols: best.cols, size },
-      );
-    };
-
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    window.addEventListener("resize", measure);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener("resize", measure);
-    };
-  // widgetsForPage is a memoised array, so listing it is enough; `buttons` is
-  // what the count is derived from and is already tracked via buttonCount.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [buttonCount, widgetsForPage]);
+  // Sortable ids for the unified deck: buttons keep their raw id (unchanged
+  // from the button-only SortableContext), tiles get a distinct prefix so a
+  // numeric widget id can never collide with a numeric button id, and so the
+  // reorderable tile id "widgettile:<id>" is never confused with a library
+  // drag id "widget:<type>".
+  const deckSortableIds = useMemo(
+    () => deckItems.map(tileSortKey),
+    [deckItems],
+  );
 
   const pageButtonCounts = useMemo(() => {
     const m = {};
@@ -1192,8 +1215,11 @@ export default function DesktopApp({
       const dragged = String(active.id);
       if (dragged.startsWith("action:")) {
         const actionType = dragged.slice("action:".length);
+        // A widget tile cannot host an action — dropping onto one is a no-op,
+        // not an assignment to a key that does not exist.
         if (over.id === ADD_SLOT_ID) createWithAction(actionType);
-        else assignAction(String(over.id), actionType);
+        else if (!String(over.id).startsWith(WIDGET_TILE_PREFIX))
+          assignAction(String(over.id), actionType);
         return;
       }
 
@@ -1208,7 +1234,8 @@ export default function DesktopApp({
           ...(appItem ? { label: appItem.name } : {}),
         };
         if (over.id === ADD_SLOT_ID) createWithAction("launch", extra);
-        else assignAction(String(over.id), "launch", extra);
+        else if (!String(over.id).startsWith(WIDGET_TILE_PREFIX))
+          assignAction(String(over.id), "launch", extra);
         return;
       }
 
@@ -1219,45 +1246,55 @@ export default function DesktopApp({
         return;
       }
 
+      // Tile-to-tile reorder over the *unified* deck: buttons and widgets live
+      // in one slot-ordered list now, so a key can be dropped between two tiles
+      // and vice-versa. arrayMove the merged order, dense it back into slots,
+      // and apply optimistically via the overlay (the deckItems memo reads it)
+      // because a mixed order cannot be expressed by `buttons` alone. The
+      // authoritative `reorder_items` send is debounced, and the host's echo
+      // clears the overlay once the real slots land.
       if (active.id === over.id) return;
-      setButtons((prev) => {
-        const oldIndex = prev.findIndex((b) => b.id === active.id);
-        const newIndex = prev.findIndex((b) => b.id === over.id);
-        const reordered = arrayMove(prev, oldIndex, newIndex).map((btn, i) => ({
-          ...btn,
-          position: i,
-        }));
-        clearTimeout(reorderTimer.current);
-        reorderTimer.current = setTimeout(() => {
-          wsRef.current?.send(
-            JSON.stringify({
-              v: 1,
-              t: "reorder_buttons",
-              buttons: reordered.map((b) => ({
-                id: b.id,
-                position: b.position,
-              })),
-            }),
-          );
-        }, 300);
-        return reordered;
+      const oldIndex = deckItems.findIndex((it) => tileSortKey(it) === active.id);
+      const newIndex = deckItems.findIndex((it) => tileSortKey(it) === over.id);
+      if (oldIndex < 0 || newIndex < 0) return;
+      const reordered = arrayMove(deckItems, oldIndex, newIndex);
+      const overrideMap = {};
+      reordered.forEach((it, i) => {
+        overrideMap[`${it.kind}:${it.id}`] = i;
       });
+      setSlotOverride({ sig: deckSignature(reordered), map: overrideMap });
+      clearTimeout(reorderTimer.current);
+      reorderTimer.current = setTimeout(() => {
+        wsRef.current?.send(
+          JSON.stringify({
+            v: 1,
+            t: "reorder_items",
+            page_id: currentPage,
+            items: reordered.map((it, i) => ({
+              kind: it.kind,
+              id: it.id,
+              slot: i,
+            })),
+          }),
+        );
+      }, 300);
     },
     // `applications` matters: the handler looks the dropped app's name up to
     // label the key, so a stale list would silently drop back to "New Button"
-    // for anything installed since this callback was made. `createWidget` is a
+    // for anything installed since this callback was made. `deckItems` and
+    // `currentPage` matter because the reorder path arrayMoves over the merged
+    // list and stamps the batch with the page it belongs to. `createWidget` is a
     // plain async function in the component body, so it is recreated on every
     // render and listing it would defeat the memo entirely — it closes over the
     // same state this callback already depends on.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [wsRef, setButtons, assignAction, createWithAction, applications],
+    [wsRef, assignAction, createWithAction, applications, deckItems, currentPage],
   );
 
   // ── Derived ───────────────────────────────────────────────────────────────
 
   const isConnected = status === "connected";
   const selectedBtnData = buttons.find((b) => b.id === resolvedSelected);
-  const buttonIds = buttons.map((b) => b.id);
   const activeBtn = buttons.find((b) => b.id === activeId);
   // A library row is being dragged rather than a key — used for the ghost and
   // for lighting up drop targets. Applications count: they drop onto keys the
@@ -1280,6 +1317,17 @@ export default function DesktopApp({
             icon: widgetTypeById(activeIdStr.slice("widget:".length)).icon,
           }
         : null;
+  // A tile already on the deck being dragged to reorder (not a library row):
+  // its sortable id carries the tile prefix, so it resolves against the merged
+  // deck. Used only for the DragOverlay ghost; a library "widget:<type>" drag
+  // is caught by activeAction above and never reaches here.
+  const activeWidget = activeIdStr.startsWith(WIDGET_TILE_PREFIX)
+    ? deckItems.find(
+        (it) =>
+          it.kind === "widget" &&
+          String(it.id) === activeIdStr.slice(WIDGET_TILE_PREFIX.length),
+      ) || null
+    : null;
   const currentRule = profileRules.find((r) => r.page_id === currentPage);
   const phoneDevices = useMemo(
     () =>
@@ -1391,62 +1439,72 @@ export default function DesktopApp({
               />
             </div>
 
-            <SortableContext items={buttonIds} strategy={rectSortingStrategy}>
+            <SortableContext
+              items={deckSortableIds}
+              strategy={rectSortingStrategy}
+            >
               <div style={styles.canvas} ref={canvasRef}>
                 <div
                   style={{
                     ...styles.grid,
-                    gridTemplateColumns: `repeat(${deckLayout.cols}, ${deckLayout.size}px)`,
-                    gridAutoRows: `${deckLayout.size}px`,
+                    gridTemplateColumns: layout
+                      ? `repeat(${layout.cols}, ${layout.cell}px)`
+                      : "none",
+                    gridAutoRows: layout ? `${layout.cell}px` : "auto",
+                    gap: layout ? layout.gap : 12,
                   }}
                 >
-                  {buttons.map((btn) => (
-                    <DesktopSortableButton
-                      key={btn.id}
-                      btn={btn}
-                      selected={resolvedSelected === btn.id}
-                      volume={volume}
-                      muted={muted}
-                      micVolume={micVolume}
-                      micMuted={micMuted}
-                      sessions={sessions}
-                      onSelect={selectBtn}
-                      showLabels={showLabels}
-                      droppingAction={!!activeAction}
-                    />
-                  ))}
-                  {/* FEATURE: Live widgets — tiles after the keys, in the same
-                      grid, so a deck reads as one surface. They are not keys,
-                      so they sit outside the SortableContext: ordering them
-                      among the keys is a separate concern and the AddSlot is
-                      the drop target for a new one. */}
-                  {widgetsForPage.map((widget) => (
-                    <div
-                      key={widget.id}
-                      style={{
-                        ...spanStyle(widget.size),
-                        minWidth: 0,
-                        minHeight: 0,
-                      }}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        selectWidget(widget);
-                      }}
-                    >
-                      <WidgetTile
-                        widget={widget}
-                        data={widgetData?.[widget.id] || widget.data || {}}
-                        sources={widgetSources}
-                        selected={selectedWidgetId === widget.id}
-                      >
-                        <SystemMonitorWidget
-                          widget={widget}
-                          data={widgetData?.[widget.id] || widget.data || {}}
+                  {/* One slot-ordered pass over the merged deck: a key can land
+                      between two tiles and vice-versa, and every placement is
+                      the engine's explicit grid contract (col/row + span), not
+                      an auto-flow guess. Guarded on `layout` because the first
+                      measure lands a frame after mount. */}
+                  {layout &&
+                    deckItems.map((item, i) => {
+                      const p = layout.placements[i];
+                      if (!p) return null;
+                      return item.kind === "button" ? (
+                        <DesktopSortableButton
+                          key={`button:${item.id}`}
+                          btn={item}
+                          placeCol={p.col}
+                          placeRow={p.row}
+                          placeCols={p.span.cols}
+                          placeRows={p.span.rows}
+                          big={p.span.cols >= 2}
+                          selected={resolvedSelected === item.id}
+                          volume={volume}
+                          muted={muted}
+                          micVolume={micVolume}
+                          micMuted={micMuted}
+                          sessions={sessions}
+                          onSelect={selectBtn}
+                          showLabels={showLabels}
+                          droppingAction={!!activeAction}
                         />
-                      </WidgetTile>
-                    </div>
-                  ))}
-                  {/* Empty well — click to add, or drop an action to create */}
+                      ) : (
+                        /* FEATURE: Live widgets — tiles are sortable now, in
+                           the same context as keys, so they interleave rather
+                           than trail. A tile shows, it does not act: its click
+                           selects it for the drawer, never presses. */
+                        <DesktopSortableWidget
+                          key={`widget:${item.id}`}
+                          widget={item}
+                          placeCol={p.col}
+                          placeRow={p.row}
+                          placeCols={p.span.cols}
+                          placeRows={p.span.rows}
+                          data={widgetData?.[item.id] || item.data || {}}
+                          sources={widgetSources}
+                          selected={selectedWidgetId === item.id}
+                          onSelect={selectWidget}
+                        />
+                      );
+                    })}
+                  {/* Empty well — click to add, or drop an action to create.
+                      Last child, deliberately with no explicit placement: it
+                      auto-flows into the next free cell, so it occupies a cell
+                      like a key but is never itself a slot-ordered deck item. */}
                   <AddSlot onClick={addButton} />
                 </div>
               </div>
@@ -1465,6 +1523,32 @@ export default function DesktopApp({
                   sessions={sessions}
                   ghost
                 />
+              ) : activeWidget ? (
+                <div
+                  style={{
+                    width: layout?.cell ?? 72,
+                    height: layout?.cell ?? 72,
+                    opacity: 0.9,
+                  }}
+                >
+                  <WidgetTile
+                    widget={activeWidget}
+                    data={
+                      widgetData?.[activeWidget.id] || activeWidget.data || {}
+                    }
+                    sources={widgetSources}
+                    selected={false}
+                  >
+                    <SystemMonitorWidget
+                      widget={activeWidget}
+                      data={
+                        widgetData?.[activeWidget.id] ||
+                        activeWidget.data ||
+                        {}
+                      }
+                    />
+                  </WidgetTile>
+                </div>
               ) : activeAction ? (
                 <div style={styles.actionGhost}>
                   <ActionIcon name={activeAction.icon} size={15} />
@@ -3319,6 +3403,11 @@ const DesktopSortableButton = memo(function DesktopSortableButton({
   onSelect,
   showLabels,
   droppingAction,
+  placeCol,
+  placeRow,
+  placeCols,
+  placeRows,
+  big,
 }) {
   const {
     attributes,
@@ -3359,9 +3448,11 @@ const DesktopSortableButton = memo(function DesktopSortableButton({
         ]
           .filter(Boolean)
           .join(", "),
-        ...(btn.size === "2x2"
-          ? { gridColumn: "span 2", gridRow: "span 2" }
-          : {}),
+        // Engine-owned placement from the grid contract (col/row + span),
+        // replacing the old hard-coded "2x2 -> span 2" so 2x1/1x2 keys land
+        // exactly where packGrid resolved them.
+        gridColumn: `${placeCol + 1} / span ${placeCols}`,
+        gridRow: `${placeRow + 1} / span ${placeRows}`,
       }}
       onClick={(e) => {
         if (!isDragging) {
@@ -3379,7 +3470,72 @@ const DesktopSortableButton = memo(function DesktopSortableButton({
         micMuted={micMuted}
         sessions={sessions}
         showLabels={showLabels}
+        big={big}
       />
+    </div>
+  );
+});
+
+// ─── Desktop Sortable Widget ──────────────────────────────────────────────────
+
+// Mirrors DesktopSortableButton's transform/overlay plumbing for a live tile.
+// Kept as its own component rather than threading a `kind` branch through the
+// button one, because the interaction differs: a button press fires an action,
+// a tile only ever shows — so its click MUST stay a selection (opens the drawer
+// via selectWidget), never a press.
+const DesktopSortableWidget = memo(function DesktopSortableWidget({
+  widget,
+  selected,
+  data,
+  sources,
+  onSelect,
+  placeCol,
+  placeRow,
+  placeCols,
+  placeRows,
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: `${WIDGET_TILE_PREFIX}${widget.id}` });
+
+  return (
+    <div
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      style={{
+        // Engine placement first, then the drag transform on top; minWidth/
+        // minHeight:0 let the tile shrink inside its (possibly clamped) cell.
+        gridColumn: `${placeCol + 1} / span ${placeCols}`,
+        gridRow: `${placeRow + 1} / span ${placeRows}`,
+        minWidth: 0,
+        minHeight: 0,
+        transform: CSS.Transform.toString(transform),
+        zIndex: isDragging ? 999 : "auto",
+        opacity: isDragging ? 0.3 : 1,
+        transition,
+      }}
+      onClick={(e) => {
+        // Same guard as the button: a click that ends a drag is not a select.
+        if (!isDragging) {
+          e.stopPropagation();
+          onSelect(widget);
+        }
+      }}
+    >
+      <WidgetTile
+        widget={widget}
+        data={data}
+        sources={sources}
+        selected={selected}
+      >
+        <SystemMonitorWidget widget={widget} data={data} />
+      </WidgetTile>
     </div>
   );
 });
@@ -3394,6 +3550,10 @@ function ButtonTile({
   sessions,
   ghost,
   showLabels = true,
+  // Icon scale keys off the resolved footprint, not the size string: a 2x1 or
+  // 1x2 tile is as wide/tall as a 2x2 in one axis. Defaults to the old "2x2"
+  // rule so callers that pass no placement (the drag ghost) behave as before.
+  big = btn.size === "2x2",
 }) {
   const isToggleOn =
     Number(btn.is_toggle) === 1 && Number(btn.toggle_state) === 1;
@@ -3583,10 +3743,9 @@ function ButtonTile({
         ) : (
           <ButtonFace
             icon={btn.icon}
-            size={btn.size === "2x2" ? 48 : 32}
+            size={big ? 48 : 32}
             style={{
-              fontSize:
-                btn.size === "2x2" ? "min(48px,5.5vw)" : "min(34px,3.5vw)",
+              fontSize: big ? "min(48px,5.5vw)" : "min(34px,3.5vw)",
             }}
           />
         )}
@@ -4140,7 +4299,7 @@ function PropertyPanel({
         {/* Size */}
         <Field label="Size">
           <div style={{ display: "flex", gap: 6 }}>
-            {["1x1", "2x2"].map((s) => (
+            {TILE_SIZES.map((s) => (
               <button
                 key={s}
                 style={{
@@ -5393,12 +5552,9 @@ const styles = {
   modalSub: { fontSize: 12, color: "var(--text-muted)", marginTop: 2 },
   modalBody: { overflowY: "auto", padding: "4px 6px 12px" },
 
-  // Keys are a fixed size and the grid is centred, so the deck reads as a piece
-  // of hardware rather than a responsive layout that reflows as you resize.
-  // Up to 8 across, mirroring a Stream Deck XL, so a full deck is visible at
-  // once instead of scrolling. Narrow windows simply fit fewer per row.
-  // Columns and key size are computed against the measured canvas and applied
-  // inline; only the invariants live here.
+  // The shared responsive engine (useDeckLayout) resolves columns, cell size,
+  // gap and each tile's placement against the measured canvas; those are applied
+  // inline on the grid below. Only the stable invariants live here.
   grid: {
     display: "grid",
     gap: 12,

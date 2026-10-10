@@ -77,6 +77,7 @@ export const WIDGET_METRIC_IDS = METRIC_REGISTRY.map((m) => m.id);
 export const WIDGET_SIZES = [
   { value: "1x1", label: "1x1" },
   { value: "2x1", label: "2x1" },
+  { value: "1x2", label: "1x2" },
   { value: "2x2", label: "2x2" },
 ];
 
