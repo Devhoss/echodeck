@@ -6,6 +6,13 @@ const { v4: uuid } = require("uuid");
 const { randomBytes, timingSafeEqual } = require("crypto");
 const os = require("os");
 const db = require("./db");
+const { moveItemSlots } = require("./itemOrder.js");
+const {
+  isValidButtonSize,
+  sanitizeLayoutConfig,
+  sanitizePresetConfig,
+  parseLayoutConfig,
+} = require("./layoutConfig.js");
 const { getActiveWindow, listOpenWindows } = require("./activeWindow");
 const { findMatchingRule } = require("./ruleEngine");
 const {
@@ -225,6 +232,9 @@ app.get("/api/settings", (req, res) => {
     pc_monitor_device,
     auto_profile_switching: auto_profile_switching === "1",
     auto_switch_delay: Number(auto_switch_delay),
+    // FEATURE: Responsive layout — the global layout_config default, handed
+    // back parsed like the per-page field; "" (cleared) reads as null.
+    layout_config: parseLayoutConfig(db.getSetting("layout_config")),
   });
 });
 
@@ -235,17 +245,27 @@ app.post("/api/settings", (req, res) => {
     "pc_monitor_device",
     "auto_profile_switching",
     "auto_switch_delay",
+    "layout_config",
   ];
   if (!allowed.includes(key))
     return res.status(400).json({ error: "Unknown setting" });
-  db.setSetting(
-    key,
-    key === "auto_profile_switching"
-      ? value
-        ? "1"
-        : "0"
-      : String(value ?? ""),
-  );
+  if (key === "layout_config")
+    // Sanitized to stored JSON text; a value with nothing valid left in it
+    // stores "" so GET reports null ("follow the engine default") rather than
+    // a corrupt string. Same drop-don't-default rule as the page field.
+    db.setSetting(key, sanitizeLayoutConfig(value) ?? "");
+  else
+    db.setSetting(
+      key,
+      key === "auto_profile_switching"
+        ? value
+          ? "1"
+          : "0"
+        : String(value ?? ""),
+    );
+  // A changed global layout default re-flows every deck, so the surfaces
+  // listening on the socket need the new frame; other settings do not.
+  if (key === "layout_config") broadcastState();
   res.json({ ok: true });
 });
 
@@ -440,6 +460,11 @@ app.post("/api/buttons", (req, res) => {
 });
 
 app.patch("/api/buttons/:id", (req, res) => {
+  // FEATURE: Responsive layout — a size the grid cannot lay out rejects the
+  // whole PATCH with 400 rather than being stored or silently swapped, the
+  // same rule widgets enforce in buildWidgetUpdate ("unknown size").
+  if (req.body.size !== undefined && !isValidButtonSize(req.body.size))
+    return res.status(400).json({ error: "Unknown size" });
   const btn = db.updateButton(req.params.id, req.body);
   broadcastState();
   res.json(btn);
@@ -494,6 +519,149 @@ app.delete("/api/widgets/:id", (req, res) => {
   syncWidgets();
   broadcastState();
   res.json({ ok: true });
+});
+
+// --- Deck item moves (plan D3) ---
+// Wire kinds are singular ("button"/"widget"); itemOrder validates against
+// its own plural table names, so both spellings normalize to the latter.
+const WIRE_KINDS = {
+  button: "buttons",
+  widget: "widgets",
+  buttons: "buttons",
+  widgets: "widgets",
+};
+
+// Fold the legacy buttons-only reorder into a full-page submitted list. The
+// new button order (ascending by the submitted legacy position) is laid back
+// into the slots buttons already occupied in the page's merged display order,
+// so widgets keep their exact slots — a pre-slot client can only ever have
+// reordered among buttons, and pattern-preserving is the faithful reading.
+// Buttons the payload did not mention keep their relative order at the tail.
+function legacyReorderToSlots(buttons) {
+  const incoming = (Array.isArray(buttons) ? buttons : [])
+    .filter(
+      (b) =>
+        b && typeof b.id === "string" && Number.isFinite(Number(b.position)),
+    )
+    .sort((a, b) => Number(a.position) - Number(b.position));
+  const pages = new Map(); // page_id -> new button id order (deduped)
+  const seen = new Set();
+  for (const b of incoming) {
+    if (seen.has(b.id)) continue;
+    seen.add(b.id);
+    const btn = db.getButton(b.id);
+    if (!btn) continue;
+    if (!pages.has(btn.page_id)) pages.set(btn.page_id, []);
+    pages.get(btn.page_id).push(b.id);
+  }
+  for (const [pageId, newOrder] of pages) {
+    const rows = db.getItemRows(pageId);
+    const merged = [
+      ...rows.buttons.map((r) => ({ ...r, kind: "buttons" })),
+      ...rows.widgets.map((r) => ({ ...r, kind: "widgets" })),
+    ].sort(
+      (a, b) =>
+        (a.slot ?? a.position ?? 0) - (b.slot ?? b.position ?? 0) ||
+        a.rowid - b.rowid,
+    );
+    const movedIds = new Set(newOrder);
+    const queue = [
+      ...newOrder,
+      ...merged
+        .filter((r) => r.kind === "buttons" && !movedIds.has(r.id))
+        .map((r) => r.id),
+    ];
+    const submitted = [];
+    let next = 0;
+    merged.forEach((row, slot) => {
+      submitted.push(
+        row.kind === "buttons"
+          ? { kind: "buttons", id: queue[next++], slot }
+          : { kind: "widgets", id: row.id, slot },
+      );
+    });
+    const result = db.applyItemReorder(pageId, submitted);
+    if (result.error)
+      console.warn(`[reorder_buttons] rejected for page ${pageId}: ${result.error}`);
+  }
+}
+
+// FEATURE: Responsive layout — the sanctioned way to change an item's page
+// (including for widgets, whose page_id stays out of the PATCH whitelist:
+// a silent page move on an edit was deliberately forbidden, an explicit
+// move is not). Both pages' slots are re-derived by the same validated,
+// transactional writers the reorder paths use, so a failure leaves no
+// half-moved deck.
+app.post("/api/items/move", (req, res) => {
+  const kind = WIRE_KINDS[req.body?.kind];
+  const id = req.body?.id;
+  const targetPageId = req.body?.page_id;
+  const slot = req.body?.slot;
+  if (!kind || typeof id !== "string")
+    return res
+      .status(400)
+      .json({ error: "kind must be button|widget and id a string" });
+  const item = kind === "buttons" ? db.getButton(id) : db.getWidget(id);
+  if (!item) return res.status(404).json({ error: "Item not found" });
+  if (!db.getPage(targetPageId))
+    return res.status(400).json({ error: "Target page not found" });
+
+  const plan = moveItemSlots(
+    db.getItemRows(item.page_id),
+    id,
+    slot,
+    db.getItemRows(targetPageId),
+  );
+  if (plan.error) return res.status(400).json({ error: plan.error });
+
+  const moved = db.moveItemToPage({
+    kind,
+    id,
+    sourcePageId: item.page_id,
+    targetPageId,
+    source: plan.source,
+    target: plan.target,
+  });
+  if (moved.error) return res.status(400).json({ error: moved.error });
+
+  syncWidgets();
+  broadcastState();
+  res.json(kind === "buttons" ? toDeckButton(db.getButton(id)) : db.getWidget(id));
+});
+
+// --- Layout presets (plan D7) ---
+// The config is sanitized per scope on the way in ({defaults?, pages?}, each
+// value through the same layoutConfig rules) and handed back parsed, so the
+// table only ever holds valid JSON text and clients never parse by hand.
+function presetToClient(row) {
+  return row && { ...row, config: parseLayoutConfig(row.config) };
+}
+
+app.get("/api/layout-presets", (req, res) => {
+  res.json(db.getLayoutPresets().map(presetToClient));
+});
+
+app.post("/api/layout-presets", (req, res) => {
+  const name =
+    typeof req.body?.name === "string" && req.body.name.trim()
+      ? req.body.name.trim()
+      : null;
+  if (!name) return res.status(400).json({ error: "Preset name required" });
+  const config = sanitizePresetConfig(req.body?.config);
+  if (!config)
+    return res
+      .status(400)
+      .json({ error: "Preset config must contain at least one valid layout scope" });
+  const preset = db.createLayoutPreset({
+    id: uuid(),
+    name,
+    config: JSON.stringify(config),
+  });
+  res.json(presetToClient(preset));
+});
+
+app.delete("/api/layout-presets/:id", (req, res) => {
+  res.json({ ok: db.deleteLayoutPreset(req.params.id) });
 });
 
 // --- Live widget data sources ---
@@ -963,7 +1131,34 @@ wss.on("connection", (ws, req) => {
     }
 
     if (msg.t === "reorder_buttons") {
-      db.reorderButtons(msg.buttons);
+      // Legacy desktop payload ([{id, position}] for one page's buttons) kept
+      // working unchanged, but folded into the slot writer so slot and
+      // position can never drift apart: the new button order fills the slots
+      // buttons already held on their page (pattern-preserving — widgets stay
+      // exactly where the user put them), and the rebuilt full-page list
+      // goes through the same validated, transactional write as reorder_items.
+      legacyReorderToSlots(msg.buttons);
+      broadcastState();
+    }
+
+    if (msg.t === "reorder_items") {
+      // FEATURE: Responsive layout — {page_id, items:[{kind,id,slot}]} mixing
+      // buttons and widgets in one authoritative batch. applyReorder is
+      // all-or-nothing, so a malformed frame (missing ids, duplicate or
+      // out-of-range slots, partial coverage) is rejected without touching
+      // the deck — and without a broadcast, so no client even flickers.
+      const items = (Array.isArray(msg.items) ? msg.items : [])
+        .map((it) => ({
+          kind: WIRE_KINDS[it?.kind],
+          id: it?.id,
+          slot: it?.slot,
+        }))
+        .filter((it) => it.kind);
+      const result = db.applyItemReorder(msg.page_id, items);
+      if (result.error) {
+        console.warn(`[reorder_items] rejected: ${result.error}`);
+        return;
+      }
       broadcastState();
     }
   });
@@ -1052,12 +1247,22 @@ function sendState(ws, page_id) {
   );
 }
 
+// `slot` rides along automatically: every serializer below spreads a
+// SELECT * row, and the slot column is part of it since the migration.
 function toDeckButton(btn) {
   return { ...btn, sound_file: !!btn.sound_file };
 }
 
 function toDeckPage(page) {
-  return { ...page, show_labels: Number(page.show_labels) === 1 };
+  return {
+    ...page,
+    show_labels: Number(page.show_labels) === 1,
+    // FEATURE: Responsive layout — hidden is boolean-ized exactly like
+    // show_labels above, and layout_config is handed over parsed (or null
+    // when unset/corrupt) rather than as the stored JSON text.
+    hidden: Number(page.hidden) === 1,
+    layout_config: parseLayoutConfig(page.layout_config),
+  };
 }
 
 function broadcastRules() {

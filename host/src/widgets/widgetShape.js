@@ -45,9 +45,12 @@ const SOURCE_FIELDS = [
 // would leak the ciphertext of a user's passphrase into a WS frame.
 const SOURCE_SECRET_FIELDS = ["auth"];
 
-// Sizes a widget tile may occupy. Buttons support "1x1" and "2x2"; a widget
-// adds "2x1" because a stat strip is the natural shape for a list of metrics.
-const WIDGET_SIZES = ["1x1", "2x1", "2x2"];
+// Sizes a widget tile may occupy, now on the same four-shape set as buttons:
+// this list must stay in step with BUTTON_SIZES in layoutConfig.js and with
+// the client's TILE_SIZES in client/src/layout/deckLayout.js (cross-package
+// mirrors — layout.js:11-12 precedent). "2x1" stayed because a stat strip is
+// the natural shape for a list of metrics; "1x2" joins for tall tiles.
+const WIDGET_SIZES = ["1x1", "2x1", "1x2", "2x2"];
 
 const DEFAULT_WIDGET_SIZE = "2x2";
 const DEFAULT_REFRESH_MS = 10000;

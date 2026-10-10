@@ -9,6 +9,11 @@ const {
   widgetDefaults,
   sourceDefaults,
 } = require("./widgets/widgetShape.js");
+const { backfillSlots, applyReorder } = require("./itemOrder.js");
+const {
+  BUTTON_SIZES,
+  sanitizeLayoutConfig,
+} = require("./layoutConfig.js");
 
 const dbPath = path.join(
   os.homedir(),
@@ -125,6 +130,17 @@ db.exec(`
     enabled INTEGER DEFAULT 1,
     created_at TEXT
   );
+
+  -- FEATURE: Responsive layout — saved grid-tuning sets (plan D7). The config
+  -- is one JSON document {defaults:{...}, pages:{[pageId]:{...}}} so applying
+  -- a preset is a single read; it is sanitized on the way in (layoutConfig.js)
+  -- and nothing but that JSON ever lives in this table.
+  CREATE TABLE IF NOT EXISTS layout_presets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    config TEXT NOT NULL,
+    created_at TEXT
+  );
 `);
 
 // --- Migrations ---
@@ -161,6 +177,43 @@ if (!existingCols.includes("audio_device"))
 if (!existingCols.includes("require_confirm"))
   db.exec(`ALTER TABLE buttons ADD COLUMN require_confirm INTEGER DEFAULT 0`);
 
+// FEATURE: Responsive layout — a page-scoped `slot` interleaves buttons and
+// widgets into one authoritative order (plan D2); `position` becomes a
+// server-derived dense rank within each kind, so old clients keep rendering.
+// The backfill runs exactly once, in the branch that first adds the columns:
+// it reproduces today's rendered order (buttons sorted, then widgets), so
+// adopting it is visually a no-op. Idempotent by construction — a second
+// startup finds both columns present and skips the whole branch.
+const existingWidgetCols = db.pragma("table_info(widgets)").map((c) => c.name);
+const needsButtonSlot = !existingCols.includes("slot");
+const needsWidgetSlot = !existingWidgetCols.includes("slot");
+if (needsButtonSlot || needsWidgetSlot) {
+  if (needsButtonSlot)
+    db.exec(`ALTER TABLE buttons ADD COLUMN slot INTEGER`);
+  if (needsWidgetSlot)
+    db.exec(`ALTER TABLE widgets ADD COLUMN slot INTEGER`);
+  // `table` is itemOrder's own "buttons"|"widgets" literal, never user input,
+  // so interpolating it into the UPDATE is safe.
+  const applyBackfill = db.transaction((assignments) => {
+    for (const a of assignments)
+      db.prepare(`UPDATE ${a.table} SET slot=? WHERE id=?`).run(a.slot, a.id);
+  });
+  applyBackfill(
+    backfillSlots(
+      db
+        .prepare(
+          "SELECT id, page_id, position, rowid FROM buttons ORDER BY page_id, position, rowid",
+        )
+        .all(),
+      db
+        .prepare(
+          "SELECT id, page_id, position, rowid FROM widgets ORDER BY page_id, position, rowid",
+        )
+        .all(),
+    ),
+  );
+}
+
 const existingRuleCols = db
   .pragma("table_info(profile_rules)")
   .map((c) => c.name);
@@ -180,6 +233,15 @@ if (!existingPageCols.includes("show_labels")) {
   );
   db.prepare("DELETE FROM settings WHERE key=?").run("deck_show_labels");
 }
+
+// FEATURE: Responsive layout — per-page grid knobs as JSON text (plan D4) and
+// the hidden flag marking the Unfiled page (plan D3). Additive only: an
+// existing page with no layout_config is NULL, meaning "follow the global
+// default", which is exactly the pre-feature behaviour.
+if (!existingPageCols.includes("layout_config"))
+  db.exec(`ALTER TABLE pages ADD COLUMN layout_config TEXT DEFAULT NULL`);
+if (!existingPageCols.includes("hidden"))
+  db.exec(`ALTER TABLE pages ADD COLUMN hidden INTEGER DEFAULT 0`);
 
 // --- Seed ---
 const pageCount = db.prepare("SELECT COUNT(*) as c FROM pages").get().c;
@@ -379,9 +441,16 @@ function deletePage(id) {
 }
 
 // Fields the editor may change on a page. A whitelist rather than a passthrough:
-// the id is not rewritable, and `show_labels` has to be normalised to 0/1 so a
-// stray truthy value cannot end up stored as text.
-const PAGE_FIELDS = new Set(["name", "position", "show_labels"]);
+// the id is not rewritable, `show_labels`/`hidden` have to be normalised to 0/1
+// so a stray truthy value cannot end up stored as text, and `layout_config` is
+// sanitized to stored JSON text (or NULL) rather than written raw.
+const PAGE_FIELDS = new Set([
+  "name",
+  "position",
+  "show_labels",
+  "hidden",
+  "layout_config",
+]);
 
 function updatePage(id, fields) {
   const existing = getPage(id);
@@ -389,7 +458,11 @@ function updatePage(id, fields) {
   const toSave = {};
   for (const key of Object.keys(fields)) {
     if (!PAGE_FIELDS.has(key)) continue;
-    toSave[key] = key === "show_labels" ? (fields[key] ? 1 : 0) : fields[key];
+    if (key === "show_labels" || key === "hidden")
+      toSave[key] = fields[key] ? 1 : 0;
+    else if (key === "layout_config")
+      toSave[key] = sanitizeLayoutConfig(fields[key]);
+    else toSave[key] = fields[key];
   }
   if (!Object.keys(toSave).length) return existing;
 
@@ -543,9 +616,14 @@ function deletePairedDevice(id) {
 }
 
 // --- Buttons ---
+// FEATURE: Responsive layout — slot is the authoritative page order once a
+// page has been reordered/moved through the slot writers; rows that predate it
+// (or were created since) fall back to their legacy position via COALESCE.
 function getButtons(page_id) {
   return db
-    .prepare("SELECT * FROM buttons WHERE page_id=? ORDER BY position")
+    .prepare(
+      "SELECT * FROM buttons WHERE page_id=? ORDER BY COALESCE(slot, position), rowid",
+    )
     .all(page_id)
     .map(deserializeButton);
 }
@@ -658,6 +736,101 @@ function reorderButtons(buttons) {
   })(buttons);
 }
 
+// --- Slot writers (responsive layout, plan D2) ---
+// The only sanctioned writers of `slot` (and of a widget's `page_id` for
+// moves). Both validate through itemOrder.applyReorder before writing, so a
+// rejected batch is all-or-nothing: a half-slotted page cannot be produced.
+
+/** Raw per-kind rows for a page — the shape itemOrder's validators read. */
+function getItemRows(page_id) {
+  return {
+    buttons: db
+      .prepare(
+        "SELECT id, slot, position, rowid FROM buttons WHERE page_id=? ORDER BY COALESCE(slot, position), rowid",
+      )
+      .all(page_id),
+    widgets: db
+      .prepare(
+        "SELECT id, slot, position, rowid FROM widgets WHERE page_id=? ORDER BY COALESCE(slot, position), rowid",
+      )
+      .all(page_id),
+  };
+}
+
+/**
+ * Validate a whole-page submitted list ([{kind,id,slot}]) and write both slot
+ * and the derived dense position, in one transaction. Returns {ok} or {error}.
+ */
+function applyItemReorder(page_id, submitted) {
+  const rows = getItemRows(page_id);
+  const result = applyReorder(rows, submitted);
+  if (result.error) return { error: result.error };
+  const write = db.transaction(() => {
+    for (const table of ["buttons", "widgets"]) {
+      const update = db.prepare(
+        `UPDATE ${table} SET slot=?, position=? WHERE id=?`,
+      );
+      for (const row of rows[table])
+        update.run(result.slots.get(row.id), result.positions.get(row.id), row.id);
+    }
+  });
+  write();
+  return { ok: true };
+}
+
+/**
+ * The sanctioned cross-page move (plan D3): re-parents the row first — target
+ * validation checks ids against the target page — then applies both pages'
+ * submitted lists through applyItemReorder inside one transaction, so any
+ * failure rolls the move back entirely. A same-page move skips the re-parent
+ * and applies only `target` (which covers every item on the page).
+ */
+function moveItemToPage({ kind, id, sourcePageId, targetPageId, source, target }) {
+  if (!["buttons", "widgets"].includes(kind))
+    return { error: `unknown kind "${kind}"` };
+  const samePage = sourcePageId === targetPageId;
+  const run = db.transaction(() => {
+    if (!samePage) {
+      db.prepare(`UPDATE ${kind} SET page_id=? WHERE id=?`).run(targetPageId, id);
+      const moved = applyItemReorder(sourcePageId, source);
+      if (moved.error) throw new Error(moved.error);
+    }
+    const landed = applyItemReorder(targetPageId, target);
+    if (landed.error) throw new Error(landed.error);
+  });
+  try {
+    run();
+  } catch (e) {
+    return { error: e.message };
+  }
+  return { ok: true };
+}
+
+// --- Layout presets (plan D7) ---
+// Rows hold the preset as stored JSON text; sanitization happens on the way
+// in (layoutConfig.sanitizePresetConfig) exactly like layout_config itself.
+function getLayoutPresets() {
+  return db
+    .prepare("SELECT * FROM layout_presets ORDER BY created_at, rowid")
+    .all();
+}
+
+function createLayoutPreset({ id, name, config }) {
+  db.prepare(
+    `INSERT INTO layout_presets (id, name, config, created_at) VALUES (?,?,?,?)`,
+  ).run(id, name, config, new Date().toISOString());
+  return db.prepare("SELECT * FROM layout_presets WHERE id=?").get(id);
+}
+
+function getLayoutPreset(id) {
+  return db.prepare("SELECT * FROM layout_presets WHERE id=?").get(id) || null;
+}
+
+function deleteLayoutPreset(id) {
+  const info = db.prepare("DELETE FROM layout_presets WHERE id=?").run(id);
+  return info.changes > 0;
+}
+
 // --- Live widgets ---
 // FEATURE: Live widgets — a tile that receives data rather than an action.
 // Deliberately shaped like a button (page_id, position, size, label, icon,
@@ -665,7 +838,9 @@ function reorderButtons(buttons) {
 
 function getWidgets(page_id) {
   return db
-    .prepare("SELECT * FROM widgets WHERE page_id=? ORDER BY position, rowid ASC")
+    .prepare(
+      "SELECT * FROM widgets WHERE page_id=? ORDER BY COALESCE(slot, position), rowid ASC",
+    )
     .all(page_id)
     .map(deserializeWidget);
 }
@@ -808,6 +983,10 @@ function deleteSource(id) {
 }
 
 module.exports = {
+  // Re-exported so the PATCH route and the tests read the same whitelist the
+  // rest of the layout primitives live in (a single source of truth; the
+  // function itself is pure and lives in layoutConfig.js).
+  BUTTON_SIZES,
   getPages,
   createPage,
   getPage,
@@ -825,6 +1004,13 @@ module.exports = {
   updateButton,
   deleteButton,
   reorderButtons,
+  getItemRows,
+  applyItemReorder,
+  moveItemToPage,
+  getLayoutPresets,
+  createLayoutPreset,
+  getLayoutPreset,
+  deleteLayoutPreset,
   getWidgets,
   getAllWidgets,
   getWidget,
