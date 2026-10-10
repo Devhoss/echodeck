@@ -234,6 +234,12 @@ export default function App() {
   const [buttons, setButtons] = useState([]);
   const [pages, setPages] = useState([]);
   const [currentPage, setCurrentPage] = useState(null);
+  // FEATURE: Edit Layout (Phase 4) — draft-mode gate. While true a tile keeps
+  // only its drag/select behavior; press, hold-confirm and volume-hold are
+  // suppressed below (Task 4.2 model: layoutDraft.js). Task 4.3 owns the entry
+  // door and the EditorBar, so nothing here lets a user flip this yet — the
+  // setter is handed off through editModeApiRef for that future control.
+  const [editMode, setEditMode] = useState(false);
   const [status, setStatus] = useState("connecting");
   const [pressing, setPressing] = useState(null);
   // FEATURE: System stats
@@ -265,6 +271,16 @@ export default function App() {
     loadPairConfig();
     return getWsUrl(); // non-null if already paired
   });
+
+  // FEATURE: Edit Layout (Phase 4) — hand the edit-mode toggle to the future
+  // EditorBar / control sheet (Tasks 4.3 and 5.3) without adding a user-facing
+  // entry point yet. The setter is mirrored into a ref from an effect (never
+  // during render) so the deck's default (non-edit) behavior stays untouched.
+  const toggleEditMode = useCallback(() => setEditMode((v) => !v), []);
+  const editModeApiRef = useRef(null);
+  useEffect(() => {
+    editModeApiRef.current = { editMode, toggleEditMode };
+  }, [editMode, toggleEditMode]);
 
   // Forget this host and fall back to the pairing screen. Used both when the
   // user disconnects deliberately and when the host rejects our credential.
@@ -865,6 +881,7 @@ export default function App() {
                 <SortableButton
                   btn={item}
                   pressing={pressing === item.id}
+                  editable={editMode}
                   onPress={pressButton}
                   volume={volume}
                   muted={muted}
@@ -1139,6 +1156,7 @@ function SkeletonGrid() {
 const SortableButton = memo(function SortableButton({
   btn,
   pressing,
+  editable,
   onPress,
   volume,
   muted,
@@ -1221,6 +1239,8 @@ const SortableButton = memo(function SortableButton({
   const handleClick = useCallback(
     (e) => {
       if (isDragging) return;
+      // Edit Layout: a tile only drags/selects — no press, no ripple.
+      if (editable) return;
       if (isVolumeHoldBtn) return;
       // Guarded buttons fire from the hold timer, never from a tap.
       if (requiresConfirm) return;
@@ -1231,12 +1251,16 @@ const SortableButton = memo(function SortableButton({
       setTimeout(() => setRipple(null), 600);
       onPress(btn.id);
     },
-    [isDragging, onPress, btn.id, isVolumeHoldBtn, requiresConfirm],
+    [isDragging, editable, onPress, btn.id, isVolumeHoldBtn, requiresConfirm],
   );
 
   const handlePointerDown = useCallback(
     (e) => {
       if (isDragging) return;
+      // Edit Layout: suppress pointer-capture, hold-confirm timer and volume
+      // hold start entirely — the only behavior left on a tile is drag/select,
+      // which dnd-kit owns (the isDragging guard above is untouched).
+      if (editable) return;
       if (!isVolumeHoldBtn && !requiresConfirm) return;
       e.currentTarget.setPointerCapture(e.pointerId);
       const rect = e.currentTarget.getBoundingClientRect();
@@ -1265,6 +1289,7 @@ const SortableButton = memo(function SortableButton({
     },
     [
       isDragging,
+      editable,
       isVolumeHoldBtn,
       requiresConfirm,
       volumeStep,
