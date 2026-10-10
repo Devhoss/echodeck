@@ -1123,6 +1123,18 @@ wss.on("connection", (ws, req) => {
       broadcastVolumeNow();
     }
 
+    // FEATURE: Mobile control sheet — direct mute toggles. The action types
+    // already exist (actions.js volume_mute / mic_mute, used by tile buttons);
+    // this only lets the sheet invoke them without a synthetic button, then
+    // resyncs every client through the same broadcast the holds end with.
+    if (msg.t === "mute_toggle") {
+      executeAction("volume_mute", "").then(() => broadcastVolumeNow());
+    }
+
+    if (msg.t === "mic_mute_toggle") {
+      executeAction("mic_mute", "").then(() => broadcastVolumeNow());
+    }
+
     if (msg.t === "switch_page") {
       manualSwitchPausedUntil = Date.now() + 15000;
       ws.currentPage = msg.page_id;

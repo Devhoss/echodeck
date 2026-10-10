@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
 import ReconnectingWebSocket from "reconnecting-websocket";
 import { Haptics, ImpactStyle } from "@capacitor/haptics";
-import deck from "/deck-icon.png";
-import disconnect from "/disconnect.svg";
 import DesktopApp from "./desktop/DesktopApp.jsx";
 import {
   isPaired,
@@ -30,6 +28,11 @@ import {
   detach,
 } from "./layout/layoutDraft.js";
 import DeckEditorBar from "./mobile/DeckEditorBar.jsx";
+// FEATURE: Mobile customization (Tasks 5.1 + 5.2) — the collapsed status
+// handle replaces the old always-on header bar, and the push-down control
+// sheet it opens holds everything the header used to pin on screen.
+import StatusHandle from "./mobile/StatusHandle.jsx";
+import ControlSheet from "./mobile/ControlSheet.jsx";
 // FEATURE: Edit Layout — the same dnd-kit surface the desktop editor already
 // uses (see desktop/DesktopApp.jsx). Only the reorder plumbing is wired here.
 import {
@@ -422,6 +425,11 @@ export default function App() {
   const [widgetSources, setWidgetSources] = useState([]);
 
   const [disconnectActive, setDisconnectActive] = useState(false);
+  // FEATURE: Mobile customization (Task 5.2) — the control sheet's expanded
+  // state. It lives here (not in the sheet) because StatusHandle's
+  // aria-expanded and the sheet's push-down slot are siblings in this column,
+  // and the deck's ResizeObserver must see the sheet's box change.
+  const [sheetOpen, setSheetOpen] = useState(false);
   const deckRef = useRef(null);
   const swipeRef = useRef(null);
 
@@ -1259,6 +1267,20 @@ export default function App() {
     wsRef.current.send(JSON.stringify({ t: "volume_hold_stop" }));
   }, []);
 
+  // FEATURE: Mobile customization (Task 5.2) — the sheet's mute buttons ask
+  // the host to toggle speaker/mic mute directly (no synthetic tile button).
+  // The new state comes back through the existing `volume` broadcast, so this
+  // only sends and never optimistically flips local state.
+  const sendMuteToggle = useCallback((kind) => {
+    if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(
+      JSON.stringify({
+        v: 1,
+        t: kind === "mic" ? "mic_mute_toggle" : "mute_toggle",
+      }),
+    );
+  }, []);
+
   const handleDisconnect = useCallback(() => {
     setShowDisconnectConfirm(true);
   }, []);
@@ -1500,133 +1522,41 @@ export default function App() {
     >
       <style>{globalStyles}</style>
 
-      {/* Top bar */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          paddingLeft: "max(env(safe-area-inset-left), 16px)",
-          paddingRight: "max(env(safe-area-inset-right), 16px)",
-          paddingTop: 0,
-          paddingBottom: 0,
-          gap: 6,
-          height: 44,
-          flexShrink: 0,
-          background: "linear-gradient(180deg, #1c1c1f 0%, #161618 100%)",
-          borderBottom: "1px solid #2a2a2e",
-        }}
-      >
-        <img
-          src={deck}
-          width={28}
-          height={28}
-          style={{ borderRadius: 8, flexShrink: 0, display: "block" }}
-          draggable={false}
-        />
+      {/* FEATURE: Mobile customization (Tasks 5.1 + 5.2, issue #9) — the old
+          44-px always-on top bar (logo, name, CPU/RAM/time pills, volume pill,
+          connection pill, disconnect button) is gone. In its place: a 28-px
+          collapsed StatusHandle whose whole strip is one aria-expanded button,
+          and the ControlSheet it pushes open. Both are DIRECT flex-column
+          children ahead of the deck — never fixed/absolute — so expanding the
+          sheet shrinks the deck's measured box and `useDeckLayout`'s
+          ResizeObserver re-fits the grid (spec §3 requirement 6). The safe
+          area stays on the outer container's padding above. */}
+      <StatusHandle
+        isConnected={isConnected}
+        micActive={micMuted === false && micVolume !== null && micVolume !== undefined}
+        sheetOpen={sheetOpen}
+        onToggle={() => setSheetOpen((open) => !open)}
+      />
 
-        <span
-          style={{
-            fontWeight: 700,
-            fontSize: 14,
-            color: "#e0e0e0",
-            letterSpacing: 0.3,
-          }}
-        >
-          EchoDeck
-        </span>
-
-        {/* FEATURE: System stats — CPU / RAM / clock pills */}
-        {stats && (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 5,
-              marginLeft: 2,
-            }}
-          >
-            <StatPill
-              label="CPU"
-              value={`${stats.cpu}%`}
-              warn={stats.cpu > 80}
-            />
-            <StatPill
-              label="RAM"
-              value={`${stats.ramUsed}/${stats.ramTotal}G`}
-              warn={stats.ramUsed / stats.ramTotal > 0.85}
-            />
-            <StatPill label="" value={stats.time} />
-          </div>
-        )}
-
-        {/* FEATURE: Volume controls — live volume pill */}
-        {volume !== null && <VolumePill volume={volume} muted={muted} />}
-
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 5,
-            height: 24,
-            boxSizing: "border-box",
-            background: isConnected ? "#0d2e1a" : "#2e0d0d",
-            border: `1px solid ${isConnected ? "#1a5c32" : "#5c1a1a"}`,
-            borderRadius: 20,
-            padding: "3px 10px",
-            fontSize: 11,
-            color: isConnected ? "#4ade80" : "#f87171",
-            marginLeft: "auto",
-          }}
-        >
-          <span
-            style={{
-              width: 6,
-              height: 6,
-              borderRadius: "50%",
-              background: isConnected ? "#4ade80" : "#f87171",
-              boxShadow: isConnected ? "0 0 6px #4ade80" : "0 0 6px #f87171",
-              animation: isConnected ? "pulse 2s infinite" : "none",
-            }}
-          />
-          {isConnected
-            ? "Connected"
-            : status === "connecting"
-              ? "Connecting…"
-              : "Offline"}
-        </div>
-
-        <button
-          title="Disconnect"
-          onPointerDown={(e) => {
-            e.preventDefault();
-            setDisconnectActive(true);
-            handleDisconnect();
-          }}
-          onPointerUp={() => setDisconnectActive(false)}
-          onPointerCancel={() => setDisconnectActive(false)}
-          style={{
-            background: disconnectActive ? "#c42d2d" : "#ed5656",
-            border: "none",
-            borderRadius: 8,
-            cursor: "pointer",
-            transition: "background 0.15s ease",
-            flexShrink: 0,
-            height: 24,
-            boxSizing: "border-box",
-            padding: "0 8px", // horizontal only, vertical handled by height
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <img
-            src={disconnect}
-            width={14}
-            height={14}
-            style={{ display: "block" }}
-          />
-        </button>
-      </div>
+      <ControlSheet
+        id="deck-control-sheet"
+        open={sheetOpen}
+        onClose={() => setSheetOpen(false)}
+        stats={stats}
+        volume={volume}
+        muted={muted}
+        micVolume={micVolume}
+        micMuted={micMuted}
+        isConnected={isConnected}
+        status={status}
+        startVolumeHold={startVolumeHold}
+        stopVolumeHold={stopVolumeHold}
+        sendMuteToggle={sendMuteToggle}
+        handleDisconnect={handleDisconnect}
+        disconnectActive={disconnectActive}
+        setDisconnectActive={setDisconnectActive}
+        editModeApiRef={editModeApiRef}
+      />
 
       {/* FEATURE: Responsive layout — one grid, one map: every tile is placed
           explicitly from layout.placements (gridLine/span pinned to the
@@ -1898,88 +1828,11 @@ export default function App() {
   );
 }
 
-// FEATURE: System stats — pill component
-function StatPill({ label, value, warn }) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 3,
-        background: warn ? "#2e1a0d" : "#1a1a22",
-        border: `1px solid ${warn ? "#5c3a1a" : "#2a2a35"}`,
-        borderRadius: 12,
-        padding: "2px 7px",
-        fontSize: 9,
-        fontVariantNumeric: "tabular-nums",
-        transition: "all 0.5s ease",
-      }}
-    >
-      {label && <span style={{ color: "#444" }}>{label}</span>}
-      <span style={{ color: warn ? "#fb923c" : "#888" }}>{value}</span>
-    </div>
-  );
-}
-
-// FEATURE: Volume controls — volume pill with mini bar in the header
-function VolumePill({ volume, muted }) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 5,
-        background: muted ? "#2e0d0d" : "#1a1a22",
-        border: `1px solid ${muted ? "#5c1a1a" : "#2a2a35"}`,
-        borderRadius: 12,
-        padding: "2px 8px",
-        fontSize: 10,
-        transition: "all 0.3s ease",
-      }}
-    >
-      <Icon
-        name="sound"
-        size={13}
-        style={{
-          display: "block",
-          flexShrink: 0,
-          color: muted ? "#f87171" : "#888",
-        }}
-      />
-      <div
-        style={{
-          width: 32,
-          height: 3,
-          background: "#2a2a35",
-          borderRadius: 2,
-          overflow: "hidden",
-        }}
-      >
-        <div
-          style={{
-            height: "100%",
-            width: "100%",
-            transformOrigin: "left center",
-            transform: `scaleX(${(muted ? 0 : volume) / 100})`,
-            // Level is a quantity, not a health status — neutral white, with red
-            // kept for muted, which is a state worth flagging.
-            background: muted ? "#f87171" : "rgba(255,255,255,0.85)",
-            borderRadius: 2,
-            transition: "transform 0.15s ease",
-          }}
-        />
-      </div>
-      <span
-        style={{
-          color: muted ? "#f87171" : "#888",
-          fontVariantNumeric: "tabular-nums",
-        }}
-      >
-        {muted ? "—" : `${volume}%`}
-      </span>
-    </div>
-  );
-}
+// FEATURE: Mobile customization (Tasks 5.1 + 5.2) — StatPill and VolumePill
+// used to live here as header-only display. Their one consumer moved into the
+// ControlSheet, so StatPill moved with it (see mobile/ControlSheet.jsx) and
+// VolumePill's bar+% readout was upgraded to the sheet's slider row rather
+// than being kept in two places.
 
 // ── FEATURE: Edit Layout (Task 4.3a) — the drag-capable tile shell ──────────
 // `useSortable` is a hook, so it cannot be called conditionally from inside
