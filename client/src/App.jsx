@@ -676,7 +676,7 @@ export default function App() {
         flexDirection: "column",
         height: "100%",
         paddingTop: "env(safe-area-inset-top)",
-        // paddingBottom: "env(safe-area-inset-bottom)",
+        paddingBottom: "env(safe-area-inset-bottom)",
         // paddingLeft: "env(safe-area-inset-left)",
         paddingRight: "env(safe-area-inset-right)",
         background: "radial-gradient(circle at top left, #1f2230, #090909 70%)",
