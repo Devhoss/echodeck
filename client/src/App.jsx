@@ -126,6 +126,54 @@ const rowsForPage = (draft, pageId, serverRows) =>
         .sort((a, b) => a.slot - b.slot)
     : serverRows;
 
+// FEATURE: Edit Layout (Task 4.3a review) — reconcile ONE page's rows against
+// the host's authoritative snapshot. A `state` frame carries per-item rows for
+// exactly one page (`current_page`), and the only way a page gets into the draft
+// is by being *viewed* (folding in `handleDragEnd`, or seeded at entry), which is
+// also when its fresh `state` frame lands. So reconciling the frame's own page is
+// the correct scope — a page the draft does not own is already rendered from
+// server rows and needs nothing.
+//
+// The rule is membership-based, not order-based. `rowsForPage` permanently
+// prefers a folded page's draft rows, so if the server's membership for that page
+// ever diverges from what the client last saw, `diffDraft` keeps emitting a stale
+// `{kind,id,slot}` batch for it, the host's all-or-nothing `applyItemReorder`
+// rejects every such batch (silently — no reply frame), and every future Save for
+// that page is rejected forever while the client reports success. Re-seeding that
+// page from server truth on divergence breaks the cycle: the next diff is
+// computed against the real membership.
+//
+// A pure reorder (same tiles, different order — the whole point of editing) keeps
+// membership identical, so it is NEVER flagged as divergence and an unsaved
+// reorder is never clobbered by an unrelated broadcast. `createDraft` re-densifies
+// per page and leaves the other pages' rows and hand-made order untouched.
+const draftPageDiverges = (draft, pageId, serverItems) => {
+  if (!draft || !draftHasPage(draft, pageId)) return false;
+  const serverSet = new Set(serverItems.map((it) => tileSortKey(it)));
+  const draftRows = draft.items.filter((it) => it.page_id === pageId);
+  // Divergence = membership differs (count, or any id present/absent). Order is
+  // intentionally ignored: a reorder is work to keep, not a mismatch.
+  return (
+    draftRows.length !== serverSet.size ||
+    draftRows.some((it) => !serverSet.has(tileSortKey(it)))
+  );
+};
+
+// Replace `pageId`'s rows with the server snapshot while keeping every other page
+// intact. Returns the input reference when the draft is null (inert outside edit
+// mode). It is applied to whatever draft/baseline the caller is updating, and the
+// caller only reaches it once `draftPageDiverges` has confirmed that model's own
+// membership for the page disagrees with the server — so after a Save (baseline ==
+// draft) a divergent page re-seeds in BOTH and the two converge to identical
+// server rows, and no stale (or spurious) batch is emitted for it again.
+const reseedPageFromServer = (draft, pageId, serverItems) => {
+  if (!draft) return draft;
+  return createDraft([
+    ...draft.items.filter((it) => it.page_id !== pageId),
+    ...serverItems,
+  ]);
+};
+
 // FEATURE: Soundboard — reusable audio player
 // Keeps a single AudioContext alive for the session (avoids mobile autoplay blocks).
 // On iOS/Android WebView the AudioContext must be resumed after a user gesture —
@@ -428,6 +476,52 @@ export default function App() {
         for (const widget of msg.widgets || [])
           next[widget.id] = widget.data || {};
         setWidgetData(next);
+        // FEATURE: Edit Layout (Task 4.3a review) — reconcile the draft against
+        // the host's truth. Save is optimistic: it advances `baseDraft` and shows
+        // an in-progress toast the moment the frame is sent, but the host answers
+        // a *rejected* batch with silence (no reply, no broadcast). If this client's
+        // membership for the page it is viewing has diverged from the server's,
+        // every future reorder batch for that page would be rejected forever. This
+        // re-seeds exactly that page from the snapshot the frame carries — the only
+        // page a `state` frame describes item-by-item, and the only page the user
+        // can fold/edit next, so this is the full scope of the fix.
+        //
+        // There is NO edit-mode ref gate here on purpose: `draft`/`baseDraft` are
+        // null *exactly* while not editing (seeded on entry, dropped on Done /
+        // toggle-exit), so each updater bails on a null/owning-page-free model
+        // before building anything — normal mode does zero work and both setters
+        // no-op by reference, leaving that path byte-for-byte unchanged. A gate
+        // that read a ref written in another effect would also violate the repo's
+        // react-hooks/immutability rule. The decision is membership-based, so an
+        // unsaved reorder (same tiles, different order) is never overwritten.
+        //
+        // 4.3b FOLLOW-UP: once Save commits moves/detachments/size too, confirm
+        // each against this same echo (apply moves/detachments first, then per-page
+        // reorder batches, then size patches) and reconcile those op classes here.
+        const pageId = msg.current_page;
+        const reseedIfDiverged = (prev) => {
+          // Cheap bail-outs first, so normal mode never allocates the snapshot.
+          if (!prev || !draftHasPage(prev, pageId)) return prev;
+          const serverItems = [
+            ...(Array.isArray(msg.buttons) ? msg.buttons : []).map((b) => ({
+              ...b,
+              kind: "button",
+            })),
+            ...(Array.isArray(msg.widgets) ? msg.widgets : []).map((w) => ({
+              ...w,
+              kind: "widget",
+            })),
+          ];
+          // After a Save the baseline owns exactly the draft's pages, so a
+          // divergent page re-seeds in BOTH and the two become identical server
+          // rows: the stale batch disappears, the infinite reject is broken, and
+          // the user re-folds that page from real membership on the next drag.
+          return draftPageDiverges(prev, pageId, serverItems)
+            ? reseedPageFromServer(prev, pageId, serverItems)
+            : prev;
+        };
+        setDraft(reseedIfDiverged);
+        setBaseDraft(reseedIfDiverged);
       }
       if (msg.t === "widget_data") {
         // Merge rather than replace: the frame only carries the ticks whose
@@ -799,11 +893,22 @@ export default function App() {
       showToast(`Save failed: ${error?.message || "socket error"}`);
       return;
     }
-    // Optimistic: the new baseline is the draft we just sent, so a later Save
-    // only reports what changed since. The host answers with a `state`
-    // broadcast, which rebuilds `deckItems` from server truth.
+    // Optimistic, but NOT a claim of success: `baseDraft` advances so a later
+    // Save only reports what changed since, and the toast says the batch is
+    // *waiting* rather than saved — the client cannot verify acceptance from the
+    // send alone (the host replies to a rejected batch with silence). The truth
+    // arrives with the host's `state` broadcast, which the edit-mode reconcile in
+    // that handler uses to re-seed any page whose membership diverged, so a
+    // rejected/stale batch can never loop. Edit mode deliberately stays open; only
+    // `Done` closes it.
+    //
+    // 4.3b FOLLOW-UP: Save currently replays only `reordersByPage`. When it
+    // finalizes the multi-op commit, apply `moves`/`detachments` FIRST (they
+    // re-parent tiles and change page membership), then per-page `reordersByPage`
+    // batches computed against the post-move membership, then `sizePatches` — and
+    // confirm each class against the same host echo the reconcile keys off here.
     setBaseDraft(draft);
-    showToast(batches.length ? "Layout saved" : "Nothing to save");
+    showToast(batches.length ? "Sent — waiting for host" : "Nothing to save");
   }, [baseDraft, draft, showToast]);
 
   // Discard: the draft is dropped and we leave. Deliberately performs no WS or
@@ -1083,8 +1188,11 @@ export default function App() {
   return (
     <div
       style={{
-        // Anchor for the edit-mode overlay (DeckEditorBar), which is absolutely
-        // positioned so it never takes a flex row away from the measured deck.
+        // `position: relative` anchors the edit-mode Save toast (the transient
+        // `position: absolute` status element below), which is the only thing
+        // this container is an offset parent for. DeckEditorBar is NOT absolutely
+        // positioned over here — it is a `flexShrink: 0` row in this column (see
+        // the flex-column structure and its comment near the bottom of this JSX).
         position: "relative",
         display: "flex",
         flexDirection: "column",
@@ -1348,10 +1456,17 @@ export default function App() {
         </div>
       )}
 
-      {/* FEATURE: Edit Layout (Task 4.3a) — the draft lifecycle bar. Overlaid
-          rather than flexed so showing it never re-measures the deck out from
-          under the in-flight drag. Task 4.3b extends this same component with
-          the per-item toolbar for `selectedTileId`. */}
+      {/* FEATURE: Edit Layout (Task 4.3a) — the draft lifecycle bar. It is a
+          `flexShrink: 0` flex row in this column, placed AFTER the deck and the
+          page dots — NOT an absolutely-positioned overlay. An overlay would cover
+          the dots, and the dots are the only page-switch affordance left while
+          editing (the deck-level swipe handler is suppressed), so a multi-page
+          deck could not be edited page-by-page. Taking this row shortens the
+          deck's measured box, and that is fine: `useDeckLayout` observes the
+          container with a ResizeObserver and re-measures on its own, so no engine
+          cooperation is needed and the layout simply re-fits the smaller area.
+          Task 4.3b extends this same component with the per-item toolbar for
+          `selectedTileId`. */}
       <DeckEditorBar
         editMode={editMode}
         dirty={dirty}
