@@ -641,6 +641,12 @@ function deserializeButton(btn) {
 }
 
 function createButton(btn) {
+  // FEATURE: Responsive layout (task 2.2 review) — a new row is stamped with
+  // slot = the page's current item count (both kinds, one SELECT), so a
+  // slot-merge-sorting client appends it at the tail immediately. Falling back
+  // to per-kind `position` via COALESCE would interleave it mid-deck on pages
+  // whose slots were already densified. The value is derived here, never taken
+  // from the caller, so slot stays out of every client-facing whitelist.
   db.prepare(
     `
     INSERT INTO buttons (
@@ -648,8 +654,8 @@ function createButton(btn) {
       action_type, action_value, size,
       is_toggle, toggle_state, toggle_action_type, toggle_action_value,
       actions, button_mode, switch_actions_a, switch_actions_b, switch_state,
-      sound_file, sound_target, audio_device
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      sound_file, sound_target, audio_device, slot
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `,
   ).run(
     btn.id,
@@ -674,6 +680,7 @@ function createButton(btn) {
     btn.sound_file || null,
     btn.sound_target || "phone",
     btn.audio_device || null,
+    nextItemSlot(btn.page_id),
   );
   return getButton(btn.id);
 }
@@ -755,6 +762,26 @@ function getItemRows(page_id) {
       )
       .all(page_id),
   };
+}
+
+/**
+ * Next append slot for a page: total item count across both kinds, in a
+ * single SELECT. Used by the create paths (task 2.2 review) so new rows join
+ * an already-densified slot sequence at the tail instead of relying on
+ * COALESCE(slot, position), whose per-kind position would interleave them
+ * mid-deck for slot-merge-sorting clients.
+ */
+function nextItemSlot(page_id) {
+  // Two aliased columns read off the row object — better-sqlite3 hands back an
+  // object here, not a bare number, and binding that object would be read as
+  // named parameters (RangeError: too few values).
+  const row = db
+    .prepare(
+      `SELECT (SELECT COUNT(*) FROM buttons WHERE page_id=?) AS b,
+              (SELECT COUNT(*) FROM widgets  WHERE page_id=?) AS w`,
+    )
+    .get(page_id, page_id);
+  return row.b + row.w;
 }
 
 /**
@@ -859,10 +886,14 @@ function getWidget(id) {
 
 function createWidget(widget) {
   const defaults = widgetDefaults();
+  // Slot stamping mirrors createButton (task 2.2 review): the page-count slot
+  // keeps a fresh widget at the tail of the interleaved order instead of
+  // COALESCE-ing its per-kind position into the middle of the deck. position
+  // keeps its legacy per-kind value — old clients must not see a change.
   db.prepare(
     `INSERT INTO widgets
-       (id, page_id, type, position, size, label, icon, color, source_id, config)
-     VALUES (?,?,?,?,?,?,?,?,?,?)`,
+       (id, page_id, type, position, size, label, icon, color, source_id, config, slot)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     widget.id,
     widget.page_id,
@@ -876,6 +907,7 @@ function createWidget(widget) {
     typeof widget.config === "string"
       ? widget.config
       : JSON.stringify(widget.config ?? defaults.config),
+    nextItemSlot(widget.page_id),
   );
   return getWidget(widget.id);
 }

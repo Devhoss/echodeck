@@ -257,3 +257,101 @@ test("moveItemSlots rejects a target slot outside 0..target count", () => {
   assert.match(moveItemSlots(currentRows, "b0", 3, target).error, /target slot/);
   assert.match(moveItemSlots(currentRows, "b0", -1, target).error, /target slot/);
 });
+
+// --- moveItemSlots: same-page moves (task 2.2 review) -------------------------
+// Semantics pinned here: a same-page move (movedId present in the target rows)
+// is a legitimate single-list reorder. `target` excludes the moved id from the
+// slices before inserting it at targetSlot — every page item once, slots
+// 0..n-1 — and `source` is returned EQUAL to `target`, because both describe
+// the same page's post-move state (a source compacted to n-1 items could never
+// validate against the page's n rows).
+
+test("moveItemSlots same-page: target excludes the moved id and is a full reorder", () => {
+  // Page order b0@0, w1@1, b2@2; move b0 to slot 2.
+  const rows = {
+    buttons: [
+      { id: "b0", slot: 0 },
+      { id: "b2", slot: 2 },
+    ],
+    widgets: [{ id: "w1", slot: 1 }],
+  };
+  const result = moveItemSlots(rows, "b0", 2, rows);
+  assert.equal(result.error, undefined);
+  assert.deepEqual(result.target, [
+    { kind: "widgets", id: "w1", slot: 0 },
+    { kind: "buttons", id: "b2", slot: 1 },
+    { kind: "buttons", id: "b0", slot: 2 },
+  ]);
+  assert.equal(result.source, result.target);
+});
+
+test("moveItemSlots same-page: produced target passes applyReorder", () => {
+  // The whole point of the fix: what moveItemSlots hands the slot writer must
+  // validate — previously it carried the moved id twice (n+1 length) and every
+  // same-page move 400ed.
+  const rows = {
+    buttons: [{ id: "b0", slot: 0 }],
+    widgets: [{ id: "w1", slot: 1 }],
+  };
+  const plan = moveItemSlots(rows, "w1", 0, rows);
+  const applied = applyReorder(rows, plan.target);
+  assert.equal(applied.error, undefined);
+  assert.deepEqual([...applied.slots], [
+    ["w1", 0],
+    ["b0", 1],
+  ]);
+  // Dense per-kind positions are re-derived (legacy clients unaffected).
+  assert.deepEqual([...applied.positions], [
+    ["w1", 0],
+    ["b0", 0],
+  ]);
+});
+
+test("moveItemSlots same-page: slot range is 0..n-1 (moved id excluded from count)", () => {
+  const rows = {
+    buttons: [
+      { id: "b0", slot: 0 },
+      { id: "b1", slot: 1 },
+    ],
+    widgets: [],
+  };
+  // n = 2 items -> valid slots 0..1; 2 is out of range now that the moved id
+  // no longer inflates the target count.
+  assert.equal(moveItemSlots(rows, "b0", 1, rows).error, undefined);
+  assert.match(moveItemSlots(rows, "b0", 2, rows).error, /target slot/);
+});
+
+test("moveItemSlots same-page: no-op move to the current slot changes nothing", () => {
+  const rows = {
+    buttons: [
+      { id: "b0", slot: 0 },
+      { id: "b1", slot: 1 },
+    ],
+    widgets: [{ id: "w1", slot: 2 }],
+  };
+  const result = moveItemSlots(rows, "w1", 2, rows);
+  assert.deepEqual(result.target, [
+    { kind: "buttons", id: "b0", slot: 0 },
+    { kind: "buttons", id: "b1", slot: 1 },
+    { kind: "widgets", id: "w1", slot: 2 },
+  ]);
+});
+
+test("moveItemSlots cross-page unchanged: moved id absent from target keeps compacted source", () => {
+  // Regression pin for finding 2's "must not regress cross-page": source is
+  // the compacted n-1 list, NOT equal to target.
+  const current = {
+    buttons: [
+      { id: "b0", slot: 0 },
+      { id: "b1", slot: 1 },
+    ],
+    widgets: [],
+  };
+  const other = { buttons: [{ id: "t1", slot: 0 }], widgets: [] };
+  const result = moveItemSlots(current, "b0", 1, other);
+  assert.deepEqual(result.source, [{ kind: "buttons", id: "b1", slot: 0 }]);
+  assert.deepEqual(result.target, [
+    { kind: "buttons", id: "t1", slot: 0 },
+    { kind: "buttons", id: "b0", slot: 1 },
+  ]);
+});

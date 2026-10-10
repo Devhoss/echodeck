@@ -14,9 +14,11 @@
  * `position` for ordering) is read. backfillSlots takes the two row arrays
  * directly and reads {id, position, rowid?, page_id?}.
  *
- * All three functions return `{ error: "<reason>" }` on invalid input and
- * never throw; success Maps are built in slot order, so iterating them yields
- * items top-to-bottom on the page.
+ * `applyReorder` and `moveItemSlots` return `{ error: "<reason>" }` on invalid
+ * input and never throw; success Maps are built in slot order, so iterating
+ * them yields items top-to-bottom on the page. `backfillSlots` has no invalid
+ * input to reject — it is called only from the migration's own SELECTs with
+ * two well-formed row arrays — and always returns its rows array.
  */
 
 const KINDS = ["buttons", "widgets"];
@@ -133,6 +135,12 @@ function applyReorder(existingRows, submitted) {
  * targetSlot up by one. Returns two submitted lists — {source, target} — each
  * directly consumable by applyReorder against its page's rows. Rows are read
  * in slot order, falling back to legacy position when slot is absent.
+ * Same-page move (movedId is already among the target rows) is a legitimate
+ * single-list reorder: the moved id is excluded from the target slices before
+ * insertion, so `target` holds every page item exactly once over 0..n-1; and
+ * because source and target describe the SAME page, `source` is returned equal
+ * to `target` (the post-move state) — a compacted source could never validate
+ * against the page's n rows anyway.
  */
 function moveItemSlots(currentRows, movedId, targetSlot, targetPageRows) {
   if (!isRowGroup(currentRows) || !isRowGroup(targetPageRows)) {
@@ -143,20 +151,26 @@ function moveItemSlots(currentRows, movedId, targetSlot, targetPageRows) {
   if (!kind) return { error: `moved id "${movedId}" not found on the current page` };
 
   const flatSource = flattenOrdered(currentRows);
-  const flatTarget = flattenOrdered(targetPageRows);
+  const fullFlatTarget = flattenOrdered(targetPageRows);
+  // The moved id cannot be on two pages at once, so its presence in the
+  // target rows identifies a same-page move.
+  const samePage = fullFlatTarget.some((e) => e.id === movedId);
+  const flatTarget = samePage
+    ? fullFlatTarget.filter((e) => e.id !== movedId)
+    : fullFlatTarget;
   if (!Number.isInteger(targetSlot) || targetSlot < 0 || targetSlot > flatTarget.length) {
     return { error: `target slot ${targetSlot} is out of range 0..${flatTarget.length}` };
   }
 
+  const target = [
+    ...flatTarget.slice(0, targetSlot).map((e, i) => ({ kind: e.kind, id: e.id, slot: i })),
+    { kind, id: movedId, slot: targetSlot },
+    ...flatTarget.slice(targetSlot).map((e, i) => ({ kind: e.kind, id: e.id, slot: targetSlot + i + 1 })),
+  ];
+  if (samePage) return { source: target, target };
   const source = flatSource
     .filter((e) => e.id !== movedId)
     .map((e, i) => ({ kind: e.kind, id: e.id, slot: i }));
-  const moved = { kind, id: movedId };
-  const target = [
-    ...flatTarget.slice(0, targetSlot).map((e, i) => ({ kind: e.kind, id: e.id, slot: i })),
-    { kind: moved.kind, id: moved.id, slot: targetSlot },
-    ...flatTarget.slice(targetSlot).map((e, i) => ({ kind: e.kind, id: e.id, slot: targetSlot + i + 1 })),
-  ];
   return { source, target };
 }
 
