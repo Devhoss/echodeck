@@ -19,20 +19,37 @@ export function useDeckLayout(containerRef, { items, settings }) {
   // never during render (writing a ref in render is a React error, and the
   // lint rule that caught it in widgets/panelHelpers.js applies the same way).
   const liveRef = useRef({ items, settings });
+
+  // Promote the observed element to state: a ref object's identity is
+  // permanently stable, so the measuring effect could never notice the
+  // container attaching, detaching, or being swapped for a different node.
+  // The no-deps commit effect below re-runs the measuring effect (via this
+  // state) whenever containerRef.current actually changes.
+  const [element, setElement] = useState(null);
+
+  // Polling containerRef.current on every commit is the only way to observe a
+  // caller-owned ref whose object identity never changes (attach/detach/swap).
+  // setElement's Object.is bailout makes the depsless setState idempotent, so
+  // the infinite-chain this heuristic warns about cannot occur.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useLayoutEffect(() => {
     liveRef.current = { items, settings };
+    // Polled on every commit; setState bails out via Object.is when the node
+    // is unchanged, so this costs no extra render in the steady state.
+    setElement(containerRef?.current ?? null);
   });
 
   useLayoutEffect(() => {
-    const el = containerRef?.current;
-    if (!el) return;
+    // No element (not yet mounted, or detached/swapped away): stop observing
+    // and keep the last layout, so a transient swap never blanks the deck.
+    if (!element) return;
 
     let frame = 0;
     let lastKey = null;
 
     const measure = () => {
-      const cs = getComputedStyle(el);
-      const box = el.getBoundingClientRect();
+      const cs = getComputedStyle(element);
+      const box = element.getBoundingClientRect();
       // Content box, not border box: the rect includes padding, which
       // historically made tiles a few px too big and pushed the last row
       // under the container's clip (the App.jsx padding trap).
@@ -67,7 +84,7 @@ export function useDeckLayout(containerRef, { items, settings }) {
     // rotation — the viewport changes without the box reporting in time —
     // so the window events back it up. All three paths call the same schedule.
     const ro = new ResizeObserver(schedule);
-    ro.observe(el);
+    ro.observe(element);
     window.addEventListener("resize", schedule);
     window.addEventListener("orientationchange", schedule);
 
@@ -77,10 +94,10 @@ export function useDeckLayout(containerRef, { items, settings }) {
       window.removeEventListener("resize", schedule);
       window.removeEventListener("orientationchange", schedule);
     };
-    // containerRef is a stable object identity from the caller; the effect
-    // re-runs (cleanup + re-observe) only when the ref object or the
-    // layout-relevant keys change.
-  }, [containerRef, itemsKey, settingsKey]);
+    // Keyed on the promoted `element` (not the stable containerRef identity) so
+    // attach / detach / swap tears down the old observation and re-observes the
+    // new node; it also re-runs when the layout-relevant keys change.
+  }, [element, itemsKey, settingsKey]);
 
   return layout;
 }
