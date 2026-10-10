@@ -1,38 +1,69 @@
-// FEATURE: Mobile customization (Task 5.2) — controlSheet tests for the one
-// pure rule inside the sheet's volume slider: a tap maps to exactly one
-// host-side bump via the existing hold protocol (see src/mobile/volumeTap.js).
+// FEATURE: Mobile customization (Task 5.2, fix round 1) — the pure rule behind
+// the sheet's volume slider: a change event maps to ONE `volume_set` frame
+// carrying the ABSOLUTE level (see src/mobile/volumeTap.js). No start/stop pair,
+// no delta, no host hold race.
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { sliderTapArgs } from "../src/mobile/volumeTap.js";
+import { sliderSetArgs } from "../src/mobile/volumeTap.js";
 
-test("sliderTapArgs: higher tap target bumps up by the delta", () => {
-  assert.deepEqual(sliderTapArgs(40, "52"), { direction: "up", step: 12 });
+test("sliderSetArgs: higher slider value sets the absolute level", () => {
+  assert.deepEqual(sliderSetArgs("speaker", "52"), {
+    kind: "set",
+    level: 52,
+    target: "speaker",
+  });
 });
 
-test("sliderTapArgs: lower tap target bumps down", () => {
-  assert.deepEqual(sliderTapArgs(70, 55), { direction: "down", step: 15 });
+test("sliderSetArgs: lower slider value sets the absolute level (mic)", () => {
+  assert.deepEqual(sliderSetArgs("mic", 30), {
+    kind: "set",
+    level: 30,
+    target: "mic",
+  });
 });
 
-test("sliderTapArgs: step clamps to the host's hold range [1, 20]", () => {
-  // The host clamps every hold step to 20, so a far slider tap moves the
-  // largest single legal bump rather than teleporting the full distance.
-  assert.deepEqual(sliderTapArgs(10, 100), { direction: "up", step: 20 });
-  assert.deepEqual(sliderTapArgs(100, 0), { direction: "down", step: 20 });
-  assert.deepEqual(sliderTapArgs(70, 45), { direction: "down", step: 20 });
+test("sliderSetArgs: level clamps to 0..100", () => {
+  // The host clamps the absolute level the same way; a far drag reports the
+  // true target, never a wrapped/overshooting value.
+  assert.equal(sliderSetArgs("speaker", 140).level, 100);
+  assert.equal(sliderSetArgs("speaker", -8).level, 0);
 });
 
-test("sliderTapArgs: no-op taps send nothing", () => {
-  assert.equal(sliderTapArgs(35, 35), null);
-  // A delta that rounds to zero cannot move the level — send nothing.
-  assert.equal(sliderTapArgs(10.2, 10.4), null);
+test("sliderSetArgs: a full-range set is exact, not a ≤20 bump", () => {
+  // The old hold helper clamped a single move to 20 so a far tap undershot.
+  // Absolute set lands the whole distance in one frame.
+  assert.deepEqual(sliderSetArgs("speaker", 100), {
+    kind: "set",
+    level: 100,
+    target: "speaker",
+  });
+  assert.deepEqual(sliderSetArgs("speaker", 0), {
+    kind: "set",
+    level: 0,
+    target: "speaker",
+  });
 });
 
-test("sliderTapArgs: a missing current level is never guessed as 0", () => {
-  assert.equal(sliderTapArgs(null, 40), null);
-  assert.equal(sliderTapArgs(undefined, 40), null);
+test("sliderSetArgs: value is rounded to an integer level", () => {
+  assert.equal(sliderSetArgs("speaker", "40.6").level, 41);
 });
 
-test("sliderTapArgs: unparseable slider values send nothing", () => {
-  assert.equal(sliderTapArgs(40, "abc"), null);
+test("sliderSetArgs: unparseable or empty slider values send nothing", () => {
+  assert.equal(sliderSetArgs("speaker", "abc"), null);
+  assert.equal(sliderSetArgs("speaker", ""), null);
+  assert.equal(sliderSetArgs("speaker", null), null);
+  assert.equal(sliderSetArgs("speaker", undefined), null);
+});
+
+test("sliderSetArgs: rapid change events emit one absolute set each, not deltas", () => {
+  // A fast 40→55 drag fires several events; each must carry the FULL target of
+  // that event (45, 50, 55), never a delta off a stale prop that could sum past
+  // the finger. This is the reviewer's invariant.
+  const drag = ["45", "50", "55"].map((v) => sliderSetArgs("speaker", v));
+  assert.deepEqual(
+    drag.map((f) => f && f.level),
+    [45, 50, 55],
+  );
+  assert.ok(drag.every((f) => f && f.kind === "set"));
 });

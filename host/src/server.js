@@ -1135,6 +1135,23 @@ wss.on("connection", (ws, req) => {
       executeAction("mic_mute", "").then(() => broadcastVolumeNow());
     }
 
+    // FEATURE: Mobile control sheet — absolute slider set. A slider change
+    // carries the tapped level directly, so the host sets it in one action
+    // instead of the hold protocol's start/stop pair. That pair raced: the
+    // Voicemeeter-first `await getVolume()` in volume_hold_start is real async
+    // I/O, and a `volume_hold_stop` arriving mid-await makes the generation
+    // guard ABANDON the hold entirely, so back-to-back start+stop (same JS
+    // task) landed zero volume change on real hosts. Setting an absolute level
+    // has no such window. Both action types already exist (volume_set /
+    // mic_volume_set in actions.js); this only wires them to a WS frame and
+    // resyncs every client through the same broadcast the holds end with.
+    if (msg.t === "volume_set") {
+      const isMic = msg.target === "mic";
+      const level = Math.max(0, Math.min(100, parseInt(msg.level, 10) || 0));
+      executeAction(isMic ? "mic_volume_set" : "volume_set", String(level))
+        .then(() => broadcastVolumeNow());
+    }
+
     if (msg.t === "switch_page") {
       manualSwitchPausedUntil = Date.now() + 15000;
       ws.currentPage = msg.page_id;

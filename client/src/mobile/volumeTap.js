@@ -1,33 +1,33 @@
-// FEATURE: Mobile customization (Task 5.2) — the one pure rule behind the
-// control sheet's volume slider. A slider tap cannot "set" a level: the host
-// only moves volume through the existing hold protocol (volume_hold_start /
-// volume_hold_stop), and the host runs one synchronous tick before installing
-// its repeat interval. So a start/stop pair with step = |target − current|
-// lands exactly one bump that reaches the tapped position. This helper turns
-// the tap into those two arguments, or says "nothing to do".
+// FEATURE: Mobile customization (Task 5.2, fix round 1) — the one pure rule
+// behind the control sheet's volume slider. A slider change now maps to a
+// dedicated `volume_set` frame carrying the ABSOLUTE tapped level, not a
+// start/stop hold pair.
 //
-// The clamp range mirrors the host's own clamp of `step` (server.js
-// volume_hold_start) and the client-side VOLUME_STEP_* range in App.jsx: a
-// far slider tap therefore moves the largest single legal bump (20), not the
-// whole remaining distance — repeat the tap to walk the rest of the way.
-
-export const SHEET_STEP_MIN = 1;
-export const SHEET_STEP_MAX = 20;
+// Why the change: the hold protocol raced. On the Voicemeeter-first path the
+// host's `volume_hold_start` does a real `await getVolume()` before installing
+// its repeat interval, and its generation guard ABANDONS the hold when a
+// `volume_hold_stop` arrives mid-await. The client sent start+stop back-to-back
+// in the same JS task, so on real hosts the pair landed ZERO volume change. A
+// single absolute `volume_set` has no such window.
+//
+// Because the level is absolute, a rapid sequence of drag/change events each
+// emit one `set` with the full target value — deltas never accumulate, so there
+// is no clamped-step overshoot past the finger position.
+//
+// Clamp mirrors the host's own `volume_set` clamp (server.js / actions.js): a
+// level outside 0–100 is clamped, and an unparseable value sends nothing.
 
 /**
- * @param {number|null|undefined} current  the level the sheet currently shows (0–100)
- * @param {number|string} next             the value the user tapped on the slider (0–100)
- * @returns {{direction: "up"|"down", step: number} | null} null = send nothing
+ * @param {"speaker"|"mic"} kind  which output the slider controls
+ * @param {number|string} next     the value the user dragged/tapped to (0–100)
+ * @returns {{kind: "set", level: number, target: "speaker"|"mic"} | null} null = send nothing
  */
-export function sliderTapArgs(current, next) {
-  // `Number(null)` is 0, so a missing level must be rejected before coercion —
-  // guessing "0" would bump the real level by the whole tapped distance.
-  if (current === null || current === undefined) return null;
-  const cur = Number(current);
+export function sliderSetArgs(kind, next) {
+  // `Number(null)`/`Number("")` are 0, so an empty slider value must be
+  // rejected before coercion — guessing "0" would slam the real level to mute.
+  if (next === null || next === undefined || next === "") return null;
   const nx = Number(next);
-  if (!Number.isFinite(cur) || !Number.isFinite(nx)) return null;
-  const delta = Math.round(nx - cur);
-  if (delta === 0) return null;
-  const step = Math.min(SHEET_STEP_MAX, Math.max(SHEET_STEP_MIN, Math.abs(delta)));
-  return { direction: delta > 0 ? "up" : "down", step };
+  if (!Number.isFinite(nx)) return null;
+  const level = Math.max(0, Math.min(100, Math.round(nx)));
+  return { kind: "set", level, target: kind === "mic" ? "mic" : "speaker" };
 }

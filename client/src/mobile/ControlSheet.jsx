@@ -19,7 +19,7 @@
 import { useEffect, useRef, useState } from "react";
 import disconnect from "/disconnect.svg";
 import { ActionIcon, Icon } from "../icons.jsx";
-import { sliderTapArgs } from "./volumeTap.js";
+import { sliderSetArgs } from "./volumeTap.js";
 
 // One tap of the sheet's minus/plus keys. Matches VOLUME_STEP_DEFAULT in
 // App.jsx (and the host's fallback), because the sheet has no per-button step
@@ -50,12 +50,16 @@ function StatPill({ label, value, warn }) {
   );
 }
 
-// FEATURE: Volume controls — one level row (speaker or mic). Hold-to-repeat
-// reuses the exact same WS protocol the tile volume keys use
-// (`startVolumeHold`/`stopVolumeHold`), so repeat semantics are identical; a
-// slider tap becomes a one-step start/stop pair via sliderTapArgs; the mute
-// button sends the sheet-only `mute_toggle`/`mic_mute_toggle` frame and the
-// level/mute state comes back through the existing broadcast.
+// FEATURE: Volume controls — one level row (speaker or mic). The minus/plus
+// keys hold-to-repeat with the exact same WS protocol the tile volume keys use
+// (`startVolumeHold`/`stopVolumeHold`); the hold works there because the finger
+// stays down (start tick fires, interval installs, stop clears later). The
+// slider is different: a drag/tap emits `change` events, and each now sends one
+// absolute `volume_set` frame via `sliderSetArgs` + `sendVolumeSet`. The old
+// start/stop pair raced the host's async volume read and landed zero change
+// (see volumeTap.js). The mute button sends the sheet-only
+// `mute_toggle`/`mic_mute_toggle` frame; every level/mute state comes back
+// through the existing broadcast.
 function LevelRow({
   kind,
   label,
@@ -64,8 +68,21 @@ function LevelRow({
   startVolumeHold,
   stopVolumeHold,
   sendMuteToggle,
+  sendVolumeSet,
+  className,
 }) {
   const level = value ?? 0;
+  // While a `volume_set` is in flight the `value` prop is still the pre-change
+  // echo, so the range thumb would rubber-band back mid-drag. Latch the last
+  // level we SENT and drive the input from it until the broadcast echo returns.
+  // This is derived state — reset it during render when the echoed prop changes
+  // (React's blessed pattern), which avoids both a render-time ref read and a
+  // setState-in-effect, each of which `react-hooks` lint forbids.
+  const [pending, setPending] = useState({ echoed: value, level: null });
+  if (pending.echoed !== value) {
+    setPending({ echoed: value, level: null });
+  }
+  const sliderValue = pending.level ?? (muted ? 0 : level);
   const icon =
     kind === "mic"
       ? muted
@@ -94,6 +111,7 @@ function LevelRow({
 
   return (
     <div
+      className={className}
       style={{
         display: "flex",
         alignItems: "center",
@@ -138,15 +156,15 @@ function LevelRow({
         min={0}
         max={100}
         step={1}
-        value={muted ? 0 : level}
+        value={sliderValue}
         aria-label={`${label} level`}
         onChange={(e) => {
-          const args = sliderTapArgs(value, e.target.value);
-          if (!args) return;
-          // A start/stop pair lands exactly one synchronous bump on the host,
-          // sized to reach the tapped position (clamped to the hold-step range).
-          startVolumeHold(args.direction, args.step, kind);
-          stopVolumeHold();
+          const frame = sliderSetArgs(kind, e.target.value);
+          if (!frame) return;
+          // Absolute set: latch the value we send so the thumb tracks the
+          // finger until the host echo returns, then hand the frame to the WS.
+          setPending({ echoed: value, level: frame.level });
+          sendVolumeSet(frame.level, frame.target);
         }}
         style={{
           flex: 1,
@@ -215,6 +233,7 @@ export default function ControlSheet({
   startVolumeHold,
   stopVolumeHold,
   sendMuteToggle,
+  sendVolumeSet,
   handleDisconnect,
   disconnectActive,
   setDisconnectActive,
@@ -379,14 +398,24 @@ export default function ControlSheet({
             </div>
           )}
 
+          {/* Volume + mic rows span BOTH columns in the narrow (<500px) flow.
+              Their min-content is ~236px (icon+label+readout with
+              flexShrink:0, plus a 48px slider floor), which cannot fit a ~172px
+              half-column on a 390px phone — the mute button and readout would be
+              clipped by the sheet's overflow:hidden. Full-width rows remove the
+              clip while the STATS row keeps the 2-column reclaim the brief
+              wanted. Above 499px the grid is single-column, so the class is a
+              no-op. */}
           <LevelRow
             kind="speaker"
             label="Vol"
             value={volume}
             muted={muted}
+            className="deck-sheet-span-all"
             startVolumeHold={startVolumeHold}
             stopVolumeHold={stopVolumeHold}
             sendMuteToggle={sendMuteToggle}
+            sendVolumeSet={sendVolumeSet}
           />
 
           <LevelRow
@@ -394,9 +423,11 @@ export default function ControlSheet({
             label="Mic"
             value={micVolume}
             muted={micMuted}
+            className="deck-sheet-span-all"
             startVolumeHold={startVolumeHold}
             stopVolumeHold={stopVolumeHold}
             sendMuteToggle={sendMuteToggle}
+            sendVolumeSet={sendVolumeSet}
           />
 
           {/* Connection status pill + Disconnect button — relocated verbatim
@@ -490,10 +521,10 @@ export default function ControlSheet({
               aria-disabled="true"
               title="Phase 6 will open layout preferences here"
               onClick={(e) => {
+                // Placeholder until Phase 6: non-interactive, but still stop
+                // the href from jumping the page / writing #settings into the
+                // URL. No toast system exists yet, so this is a bare no-op.
                 e.preventDefault();
-                console.log(
-                  "[ControlSheet] Settings is a placeholder until Phase 6",
-                );
               }}
               style={{
                 display: "flex",
