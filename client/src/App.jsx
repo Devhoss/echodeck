@@ -985,16 +985,43 @@ export default function App() {
   );
 
   const handleMoveToPage = useCallback(
-    (id, pageId) => {
+    (id, targetPageId) => {
       if (!draft) return;
-      const working = foldPageIntoDraft(draft, currentPage, deckItems);
-      const next = moveToPage(working, id, pageId);
+      // Fold the source page (already done for the drag/resize path) AND the
+      // TARGET page before moving, so the draft's target order is always a
+      // COMPLETE permutation. Without the target fold moveToPage builds a
+      // one-tile target list from the draft's empty view of that page, so
+      // diffDraft emits a partial reorder batch the host's all-or-nothing
+      // applyReorder silently rejects (and the edit view is briefly incomplete).
+      // Fold from baseDraft's rows — the server-derived membership already in
+      // memory — so this stays local: no fetch, no host write before Save.
+      // Unfiled is skipped: it is materialized fresh at Save and legitimately
+      // starts empty, so its reorder batch already covers its (new) membership.
+      // Pre-move no-ops (same page / unknown id) are preserved: moveToPage
+      // returns the same reference and nothing is committed.
+      let working = foldPageIntoDraft(draft, currentPage, deckItems);
+      if (
+        targetPageId !== UNFILED_TARGET &&
+        baseDraft &&
+        !draftHasPage(working, targetPageId)
+      ) {
+        const targetRows = baseDraft.items.filter(
+          (it) => it.page_id === targetPageId,
+        );
+        // Only fold when the target has known membership to bring in; an empty
+        // target (a never-viewed page) is left to self-heal on navigation, and
+        // skipping createDraft keeps the no-op/reference-stable path intact.
+        if (targetRows.length) {
+          working = foldPageIntoDraft(working, targetPageId, targetRows);
+        }
+      }
+      const next = moveToPage(working, id, targetPageId);
       if (next !== working) {
         setDraft(next);
         setSelectedTileId(null);
       }
     },
-    [draft, currentPage, deckItems],
+    [draft, currentPage, deckItems, baseDraft],
   );
 
   // detach's 3rd arg is a LAZY callback (per the module docblock) invoked only
@@ -1105,6 +1132,9 @@ export default function App() {
       // Sorted by the draft's dense target slot ascending so each append lands
       // within the target page's current length (a first detach onto the empty
       // Unfiled page needs slot 0; ordering ascending keeps every slot in range).
+      // Invariant: ascending order keeps each item's target slot <= the host's
+      // current page length before that move (distinct dense slots), so the
+      // batch cannot spuriously 400-abort.
       const transfers = [...diff.moves, ...diff.detachments].sort(
         (a, b) => a.toSlot - b.toSlot,
       );
