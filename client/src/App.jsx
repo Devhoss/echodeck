@@ -1,11 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  memo,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
 import ReconnectingWebSocket from "reconnecting-websocket";
 import { Haptics, ImpactStyle } from "@capacitor/haptics";
 import deck from "/deck-icon.png";
@@ -25,6 +18,27 @@ import PairingScreen from "./PairingScreen.jsx";
 import { ButtonFace, Icon } from "./icons.jsx";
 import { useDeckLayout } from "./layout/useDeckLayout.js";
 import { mergeLayout } from "./layout/layoutSettings.js";
+// FEATURE: Edit Layout (Phase 4, Task 4.3a) — the pure draft model. Only the
+// three operations this sub-task needs are imported; resize/moveToPage/detach
+// arrive with the per-item toolbar in Task 4.3b.
+import { createDraft, reorder, diffDraft } from "./layout/layoutDraft.js";
+import DeckEditorBar from "./mobile/DeckEditorBar.jsx";
+// FEATURE: Edit Layout — the same dnd-kit surface the desktop editor already
+// uses (see desktop/DesktopApp.jsx). Only the reorder plumbing is wired here.
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  rectIntersection,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  rectSortingStrategy,
+  useSortable,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { WidgetTile } from "./widgets/WidgetTile.jsx";
 import { SystemMonitorWidget } from "./widgets/SystemMonitorWidget.jsx";
 import {
@@ -72,6 +86,45 @@ function volumeStepFor(btn) {
 // FEATURE: Hold to confirm — how long a guarded button must be held before it fires.
 // Long enough that a stray brush can't complete it, short enough not to feel stuck.
 const HOLD_CONFIRM_MS = 700;
+
+// FEATURE: Edit Layout (Task 4.3a) — the long-press door into edit mode. It has
+// to be clearly longer than a tap but shorter than the guarded-button hold, or
+// the two gestures would be indistinguishable; and it aborts on the same 10 px
+// travel dnd-kit uses to activate a drag, so a deliberate swipe-to-page or a
+// scroll never arms it.
+const LONG_PRESS_ENTER_EDIT_MS = 500;
+const LONG_PRESS_CANCEL_PX = 10;
+
+// Tiles are keyed by a composite "kind:id" for both the draft model and dnd-kit:
+// buttons and widgets have independent numeric id sequences, so a bare id is not
+// unique across kinds (see the identity section of layoutDraft.js).
+const tileSortKey = (it) => `${it.kind}:${it.id}`;
+
+// A module-level empty list keeps `SortableContext`'s `items` prop reference
+// stable outside edit mode, instead of a fresh `[]` on every render.
+const EMPTY_SORTABLE_IDS = [];
+
+// The dnd-kit / draft id for a tile. Rows that came out of `createDraft` carry a
+// normalized `key`; a page the draft does not own yet is still rendered from the
+// host's rows, which do not — so the key is derived the same way either way.
+const sortKeyOf = (it) => it.key ?? tileSortKey(it);
+
+// Does the draft own this page yet? A page the user has not edited is still
+// represented by the host's rows rather than by a copy parked in the draft, so a
+// multi-page deck can be edited page-by-page (acceptance: "page switching
+// preserves the draft across pages") without an effect copying state into state.
+// Once a page HAS been edited its draft rows win and the host's order is ignored
+// — which is exactly what makes the draft survive a page flip. Both helpers are
+// pure and take everything as arguments, so they live at module scope.
+const draftHasPage = (draft, pageId) =>
+  !!draft && draft.items.some((it) => it.page_id === pageId);
+
+const rowsForPage = (draft, pageId, serverRows) =>
+  draft && draftHasPage(draft, pageId)
+    ? draft.items
+        .filter((it) => it.page_id === pageId)
+        .sort((a, b) => a.slot - b.slot)
+    : serverRows;
 
 // FEATURE: Soundboard — reusable audio player
 // Keeps a single AudioContext alive for the session (avoids mobile autoplay blocks).
@@ -240,6 +293,22 @@ export default function App() {
   // door and the EditorBar, so nothing here lets a user flip this yet — the
   // setter is handed off through editModeApiRef for that future control.
   const [editMode, setEditMode] = useState(false);
+  // FEATURE: Edit Layout (Task 4.3a) — the in-memory draft. `draft` is the live
+  // working model (null outside edit mode); `baseDraft` is the snapshot it was
+  // seeded from, which is what `diffDraft` compares against and what Discard
+  // reverts to. Both are treated as immutable (every layoutDraft op returns a
+  // new object), so seeding them from the same reference is intentional.
+  const [draft, setDraft] = useState(null);
+  const [baseDraft, setBaseDraft] = useState(null);
+  // The tile the editor bar's (Task 4.3b) toolbar will act on, plus the tile
+  // currently under the finger for the DragOverlay ghost, plus a transient
+  // inline Save failure. All three only mean anything while `editMode` is on.
+  const [selectedTileId, setSelectedTileId] = useState(null);
+  const [activeDragId, setActiveDragId] = useState(null);
+  const [editToast, setEditToast] = useState(null);
+  // Timestamp of the last completed/cancelled drag, so the click a drag also
+  // emits cannot land a second, contradictory selection flip.
+  const lastDragEndAtRef = useRef(0);
   const [status, setStatus] = useState("connecting");
   const [pressing, setPressing] = useState(null);
   // FEATURE: System stats
@@ -271,16 +340,6 @@ export default function App() {
     loadPairConfig();
     return getWsUrl(); // non-null if already paired
   });
-
-  // FEATURE: Edit Layout (Phase 4) — hand the edit-mode toggle to the future
-  // EditorBar / control sheet (Tasks 4.3 and 5.3) without adding a user-facing
-  // entry point yet. The setter is mirrored into a ref from an effect (never
-  // during render) so the deck's default (non-edit) behavior stays untouched.
-  const toggleEditMode = useCallback(() => setEditMode((v) => !v), []);
-  const editModeApiRef = useRef(null);
-  useEffect(() => {
-    editModeApiRef.current = { editMode, toggleEditMode };
-  }, [editMode, toggleEditMode]);
 
   // Forget this host and fall back to the pairing screen. Used both when the
   // user disconnects deliberately and when the host rejects our credential.
@@ -366,7 +425,8 @@ export default function App() {
         // last known snapshot attached, so the first paint already has numbers.
         setWidgets(Array.isArray(msg.widgets) ? msg.widgets : []);
         const next = {};
-        for (const widget of msg.widgets || []) next[widget.id] = widget.data || {};
+        for (const widget of msg.widgets || [])
+          next[widget.id] = widget.data || {};
         setWidgetData(next);
       }
       if (msg.t === "widget_data") {
@@ -512,7 +572,9 @@ export default function App() {
       ...buttons.map((b) => ({ ...b, kind: "button" })),
       ...widgetsForPage.map((w) => ({ ...w, kind: "widget" })),
     ];
-    return merged.sort((a, b) => (a.slot ?? a.position) - (b.slot ?? b.position));
+    return merged.sort(
+      (a, b) => (a.slot ?? a.position) - (b.slot ?? b.position),
+    );
   }, [buttons, widgetsForPage]);
 
   // Layout knobs: task 3.1 scope resolves the current page's layout_config over
@@ -520,22 +582,240 @@ export default function App() {
   // phase 6 wires the global scope in by replacing the null first argument.
   const layoutSettings = useMemo(
     () =>
-      mergeLayout(
-        null,
-        pages.find((p) => p.id === currentPage)?.layout_config,
-      ),
+      mergeLayout(null, pages.find((p) => p.id === currentPage)?.layout_config),
     [pages, currentPage],
   );
 
+  // ── FEATURE: Edit Layout (Task 4.3a) ──────────────────────────────────────
+  // Declared here — before the engine call below — because the measure hook has
+  // to be fed the draft's tile order while editing, and it references
+  // `deckItems`/`currentPage` which an earlier callback could not reach without
+  // a use-before-define.
+
+  // A page the draft does not own yet is read straight from the host's rows (see
+  // the module-level helpers), so no effect has to mirror server state into the
+  // draft, and the render path and the drop path agree on one source of truth.
+  const toggleEditMode = useCallback(() => {
+    if (editMode) {
+      // Leaving edit mode always tears the draft down with it.
+      setDraft(null);
+      setBaseDraft(null);
+      setSelectedTileId(null);
+      setActiveDragId(null);
+      setEditMode(false);
+      return;
+    }
+    const seeded = createDraft(deckItems);
+    setDraft(seeded);
+    setBaseDraft(seeded);
+    setSelectedTileId(null);
+    setEditMode(true);
+  }, [editMode, deckItems]);
+
+  // Hand the toggle to the EditorBar / future control sheet (Tasks 4.3, 5.3).
+  // Mirrored from an effect, never during render, so the deck's default
+  // (non-edit) behavior stays untouched.
+  const editModeApiRef = useRef(null);
+  useEffect(() => {
+    editModeApiRef.current = { editMode, toggleEditMode };
+  }, [editMode, toggleEditMode]);
+
+  // Tiles while editing: the draft's rows for the page being viewed, in draft
+  // slot order. Reordering the draft therefore moves the real tiles, and this is
+  // exactly the list handed to dnd-kit's SortableContext.
+  //
+  // Deliberately NO in-flight drop preview here: previewing a hovered cell means
+  // re-running the engine on the draft for every pointer move, which is Task
+  // 4.3b's job. During a drag dnd-kit offsets the neighbours itself, so the
+  // gesture still reads correctly; the committed order lands on drop.
+  const editTiles = useMemo(() => {
+    if (!editMode || !draft || currentPage == null) return null;
+    return rowsForPage(draft, currentPage, deckItems);
+  }, [editMode, draft, currentPage, deckItems]);
+
+  // The engine is fed the draft order while editing and the exact same
+  // `deckItems` reference otherwise, so the non-edit render path is untouched.
+  const renderItems = editTiles ?? deckItems;
+
   // The engine contract {cols, cell, gap, placements, scrollY}, measured from
   // deckRef pre-paint and re-measured on resize/rotation by useDeckLayout.
-  // placements align with deckItems order; null until the first measure, so
-  // the render below must guard. Replaces the old columnsFor/keySize heuristic
-  // (which measured only the square cell and placed nothing explicitly).
+  // placements align with `renderItems` order; null until the first measure, so
+  // the render below must guard.
   const layout = useDeckLayout(deckRef, {
-    items: deckItems,
+    items: renderItems,
     settings: layoutSettings,
   });
+
+  const sortableIds = useMemo(
+    () => (editTiles ? editTiles.map(sortKeyOf) : EMPTY_SORTABLE_IDS),
+    [editTiles],
+  );
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 10 } }),
+  );
+
+  // Structural dirtiness, not reference dirtiness: a drag that landed back where
+  // it started (or a no-op draft op) leaves `draft !== baseDraft` yet changes
+  // nothing, and Save must not fire a pointless WS frame on that.
+  const dirty = useMemo(() => {
+    if (!baseDraft || !draft || draft === baseDraft) return false;
+    const diff = diffDraft(baseDraft, draft);
+    return (
+      Object.keys(diff.reordersByPage).length > 0 ||
+      diff.sizePatches.length > 0 ||
+      diff.moves.length > 0 ||
+      diff.detachments.length > 0
+    );
+  }, [baseDraft, draft]);
+
+  // The row under the finger, resolved from the SAME list the grid rendered, so
+  // a page that is still represented by host rows (not yet folded into the
+  // draft) still gets a ghost.
+  const activeDragItem = useMemo(
+    () =>
+      editTiles && activeDragId
+        ? editTiles.find((it) => sortKeyOf(it) === activeDragId)
+        : null,
+    [editTiles, activeDragId],
+  );
+
+  // The ghost has to be drawn at the tile's real footprint, otherwise a 2x2 key
+  // would shrink to a 1x1 square the moment it left its cell. Read straight off
+  // the engine placement for the dragged tile's current index.
+  const activeDragSpan = useMemo(() => {
+    if (!activeDragItem || !layout) return { cols: 1, rows: 1 };
+    const key = sortKeyOf(activeDragItem);
+    const i = renderItems.findIndex((it) => sortKeyOf(it) === key);
+    const p = i >= 0 ? layout.placements[i] : null;
+    return p ? p.span : { cols: 1, rows: 1 };
+  }, [activeDragItem, layout, renderItems]);
+
+  const handleDragStart = useCallback((event) => {
+    const id = String(event.active.id);
+    setActiveDragId(id);
+    // Tapping a tile to select it and starting a drag on it are the same
+    // gesture's two outcomes; claiming the selection up front means a click
+    // that turns into a drag never flashes an unselected tile.
+    setSelectedTileId(id);
+    try {
+      Haptics.impact({ style: ImpactStyle.Light }).catch(() => {});
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const handleDragEnd = useCallback(
+    (event) => {
+      const overId = event.over ? String(event.over.id) : null;
+      setActiveDragId(null);
+      lastDragEndAtRef.current = Date.now();
+      const id = String(event.active.id);
+      if (!overId || overId === id || !draft) return;
+
+      // A page the draft does not own yet is rendered from the host's rows, so
+      // fold it in before mutating — otherwise `reorder` would find neither id
+      // and silently no-op the very first drag on every page after the first.
+      // `createDraft` re-densifies per page, so already-edited pages keep the
+      // order the user made.
+      const working = draftHasPage(draft, currentPage)
+        ? draft
+        : createDraft([...draft.items, ...deckItems]);
+
+      // Same page → reorder. Different page → `reorder` returns the same
+      // reference and the drop is discarded (cross-page moves are Task 4.3b's
+      // toolbar, not a drag), so no gating is needed here.
+      const next = reorder(working, id, overId);
+      if (next !== working) setDraft(next);
+    },
+    [draft, currentPage, deckItems],
+  );
+
+  const handleDragCancel = useCallback(() => {
+    // An interrupted drag wrote nothing to the draft (that is exactly why the
+    // model is in-memory — D8 makes recovery free), so this only clears the
+    // overlay.
+    lastDragEndAtRef.current = Date.now();
+    setActiveDragId(null);
+  }, []);
+
+  const showToast = useCallback((text) => {
+    setEditToast(text);
+    setTimeout(() => setEditToast((cur) => (cur === text ? null : cur)), 2500);
+  }, []);
+
+  const handleTileTap = useCallback((key) => {
+    // A finished drag also emits a `click` on the tile, and letting that through
+    // would deselect the very tile the user just moved. Whether dnd-kit swallows
+    // that click is library-internal, so the guard is explicit here instead of
+    // assumed: any tap within a short window after a drag ends is ignored.
+    if (Date.now() - lastDragEndAtRef.current < 250) return;
+    setSelectedTileId((cur) => (cur === key ? null : key));
+  }, []);
+
+  // The long-press door: enters edit mode with the pressed tile already
+  // selected. Guarded on `editMode` because inside edit mode a long press is
+  // just a tap on a tile (the tile is already a drag handle).
+  const handleLongPressEnterEdit = useCallback(
+    (key) => {
+      if (editMode) return;
+      const seeded = createDraft(deckItems);
+      setDraft(seeded);
+      setBaseDraft(seeded);
+      setSelectedTileId(key);
+      setEditMode(true);
+    },
+    [editMode, deckItems],
+  );
+
+  // Save replays the draft diff to the host. This sub-task only ever produces
+  // `reordersByPage`, so that is the only key read; sizePatches/moves/
+  // detachments stay on the wire for Task 4.3b to add.
+  const handleSave = useCallback(() => {
+    if (!baseDraft || !draft) return;
+    const diff = diffDraft(baseDraft, draft);
+    const batches = Object.entries(diff.reordersByPage);
+    const socket = wsRef.current;
+    if (socket?.readyState !== WebSocket.OPEN) {
+      // Keep edit mode open: the draft is the user's work and must survive a
+      // dropped socket rather than being thrown away with a failed send.
+      setStatus("disconnected");
+      socket?.reconnect?.(4000, "save layout");
+      showToast("Offline — changes kept, not saved");
+      return;
+    }
+    try {
+      for (const [pageId, items] of batches) {
+        socket.send(
+          JSON.stringify({
+            v: 1,
+            t: "reorder_items",
+            page_id: Number(pageId),
+            items,
+          }),
+        );
+      }
+    } catch (error) {
+      showToast(`Save failed: ${error?.message || "socket error"}`);
+      return;
+    }
+    // Optimistic: the new baseline is the draft we just sent, so a later Save
+    // only reports what changed since. The host answers with a `state`
+    // broadcast, which rebuilds `deckItems` from server truth.
+    setBaseDraft(draft);
+    showToast(batches.length ? "Layout saved" : "Nothing to save");
+  }, [baseDraft, draft, showToast]);
+
+  // Discard: the draft is dropped and we leave. Deliberately performs no WS or
+  // HTTP write at all — nothing was ever sent while editing, so there is nothing
+  // to undo.
+  const handleDone = useCallback(() => {
+    setDraft(null);
+    setBaseDraft(null);
+    setSelectedTileId(null);
+    setActiveDragId(null);
+    setEditMode(false);
+  }, []);
 
   const pressButton = useCallback(async (id) => {
     if (wsRef.current?.readyState !== WebSocket.OPEN) {
@@ -613,16 +893,28 @@ export default function App() {
   // Horizontal swipe changes page. A key press is a tap, so only a deliberate
   // horizontal travel counts — vertical movement is left alone so the deck
   // never fights a scroll, and short movements stay taps.
-  const onDeckPointerDown = useCallback((e) => {
-    swipeRef.current = { x: e.clientX, y: e.clientY };
-  }, []);
+  //
+  // FEATURE: Edit Layout — while editing, the tiles own the pointer (dnd-kit
+  // drives drags off the same pointer stream), so the deck-level swipe is
+  // suppressed entirely: a reorder must never flip the page underneath the
+  // finger. Page switching stays available on the tap-only dots and rail below,
+  // which are separate elements and are deliberately left working.
+  const onDeckPointerDown = useCallback(
+    (e) => {
+      if (editMode) return;
+      swipeRef.current = { x: e.clientX, y: e.clientY };
+    },
+    [editMode],
+  );
 
   const onDeckPointerCancel = useCallback(() => {
+    if (editMode) return;
     swipeRef.current = null;
-  }, []);
+  }, [editMode]);
 
   const onDeckPointerUp = useCallback(
     (e) => {
+      if (editMode) return;
       const startPt = swipeRef.current;
       swipeRef.current = null;
       if (!startPt || pages.length < 2) return;
@@ -635,7 +927,7 @@ export default function App() {
       const next = pages[(i + (dx < 0 ? 1 : -1) + pages.length) % pages.length];
       if (next) switchPage(next.id);
     },
-    [pages, currentPage, switchPage],
+    [editMode, pages, currentPage, switchPage],
   );
 
   const params = new URLSearchParams(window.location.search);
@@ -685,9 +977,115 @@ export default function App() {
     );
   }
 
+  // FEATURE: Edit Layout — the deck grid is built once and then rendered either
+  // bare (normal mode) or inside DndContext + SortableContext (edit mode).
+  // DndContext and SortableContext render no DOM of their own, so the container
+  // and its tiles are literally the same element tree either way; the only
+  // difference is whether each tile is wrapped in the useSortable shell. That is
+  // what keeps non-edit mode byte-for-byte identical.
+  const deckGrid = (
+    <div
+      ref={deckRef}
+      onPointerDown={onDeckPointerDown}
+      onPointerUp={onDeckPointerUp}
+      onPointerCancel={onDeckPointerCancel}
+      style={{
+        flex: 1,
+        minHeight: 0,
+        overflowX: "hidden",
+        // The engine degrades to vertical scroll only when height runs out
+        // (D6); before the first measure there is no layout and the deck
+        // stays exactly as clipped as it always was.
+        overflowY: layout?.scrollY ? "auto" : "hidden",
+        paddingLeft: "max(env(safe-area-inset-left), 10px)",
+        paddingRight: "max(env(safe-area-inset-right), 10px)",
+        paddingTop: 4,
+        paddingBottom: 4,
+        // The browser must not claim horizontal drags as scrolls: it cancels
+        // the pointer sequence and the swipe never completes. Under scrollY the
+        // browser keeps vertical panning — which is what lets a tall deck still
+        // scroll while editing, because dnd-kit's distance:10 activation
+        // constraint is what separates a reorder drag from a scroll and the
+        // deck-level swipe handler is suppressed in edit mode entirely.
+        touchAction: layout?.scrollY ? "pan-y" : "none",
+        display: "grid",
+        justifyContent: "center",
+        gridTemplateColumns: layout
+          ? `repeat(${layout.cols}, ${layout.cell}px)`
+          : "none",
+        gridAutoRows: layout ? `${layout.cell}px` : "auto",
+        gap: layout ? layout.gap : 8,
+      }}
+    >
+      {buttons.length === 0 && status === "connected" && <SkeletonGrid />}
+      {layout &&
+        renderItems.map((item, i) => {
+          const p = layout.placements[i];
+          if (!p) return null;
+          const placeStyle = {
+            gridColumn: `${p.col + 1} / span ${p.span.cols}`,
+            gridRow: `${p.row + 1} / span ${p.span.rows}`,
+          };
+          const tile =
+            item.kind === "button" ? (
+              <SortableButton
+                btn={item}
+                pressing={pressing === item.id}
+                editable={editMode}
+                onPress={pressButton}
+                volume={volume}
+                muted={muted}
+                micVolume={micVolume}
+                micMuted={micMuted}
+                sessions={sessions}
+                showLabels={showLabels}
+                onVolumeHoldStart={startVolumeHold}
+                onVolumeHoldStop={stopVolumeHold}
+                onConfirmHoldStart={beginConfirmHold}
+                onLongPressEnterEdit={handleLongPressEnterEdit}
+                onTap={handleTileTap}
+              />
+            ) : (
+              /* FEATURE: Live widgets — tiles interleave with the keys in the
+                 same grid. They are not pressable: a tile shows, it does not
+                 act. */
+              <WidgetTile
+                widget={item}
+                data={widgetData[item.id]}
+                sources={widgetSources}
+              >
+                <SystemMonitorWidget widget={item} data={widgetData[item.id]} />
+              </WidgetTile>
+            );
+
+          // A draft row carries its own normalized `key`; a host row does not, so
+          // the dnd-kit id is derived the same way in both cases. The React key
+          // stays the historical per-kind `item.id` outside edit mode.
+          const sortableId = sortKeyOf(item);
+          return (
+            <div key={item.key ?? item.id} style={placeStyle}>
+              {editMode ? (
+                <DraggableTile
+                  id={sortableId}
+                  selected={selectedTileId === sortableId}
+                >
+                  {tile}
+                </DraggableTile>
+              ) : (
+                tile
+              )}
+            </div>
+          );
+        })}
+    </div>
+  );
+
   return (
     <div
       style={{
+        // Anchor for the edit-mode overlay (DeckEditorBar), which is absolutely
+        // positioned so it never takes a flex row away from the measured deck.
+        position: "relative",
         display: "flex",
         flexDirection: "column",
         height: "100%",
@@ -832,87 +1230,72 @@ export default function App() {
       {/* FEATURE: Responsive layout — one grid, one map: every tile is placed
           explicitly from layout.placements (gridLine/span pinned to the
           engine's column+row), so nothing relies on auto-flow or the old
-          2x2-only span rule. */}
-      {/* Container */}
-      <div
-        ref={deckRef}
-        onPointerDown={onDeckPointerDown}
-        onPointerUp={onDeckPointerUp}
-        onPointerCancel={onDeckPointerCancel}
-        style={{
-          flex: 1,
-          minHeight: 0,
-          overflowX: "hidden",
-          // The engine degrades to vertical scroll only when height runs out
-          // (D6); before the first measure there is no layout and the deck
-          // stays exactly as clipped as it always was.
-          overflowY: layout?.scrollY ? "auto" : "hidden",
-          paddingLeft: "max(env(safe-area-inset-left), 10px)",
-          paddingRight: "max(env(safe-area-inset-right), 10px)",
-          paddingTop: 4,
-          paddingBottom: 4,
-          // The browser must not claim horizontal drags as scrolls: it
-          // cancels the pointer sequence and the swipe never completes.
-          // Under scrollY the browser owns vertical pans and may cancel a
-          // sequence mid-scroll — harmless, because the swipe only ever fires
-          // on |dx|>=60 AND |dx|>=1.5|dy| (onDeckPointerUp): a cancelled
-          // vertical drag was never a page swipe anyway.
-          touchAction: layout?.scrollY ? "pan-y" : "none",
-          display: "grid",
-          justifyContent: "center",
-          gridTemplateColumns: layout
-            ? `repeat(${layout.cols}, ${layout.cell}px)`
-            : "none",
-          gridAutoRows: layout ? `${layout.cell}px` : "auto",
-          gap: layout ? layout.gap : 8,
-        }}
-      >
-        {buttons.length === 0 && status === "connected" && <SkeletonGrid />}
-        {layout &&
-          deckItems.map((item, i) => {
-            const p = layout.placements[i];
-            if (!p) return null;
-            const placeStyle = {
-              gridColumn: `${p.col + 1} / span ${p.span.cols}`,
-              gridRow: `${p.row + 1} / span ${p.span.rows}`,
-            };
-            return item.kind === "button" ? (
-              <div key={item.id} style={placeStyle}>
-                <SortableButton
-                  btn={item}
-                  pressing={pressing === item.id}
-                  editable={editMode}
-                  onPress={pressButton}
-                  volume={volume}
-                  muted={muted}
-                  micVolume={micVolume}
-                  micMuted={micMuted}
-                  sessions={sessions}
-                  showLabels={showLabels}
-                  onVolumeHoldStart={startVolumeHold}
-                  onVolumeHoldStop={stopVolumeHold}
-                  onConfirmHoldStart={beginConfirmHold}
-                />
-              </div>
-            ) : (
-              /* FEATURE: Live widgets — tiles interleave with the keys in the
-                 same grid. They are not pressable: a tile shows, it does not
-                 act. */
-              <div key={item.id} style={placeStyle}>
-                <WidgetTile
-                  widget={item}
-                  data={widgetData[item.id]}
-                  sources={widgetSources}
-                >
-                  <SystemMonitorWidget
-                    widget={item}
-                    data={widgetData[item.id]}
+          2x2-only span rule.
+          FEATURE: Edit Layout (Task 4.3a) — the very same grid, wrapped in the
+          dnd-kit context only while editing. Default measuring keeps each tile
+          at its real rect, which is what rectSortingStrategy offsets against. */}
+      {editMode ? (
+        <DndContext
+          sensors={sensors}
+          collisionDetection={rectIntersection}
+          onDragStart={handleDragStart}
+          onDragEnd={handleDragEnd}
+          onDragCancel={handleDragCancel}
+        >
+          <SortableContext items={sortableIds} strategy={rectSortingStrategy}>
+            {deckGrid}
+          </SortableContext>
+
+          {/* DragOverlay — a solid ghost that follows the pointer, so the tile
+              under the finger stays legible while the grid reflows around its
+              (now transparent) source cell. Mirrors the desktop editor. */}
+          <DragOverlay dropAnimation={{ duration: 180, easing: "ease" }}>
+            {activeDragItem ? (
+              <div
+                style={{
+                  width: layout ? layout.cell * activeDragSpan.cols : 88,
+                  height: layout ? layout.cell * activeDragSpan.rows : 88,
+                  borderRadius: 18,
+                  opacity: 0.95,
+                  boxShadow: "0 14px 34px rgba(0,0,0,0.6)",
+                }}
+              >
+                {activeDragItem.kind === "button" ? (
+                  <SortableButton
+                    btn={activeDragItem}
+                    ghost
+                    pressing={false}
+                    editable
+                    onPress={pressButton}
+                    volume={volume}
+                    muted={muted}
+                    micVolume={micVolume}
+                    micMuted={micMuted}
+                    sessions={sessions}
+                    showLabels={showLabels}
+                    onVolumeHoldStart={startVolumeHold}
+                    onVolumeHoldStop={stopVolumeHold}
+                    onConfirmHoldStart={beginConfirmHold}
                   />
-                </WidgetTile>
+                ) : (
+                  <WidgetTile
+                    widget={activeDragItem}
+                    data={widgetData[activeDragItem.id]}
+                    sources={widgetSources}
+                  >
+                    <SystemMonitorWidget
+                      widget={activeDragItem}
+                      data={widgetData[activeDragItem.id]}
+                    />
+                  </WidgetTile>
+                )}
               </div>
-            );
-          })}
-      </div>
+            ) : null}
+          </DragOverlay>
+        </DndContext>
+      ) : (
+        deckGrid
+      )}
 
       {/* FEATURE: Deck layout — swipe changes page; the dots do the same by tap,
           so the deck is never gesture-only. */}
@@ -962,6 +1345,44 @@ export default function App() {
               </button>
             );
           })}
+        </div>
+      )}
+
+      {/* FEATURE: Edit Layout (Task 4.3a) — the draft lifecycle bar. Overlaid
+          rather than flexed so showing it never re-measures the deck out from
+          under the in-flight drag. Task 4.3b extends this same component with
+          the per-item toolbar for `selectedTileId`. */}
+      <DeckEditorBar
+        editMode={editMode}
+        dirty={dirty}
+        onDone={handleDone}
+        onSave={handleSave}
+      />
+
+      {/* Inline Save feedback — deliberately a transient toast, not a dialog: a
+          failed Save must not cost the user the draft they are standing on. */}
+      {editToast && (
+        <div
+          role="status"
+          style={{
+            position: "absolute",
+            left: "50%",
+            bottom: 68,
+            transform: "translateX(-50%)",
+            maxWidth: "90vw",
+            padding: "8px 14px",
+            borderRadius: 12,
+            background: "rgba(22,22,30,0.94)",
+            border: "1px solid rgba(255,255,255,0.12)",
+            color: "#e0e0ec",
+            fontSize: 13,
+            fontWeight: 600,
+            whiteSpace: "nowrap",
+            pointerEvents: "none",
+            zIndex: 50,
+          }}
+        >
+          {editToast}
         </div>
       )}
 
@@ -1134,6 +1555,83 @@ function VolumePill({ volume, muted }) {
   );
 }
 
+// ── FEATURE: Edit Layout (Task 4.3a) — the drag-capable tile shell ──────────
+// `useSortable` is a hook, so it cannot be called conditionally from inside
+// SortableButton: normal mode has to render the very same tile with zero dnd-kit
+// involvement, which means the hook lives in its own component and App mounts
+// either `<DraggableTile>{tile}</DraggableTile>` (editing) or `{tile}` (not).
+//
+// The tile IS the handle — there is no separate grab area — so `attributes` and
+// `listeners` go on the wrapper, which is exactly the tile box. The wrapper is
+// width/height 100% and both the button face and WidgetTile size themselves to
+// their parent, so inserting it moves no pixels at rest.
+const DraggableTile = memo(function DraggableTile({ id, selected, children }) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id });
+
+  return (
+    <div
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      style={{
+        position: "relative",
+        width: "100%",
+        height: "100%",
+        borderRadius: 18,
+        transform: CSS.Transform.toString(transform),
+        transition,
+        // Every editable tile wears a dashed ring; the selected one gets the
+        // stronger solid ring, and the rest lose saturation so "pick one" reads
+        // at a glance. Nothing else about the tile changes.
+        outline: selected
+          ? "2px solid rgba(96,165,250,0.9)"
+          : "1px dashed rgba(255,255,255,0.35)",
+        outlineOffset: -1,
+        filter: selected ? "none" : "saturate(0.6)",
+        // The source cell goes transparent so the floating DragOverlay ghost is
+        // the only copy the eye follows; dnd-kit suppresses its own listeners on
+        // the hidden original, so a drag can never be "dropped twice".
+        opacity: isDragging ? 0 : 1,
+        zIndex: isDragging ? 999 : "auto",
+        cursor: "grab",
+        userSelect: "none",
+        WebkitUserSelect: "none",
+      }}
+    >
+      {children}
+      {/* The selected marker: Task 4.3b's toolbar acts on this tile, so the
+          selection has to be unmistakable, not just a slightly different ring. */}
+      {selected && (
+        <div
+          style={{
+            position: "absolute",
+            top: 6,
+            right: 6,
+            width: 22,
+            height: 22,
+            borderRadius: "50%",
+            display: "grid",
+            placeItems: "center",
+            background: "#3b82f6",
+            color: "#fff",
+            pointerEvents: "none",
+            zIndex: 6,
+          }}
+        >
+          <Icon name="check" size={12} />
+        </div>
+      )}
+    </div>
+  );
+});
+
 function SkeletonGrid() {
   return (
     <>
@@ -1157,6 +1655,7 @@ const SortableButton = memo(function SortableButton({
   btn,
   pressing,
   editable,
+  ghost,
   onPress,
   volume,
   muted,
@@ -1167,6 +1666,8 @@ const SortableButton = memo(function SortableButton({
   onVolumeHoldStart,
   onVolumeHoldStop,
   onConfirmHoldStart,
+  onLongPressEnterEdit,
+  onTap,
 }) {
   // Reordering lives on the desktop; on the phone a key is only ever pressed,
   // which leaves horizontal swipes free to page between profiles.
@@ -1176,6 +1677,34 @@ const SortableButton = memo(function SortableButton({
   // FEATURE: Hold to confirm — local to the tile; nothing above needs to know.
   const [holding, setHolding] = useState(false);
   const holdTimerRef = useRef(null);
+
+  // FEATURE: Edit Layout (Task 4.3a) — the long-press DOOR into edit mode.
+  // It is armed on a plain (not yet editable) tile only; once editing, a long
+  // press is just a press that dnd-kit already owns. Kept entirely local so a
+  // normal tap never touches parent state and never re-renders the deck.
+  const editPressTimerRef = useRef(null);
+  const pressStartRef = useRef(null);
+  // The composite draft/dnd-kit key for this tile. Rows that came from the
+  // draft already carry it (`key`); a normal server row does not, so it is
+  // derived from the same kind+id pair — which is what lets a long press on an
+  // un-edited deck name the tile it is about to select.
+  const sortableId = btn.key ?? tileSortKey(btn);
+
+  const clearEditPressTimer = useCallback(() => {
+    clearTimeout(editPressTimerRef.current);
+    editPressTimerRef.current = null;
+    pressStartRef.current = null;
+  }, []);
+
+  // The existing hold-unmount cleanup, extended: an unmounting tile must not
+  // leave a pending edit-mode entry behind that fires into a dead component.
+  useEffect(
+    () => () => {
+      clearTimeout(holdTimerRef.current);
+      clearTimeout(editPressTimerRef.current);
+    },
+    [],
+  );
 
   // Sizing/spans live on the deck grid now (explicit placement in App's map),
   // not on the tile — a 2x2 key is placed, not special-cased here.
@@ -1234,13 +1763,17 @@ const SortableButton = memo(function SortableButton({
     setHolding(false);
   }, []);
 
-  useEffect(() => () => clearTimeout(holdTimerRef.current), []);
-
   const handleClick = useCallback(
     (e) => {
       if (isDragging) return;
-      // Edit Layout: a tile only drags/selects — no press, no ripple.
-      if (editable) return;
+      // Edit Layout: a tile only drags/selects — no press, no ripple. A tap (a
+      // drag that never reached the 10 px activation distance) selects instead.
+      // A completed drag also emits this click, so App ignores taps for a short
+      // window after a drag ends rather than depending on dnd-kit swallowing it.
+      if (editable) {
+        if (onTap) onTap(sortableId);
+        return;
+      }
       if (isVolumeHoldBtn) return;
       // Guarded buttons fire from the hold timer, never from a tap.
       if (requiresConfirm) return;
@@ -1251,7 +1784,16 @@ const SortableButton = memo(function SortableButton({
       setTimeout(() => setRipple(null), 600);
       onPress(btn.id);
     },
-    [isDragging, editable, onPress, btn.id, isVolumeHoldBtn, requiresConfirm],
+    [
+      isDragging,
+      editable,
+      onTap,
+      sortableId,
+      onPress,
+      btn.id,
+      isVolumeHoldBtn,
+      requiresConfirm,
+    ],
   );
 
   const handlePointerDown = useCallback(
@@ -1261,6 +1803,20 @@ const SortableButton = memo(function SortableButton({
       // hold start entirely — the only behavior left on a tile is drag/select,
       // which dnd-kit owns (the isDragging guard above is untouched).
       if (editable) return;
+      // The 500 ms door. Armed ONLY on tiles that have no long-press gesture of
+      // their own: a guarded key completes at 700 ms and a volume key repeats
+      // from the moment it is touched, so taking the hold away from either would
+      // be a regression, not a feature. For those two families the entry point
+      // stays the ✏️ chip / control sheet (Task 5.3). On a plain key a long hold
+      // used to do nothing at all, so this adds a door without changing one.
+      if (onLongPressEnterEdit && !isVolumeHoldBtn && !requiresConfirm) {
+        pressStartRef.current = { x: e.clientX, y: e.clientY };
+        clearTimeout(editPressTimerRef.current);
+        editPressTimerRef.current = setTimeout(() => {
+          clearEditPressTimer();
+          onLongPressEnterEdit(sortableId);
+        }, LONG_PRESS_ENTER_EDIT_MS);
+      }
       if (!isVolumeHoldBtn && !requiresConfirm) return;
       e.currentTarget.setPointerCapture(e.pointerId);
       const rect = e.currentTarget.getBoundingClientRect();
@@ -1290,6 +1846,9 @@ const SortableButton = memo(function SortableButton({
     [
       isDragging,
       editable,
+      onLongPressEnterEdit,
+      clearEditPressTimer,
+      sortableId,
       isVolumeHoldBtn,
       requiresConfirm,
       volumeStep,
@@ -1302,7 +1861,25 @@ const SortableButton = memo(function SortableButton({
     ],
   );
 
+  // FEATURE: Edit Layout — travelling past 10 px is a swipe/scroll/drag, not a
+  // hold, so the edit door is abandoned. Same threshold dnd-kit uses to
+  // activate, which keeps the two gestures from ever both firing.
+  const handlePointerMove = useCallback(
+    (e) => {
+      const start = pressStartRef.current;
+      if (!start) return;
+      if (
+        Math.abs(e.clientX - start.x) > LONG_PRESS_CANCEL_PX ||
+        Math.abs(e.clientY - start.y) > LONG_PRESS_CANCEL_PX
+      ) {
+        clearEditPressTimer();
+      }
+    },
+    [clearEditPressTimer],
+  );
+
   const handlePointerUp = useCallback(() => {
+    clearEditPressTimer();
     if (requiresConfirm) {
       cancelHold();
       return;
@@ -1310,12 +1887,19 @@ const SortableButton = memo(function SortableButton({
     if (!isVolumeHoldBtn) return;
     setRipple(null);
     onVolumeHoldStop();
-  }, [requiresConfirm, cancelHold, isVolumeHoldBtn, onVolumeHoldStop]);
+  }, [
+    clearEditPressTimer,
+    requiresConfirm,
+    cancelHold,
+    isVolumeHoldBtn,
+    onVolumeHoldStop,
+  ]);
 
   return (
     <div
       onClick={handleClick}
       onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
       style={{
@@ -1337,9 +1921,9 @@ const SortableButton = memo(function SortableButton({
           : isToggleOn
             ? `linear-gradient(180deg, ${btn.color}44, ${btn.color}22)`
             : "linear-gradient(180deg, rgba(255,255,255,0.11), rgba(255,255,255,0.03))",
-        backdropFilter: isDragging ? "none" : "blur(18px)",
-        WebkitBackdropFilter: isDragging ? "none" : "blur(18px)",
-        opacity: isDragging ? 0.85 : 1,
+        backdropFilter: isDragging || ghost ? "none" : "blur(18px)",
+        WebkitBackdropFilter: isDragging || ghost ? "none" : "blur(18px)",
+        opacity: isDragging ? 0.85 : ghost ? 0.95 : 1,
         border: isToggleOn
           ? `1px solid ${btn.color}88`
           : pressing
