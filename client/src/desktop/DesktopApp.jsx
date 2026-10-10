@@ -1443,7 +1443,16 @@ export default function DesktopApp({
               items={deckSortableIds}
               strategy={rectSortingStrategy}
             >
-              <div style={styles.canvas} ref={canvasRef}>
+              <div
+                ref={canvasRef}
+                style={{
+                  ...styles.canvas,
+                  // The engine degrades to vertical scroll only when height runs
+                  // out (D6); before the first measure (layout === null) stay
+                  // exactly as clipped as before.
+                  overflowY: layout?.scrollY ? "auto" : "hidden",
+                }}
+              >
                 <div
                   style={{
                     ...styles.grid,
@@ -5265,8 +5274,8 @@ const styles = {
   canvas: {
     flex: 1,
     minHeight: 0,
-    // No scrolling: keys are measured to fit this box, so the whole deck is
-    // always on screen. The library is the only scrolling region.
+    // Hidden is the default; the render site lifts overflowY to "auto" when the
+    // engine reports scrollY (deck taller than this box), surfacing bottom rows.
     overflow: "hidden",
     display: "grid",
     // `safe` matters: plain centring clips the first row under the header once
