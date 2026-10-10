@@ -112,6 +112,20 @@ test("span clamp fallback: a 2x2 at width 320 clamps to 1 column and is still pl
   assert.equal(packed.placements[0].span.cols, 1);
 });
 
+test("default settings at 320: a lone 2x2 stays unclamped at 2 columns", () => {
+  // Clamping only engages when the grid narrows to 1 column; under default
+  // balanced settings, 320 px resolves 2 readable columns, so the 2x2 fits.
+  const r = computeDeckLayout({ width: 320, height: 653, items: [{ size: "2x2" }] });
+  assert.equal(r.cols, 2);
+  assert.equal(r.placements.length, 1, "nothing is dropped");
+  const [p] = r.placements;
+  assert.equal(p.span.clamped, false);
+  assert.equal(p.span.cols, 2);
+  assert.ok(p.col + p.span.cols <= r.cols && p.row + p.span.rows <= r.rows, "placement in-grid");
+  const { minCell, maxCell } = resolveBounds(DEFAULT_SETTINGS);
+  assert.ok(r.cell >= minCell && r.cell <= maxCell, `cell ${r.cell} within [${minCell}, ${maxCell}]`);
+});
+
 // ---- 6. preferred-cols ceiling --------------------------------------------------
 
 test("preferred-cols ceiling: custom cols 6 is a ceiling, not a floor (D4)", () => {
@@ -162,4 +176,13 @@ test("interface surface matches the plan exactly", () => {
     mode: "auto", preset: "balanced", cols: null, minCell: null, maxCell: null, gap: null,
   });
   assert.deepEqual(resolveBounds({ preset: "compact" }), { minCell: 40, maxCell: 96, gap: 6 });
+
+  // Output shape is a locked contract: key sets pinned, not just values.
+  const r = computeDeckLayout({ width: 360, height: 800, items: buttons(3) });
+  assert.deepEqual(Object.keys(r).sort(), ["cell", "cols", "gap", "placements", "rows", "scrollY"]);
+  const packed = packGrid([{ size: "2x1" }], 2);
+  assert.deepEqual(Object.keys(packed).sort(), ["placements", "rows"]);
+  const [placement] = packed.placements;
+  assert.deepEqual(Object.keys(placement).sort(), ["col", "index", "row", "span"]);
+  assert.deepEqual(Object.keys(placement.span).sort(), ["clamped", "cols", "rows"]);
 });

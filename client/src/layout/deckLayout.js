@@ -73,6 +73,14 @@ export function computeDeckLayout({ width, height, items, settings = DEFAULT_SET
   }
   // Contract: placements mirror items exactly (the empty-page placeholder stays internal).
   const placements = best.placements.slice(0, items.length);
-  const { fill, score, ...rest } = best; // strip scoring internals from the public output
-  return { ...rest, placements };
+  // Public output is exactly the grid contract; scoring internals (fill, score)
+  // live only on the private candidate records above and never leave this function.
+  return {
+    cols: best.cols,
+    rows: best.rows,
+    cell: best.cell,
+    gap: best.gap,
+    placements,
+    scrollY: best.scrollY,
+  };
 }
