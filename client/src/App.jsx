@@ -18,10 +18,17 @@ import PairingScreen from "./PairingScreen.jsx";
 import { ButtonFace, Icon } from "./icons.jsx";
 import { useDeckLayout } from "./layout/useDeckLayout.js";
 import { mergeLayout } from "./layout/layoutSettings.js";
-// FEATURE: Edit Layout (Phase 4, Task 4.3a) — the pure draft model. Only the
-// three operations this sub-task needs are imported; resize/moveToPage/detach
-// arrive with the per-item toolbar in Task 4.3b.
-import { createDraft, reorder, diffDraft } from "./layout/layoutDraft.js";
+// FEATURE: Edit Layout (Phase 4, Tasks 4.3a + 4.3b) — the pure draft model. 4.3a
+// used createDraft/reorder/diffDraft; 4.3b adds the per-item mutations
+// (resize/moveToPage/detach) for the toolbar and its full Save commit.
+import {
+  createDraft,
+  reorder,
+  diffDraft,
+  resize,
+  moveToPage,
+  detach,
+} from "./layout/layoutDraft.js";
 import DeckEditorBar from "./mobile/DeckEditorBar.jsx";
 // FEATURE: Edit Layout — the same dnd-kit surface the desktop editor already
 // uses (see desktop/DesktopApp.jsx). Only the reorder plumbing is wired here.
@@ -125,6 +132,34 @@ const rowsForPage = (draft, pageId, serverRows) =>
         .filter((it) => it.page_id === pageId)
         .sort((a, b) => a.slot - b.slot)
     : serverRows;
+
+// FEATURE: Edit Layout (Task 4.3b) — the provisional Unfiled page id. A detach
+// stores THIS on the tile's page_id (and on draft.unfiledPageId) so entering edit
+// mode and detaching before Save performs ZERO host writes; the real hidden
+// "Unfiled" page is materialized only in handleSave, which maps this constant to
+// the created/reused page id at that moment. Must stay stable across renders.
+const UNFILED_TARGET = "__unfiled__";
+
+// dnd-kit / preview arrayMove: remove `from`, insert at `to`. Kept local (the
+// dnd-kit one is for its own sortable list; this is for previewOrder arrays of
+// composite keys) so the drop preview and the engine feed share one semantic.
+const arrayMoveKeys = (list, from, to) => {
+  const out = list.slice();
+  const [moved] = out.splice(from, 1);
+  out.splice(to, 0, moved);
+  return out;
+};
+
+// FEATURE: Edit Layout (Task 4.3b) — fold the currently-viewed page into the
+// draft before any toolbar mutation, mirroring handleDragEnd's fold. A page the
+// draft does not own yet is still host rows, so `resize`/`moveToPage`/`detach`
+// would find the tile absent from `draft.byId` and no-op on the first action for
+// every page after the first. `createDraft` re-densifies per page, so an
+// already-edited page keeps the order the user made. Pure, module-scope.
+const foldPageIntoDraft = (draft, pageId, serverRows) =>
+  draftHasPage(draft, pageId)
+    ? draft
+    : createDraft([...draft.items, ...serverRows]);
 
 // FEATURE: Edit Layout (Task 4.3a review) — reconcile ONE page's rows against
 // the host's authoritative snapshot. A `state` frame carries per-item rows for
@@ -354,6 +389,16 @@ export default function App() {
   const [selectedTileId, setSelectedTileId] = useState(null);
   const [activeDragId, setActiveDragId] = useState(null);
   const [editToast, setEditToast] = useState(null);
+  // FEATURE: Edit Layout (Task 4.3b) — live drop preview. `previewOrder` maps a
+  // page id (String) to the tentative composite-key ORDER for that page while a
+  // drag is in flight; it is the ONLY thing onDragOver mutates (the draft is
+  // never touched until onDragEnd), so a cancelled drag costs nothing (D8). null
+  // means "no preview active" and the deck falls back to the committed order.
+  const [previewOrder, setPreviewOrder] = useState(null);
+  // Suppresses the host-echo draft/baseline re-seed while a Save is committing,
+  // so the many `state` broadcasts fired by the move/resize sends cannot race the
+  // optimistic `setBaseDraft(draft)` at the end of the batch. See handleSave.
+  const saveInFlightRef = useRef(false);
   // Timestamp of the last completed/cancelled drag, so the click a drag also
   // emits cannot land a second, contradictory selection flip.
   const lastDragEndAtRef = useRef(0);
@@ -486,42 +531,51 @@ export default function App() {
         // page a `state` frame describes item-by-item, and the only page the user
         // can fold/edit next, so this is the full scope of the fix.
         //
-        // There is NO edit-mode ref gate here on purpose: `draft`/`baseDraft` are
-        // null *exactly* while not editing (seeded on entry, dropped on Done /
+        // There is no *edit-mode* ref gate here on purpose: `draft`/`baseDraft`
+        // are null *exactly* while not editing (seeded on entry, dropped on Done /
         // toggle-exit), so each updater bails on a null/owning-page-free model
         // before building anything — normal mode does zero work and both setters
         // no-op by reference, leaving that path byte-for-byte unchanged. A gate
-        // that read a ref written in another effect would also violate the repo's
-        // react-hooks/immutability rule. The decision is membership-based, so an
-        // unsaved reorder (same tiles, different order) is never overwritten.
+        // that read an edit-mode ref written in another effect would also violate
+        // the repo's react-hooks/immutability rule. The decision is
+        // membership-based, so an unsaved reorder (same tiles, different order) is
+        // never overwritten. (The 4.3b `saveInFlightRef` gate below is a different
+        // thing: a ref read only in this listener and written in the handleSave
+        // callback — never in an effect — so it does not trip that rule.)
         //
-        // 4.3b FOLLOW-UP: once Save commits moves/detachments/size too, confirm
-        // each against this same echo (apply moves/detachments first, then per-page
-        // reorder batches, then size patches) and reconcile those op classes here.
-        const pageId = msg.current_page;
-        const reseedIfDiverged = (prev) => {
-          // Cheap bail-outs first, so normal mode never allocates the snapshot.
-          if (!prev || !draftHasPage(prev, pageId)) return prev;
-          const serverItems = [
-            ...(Array.isArray(msg.buttons) ? msg.buttons : []).map((b) => ({
-              ...b,
-              kind: "button",
-            })),
-            ...(Array.isArray(msg.widgets) ? msg.widgets : []).map((w) => ({
-              ...w,
-              kind: "widget",
-            })),
-          ];
-          // After a Save the baseline owns exactly the draft's pages, so a
-          // divergent page re-seeds in BOTH and the two become identical server
-          // rows: the stale batch disappears, the infinite reject is broken, and
-          // the user re-folds that page from real membership on the next drag.
-          return draftPageDiverges(prev, pageId, serverItems)
-            ? reseedPageFromServer(prev, pageId, serverItems)
-            : prev;
-        };
-        setDraft(reseedIfDiverged);
-        setBaseDraft(reseedIfDiverged);
+        // 4.3b: Save now also commits moves/detachments/size before the reorder
+        // batches. Each of those sends triggers a host `state` broadcast; while a
+        // Save is in flight we deliberately do NOT re-seed the draft/baseline from
+        // those echoes (they are our own writes arriving out of order relative to
+        // the batch), so the optimistic `setBaseDraft(draft)` at the end of
+        // handleSave cannot race them. Ordinary `state` frames still reconcile
+        // exactly as in 4.3a, and normal mode is inert (draft null → bails).
+        if (!saveInFlightRef.current) {
+          const pageId = msg.current_page;
+          const reseedIfDiverged = (prev) => {
+            // Cheap bail-outs first, so normal mode never allocates the snapshot.
+            if (!prev || !draftHasPage(prev, pageId)) return prev;
+            const serverItems = [
+              ...(Array.isArray(msg.buttons) ? msg.buttons : []).map((b) => ({
+                ...b,
+                kind: "button",
+              })),
+              ...(Array.isArray(msg.widgets) ? msg.widgets : []).map((w) => ({
+                ...w,
+                kind: "widget",
+              })),
+            ];
+            // After a Save the baseline owns exactly the draft's pages, so a
+            // divergent page re-seeds in BOTH and the two become identical server
+            // rows: the stale batch disappears, the infinite reject is broken, and
+            // the user re-folds that page from real membership on the next drag.
+            return draftPageDiverges(prev, pageId, serverItems)
+              ? reseedPageFromServer(prev, pageId, serverItems)
+              : prev;
+          };
+          setDraft(reseedIfDiverged);
+          setBaseDraft(reseedIfDiverged);
+        }
       }
       if (msg.t === "widget_data") {
         // Merge rather than replace: the frame only carries the ticks whose
@@ -696,6 +750,7 @@ export default function App() {
       setBaseDraft(null);
       setSelectedTileId(null);
       setActiveDragId(null);
+      setPreviewOrder(null);
       setEditMode(false);
       return;
     }
@@ -703,6 +758,7 @@ export default function App() {
     setDraft(seeded);
     setBaseDraft(seeded);
     setSelectedTileId(null);
+    setPreviewOrder(null);
     setEditMode(true);
   }, [editMode, deckItems]);
 
@@ -717,15 +773,38 @@ export default function App() {
   // Tiles while editing: the draft's rows for the page being viewed, in draft
   // slot order. Reordering the draft therefore moves the real tiles, and this is
   // exactly the list handed to dnd-kit's SortableContext.
-  //
-  // Deliberately NO in-flight drop preview here: previewing a hovered cell means
-  // re-running the engine on the draft for every pointer move, which is Task
-  // 4.3b's job. During a drag dnd-kit offsets the neighbours itself, so the
-  // gesture still reads correctly; the committed order lands on drop.
-  const editTiles = useMemo(() => {
+  const committedTiles = useMemo(() => {
     if (!editMode || !draft || currentPage == null) return null;
     return rowsForPage(draft, currentPage, deckItems);
   }, [editMode, draft, currentPage, deckItems]);
+
+  // FEATURE: Edit Layout (Task 4.3b) — live drop preview. While a drag is in
+  // flight this page has a tentative key order in `previewOrder`; the grid (and
+  // dnd-kit's SortableContext) render THAT order so the exact target cells show
+  // under the finger. The draft itself is untouched until onDragEnd (D8), and the
+  // engine needs no recompute-key change: `useDeckLayout` keys its recompute on
+  // the ORDERED size list (`items.map(it => it.size)`), so a mixed-size reorder
+  // changes that key and re-packs, while a pure same-size reorder leaves the key
+  // (and cols/cell/placements) identical — placements map by index either way, so
+  // the swapped tiles still preview correctly.
+  const editTiles = useMemo(() => {
+    if (!committedTiles) return committedTiles;
+    const order = previewOrder ? previewOrder[String(currentPage)] : null;
+    if (!order) return committedTiles;
+    const byKey = new Map(committedTiles.map((it) => [sortKeyOf(it), it]));
+    const out = [];
+    for (const key of order) {
+      const row = byKey.get(key);
+      if (row) {
+        out.push(row);
+        byKey.delete(key);
+      }
+    }
+    // Safety: any committed row the preview did not name keeps its place at the
+    // tail, so a malformed preview can never drop a tile from the grid.
+    for (const row of byKey.values()) out.push(row);
+    return out;
+  }, [committedTiles, previewOrder, currentPage]);
 
   // The engine is fed the draft order while editing and the exact same
   // `deckItems` reference otherwise, so the non-edit render path is untouched.
@@ -799,10 +878,39 @@ export default function App() {
     }
   }, []);
 
+  // FEATURE: Edit Layout (Task 4.3b) — live drop preview. onDragOver folds the
+  // tentative same-page reorder into `previewOrder` (an arrayMove over the page's
+  // committed keys) so the deck renders the exact target cells while the finger
+  // is down. It never touches `draft` — only `previewOrder` changes — so a
+  // cancelled drag wrote nothing (D8). Cross-page active/over cannot occur here
+  // (SortableContext is the current page only), and an unknown/absent `over`
+  // simply leaves the preview untouched.
+  const handleDragOver = useCallback(
+    (event) => {
+      if (!editTiles) return;
+      const activeKey = String(event.active.id);
+      const overKey = event.over ? String(event.over.id) : null;
+      if (!overKey || overKey === activeKey) return;
+      const keys = editTiles.map(sortKeyOf);
+      const from = keys.indexOf(activeKey);
+      const to = keys.indexOf(overKey);
+      if (from < 0 || to < 0) return;
+      const next = arrayMoveKeys(keys, from, to);
+      setPreviewOrder((prev) => ({
+        ...(prev || {}),
+        [String(currentPage)]: next,
+      }));
+    },
+    [editTiles, currentPage],
+  );
+
   const handleDragEnd = useCallback(
     (event) => {
       const overId = event.over ? String(event.over.id) : null;
       setActiveDragId(null);
+      // The preview is discarded either way: on a real commit `reorder` reproduces
+      // the same arrangement in the draft; on a no-op drop it reverts to base.
+      setPreviewOrder(null);
       lastDragEndAtRef.current = Date.now();
       const id = String(event.active.id);
       if (!overId || overId === id || !draft) return;
@@ -810,11 +918,7 @@ export default function App() {
       // A page the draft does not own yet is rendered from the host's rows, so
       // fold it in before mutating — otherwise `reorder` would find neither id
       // and silently no-op the very first drag on every page after the first.
-      // `createDraft` re-densifies per page, so already-edited pages keep the
-      // order the user made.
-      const working = draftHasPage(draft, currentPage)
-        ? draft
-        : createDraft([...draft.items, ...deckItems]);
+      const working = foldPageIntoDraft(draft, currentPage, deckItems);
 
       // Same page → reorder. Different page → `reorder` returns the same
       // reference and the drop is discarded (cross-page moves are Task 4.3b's
@@ -828,9 +932,10 @@ export default function App() {
   const handleDragCancel = useCallback(() => {
     // An interrupted drag wrote nothing to the draft (that is exactly why the
     // model is in-memory — D8 makes recovery free), so this only clears the
-    // overlay.
+    // overlay and any live preview the finger had left behind.
     lastDragEndAtRef.current = Date.now();
     setActiveDragId(null);
+    setPreviewOrder(null);
   }, []);
 
   const showToast = useCallback((text) => {
@@ -857,18 +962,99 @@ export default function App() {
       setDraft(seeded);
       setBaseDraft(seeded);
       setSelectedTileId(key);
+      setPreviewOrder(null);
       setEditMode(true);
     },
     [editMode, deckItems],
   );
 
-  // Save replays the draft diff to the host. This sub-task only ever produces
-  // `reordersByPage`, so that is the only key read; sizePatches/moves/
-  // detachments stay on the wire for Task 4.3b to add.
-  const handleSave = useCallback(() => {
+  // ── FEATURE: Edit Layout (Task 4.3b) — per-item toolbar mutations ──────────
+  // Each follows the handleDragEnd fold pattern: a page the draft does not own
+  // yet is still host rows, so fold it before the op or it no-ops on the first
+  // action for every page after the first. `resize` keeps the tile selected (the
+  // user may pick another size); `moveToPage`/`detach` re-parent it off the
+  // visible page, so selection is cleared (the row is no longer on this page).
+  const handleResize = useCallback(
+    (id, size) => {
+      if (!draft) return;
+      const working = foldPageIntoDraft(draft, currentPage, deckItems);
+      const next = resize(working, id, size);
+      if (next !== working) setDraft(next);
+    },
+    [draft, currentPage, deckItems],
+  );
+
+  const handleMoveToPage = useCallback(
+    (id, pageId) => {
+      if (!draft) return;
+      const working = foldPageIntoDraft(draft, currentPage, deckItems);
+      const next = moveToPage(working, id, pageId);
+      if (next !== working) {
+        setDraft(next);
+        setSelectedTileId(null);
+      }
+    },
+    [draft, currentPage, deckItems],
+  );
+
+  // detach's 3rd arg is a LAZY callback (per the module docblock) invoked only
+  // when a detach actually proceeds. It returns the STABLE provisional id, never
+  // a real page — the hidden "Unfiled" page is materialized only in handleSave,
+  // so detaching before Save performs zero host writes.
+  const requestUnfiledPage = useCallback(() => UNFILED_TARGET, []);
+
+  const handleDetach = useCallback(
+    (id) => {
+      if (!draft) return;
+      const working = foldPageIntoDraft(draft, currentPage, deckItems);
+      const next = detach(working, id, requestUnfiledPage);
+      if (next !== working) {
+        setDraft(next);
+        setSelectedTileId(null);
+      }
+    },
+    [draft, currentPage, deckItems, requestUnfiledPage],
+  );
+
+  // The row the toolbar acts on, resolved from the SAME list the grid rendered
+  // (host rows are still valid, they just lack a normalized `key`), and always
+  // given one so the callbacks get the composite draft op id. If the selected id
+  // no longer exists (e.g. it was just detached off this page) this resolves to
+  // null, which hides the toolbar without a stale-selection flash.
+  const selectedTile = useMemo(() => {
+    if (!editMode || !selectedTileId) return null;
+    const source = editTiles ?? deckItems;
+    const row = source.find((it) => sortKeyOf(it) === selectedTileId);
+    return row ? { ...row, key: sortKeyOf(row) } : null;
+  }, [editMode, selectedTileId, editTiles, deckItems]);
+
+  // Save replays the FULL draft diff to the host in the order the layoutDraft
+  // contract requires: (a) materialize the hidden Unfiled page, (b) moves +
+  // detachments re-parent tiles, (c) size patches, then (d) per-page reorder
+  // batches applied LAST so each pins the authoritative dense order against the
+  // page's POST-move membership (the host's applyReorder is all-or-nothing).
+  //
+  // Id typing (verified against host + the proven desktop sender):
+  //   - POST /api/items/move requires `typeof id === "string"` (server.js:600),
+  //     so `id` is String()-wrapped; `page_id`/`slot` are passed as-is.
+  //   - reorder_items sends page_id and item ids RAW (server.js matches TEXT
+  //     columns; diffDraft already emits string ids), exactly like
+  //     DesktopApp.jsx's proven sender — NOT Number()-coerced (real page ids are
+  //     TEXT like "page_main"/uuids, so Number() would NaN and null the frame).
+  //   - Size PATCH routes (/api/buttons/:id, /api/widgets/:id) put the id in the
+  //     URL path, inherently a string.
+  const handleSave = useCallback(async () => {
     if (!baseDraft || !draft) return;
     const diff = diffDraft(baseDraft, draft);
-    const batches = Object.entries(diff.reordersByPage);
+    const reorderKeys = Object.keys(diff.reordersByPage);
+    const hasMoves = diff.moves.length > 0;
+    const hasDetaches = diff.detachments.length > 0;
+    const hasSizes = diff.sizePatches.length > 0;
+    if (!reorderKeys.length && !hasMoves && !hasDetaches && !hasSizes) {
+      showToast("Nothing to save");
+      return;
+    }
+
     const socket = wsRef.current;
     if (socket?.readyState !== WebSocket.OPEN) {
       // Keep edit mode open: the draft is the user's work and must survive a
@@ -878,38 +1064,109 @@ export default function App() {
       showToast("Offline — changes kept, not saved");
       return;
     }
+
+    let unfiledRealId = null;
+    // Resolve a provisional Unfiled id to the materialized real page id.
+    const resolvePage = (pageId) =>
+      pageId === UNFILED_TARGET ? unfiledRealId : pageId;
+
+    // Guard the host-echo re-seed for the whole batch (see the reconcile site).
+    saveInFlightRef.current = true;
     try {
-      for (const [pageId, items] of batches) {
+      // (a) Materialize the hidden Unfiled page ONLY when something detaches.
+      // Reuse an existing hidden "Unfiled" page if one is already known, else
+      // create + hide it. This is the first host write of the Save; until here
+      // no detach has touched the network.
+      if (hasDetaches) {
+        const existing = pages.find(
+          (p) => p.hidden && (p.name || "").trim() === "Unfiled",
+        );
+        if (existing) {
+          unfiledRealId = existing.id;
+        } else {
+          const createdRes = await authFetch("/pages", {
+            method: "POST",
+            body: JSON.stringify({ name: "Unfiled" }),
+          });
+          if (!createdRes.ok)
+            throw new Error(`create Unfiled page (${createdRes.status})`);
+          const created = await createdRes.json();
+          unfiledRealId = created.id;
+          const hideRes = await authFetch(
+            `/pages/${encodeURIComponent(unfiledRealId)}`,
+            { method: "PATCH", body: JSON.stringify({ hidden: true }) },
+          );
+          if (!hideRes.ok)
+            throw new Error(`hide Unfiled page (${hideRes.status})`);
+        }
+      }
+
+      // (b) Re-parent every moved/detached tile. One fetch per item (not batched).
+      // Sorted by the draft's dense target slot ascending so each append lands
+      // within the target page's current length (a first detach onto the empty
+      // Unfiled page needs slot 0; ordering ascending keeps every slot in range).
+      const transfers = [...diff.moves, ...diff.detachments].sort(
+        (a, b) => a.toSlot - b.toSlot,
+      );
+      for (const m of transfers) {
+        const res = await authFetch("/items/move", {
+          method: "POST",
+          body: JSON.stringify({
+            kind: m.kind,
+            id: String(m.id), // server.js:600 — move route requires a string id
+            page_id: resolvePage(m.toPage),
+            slot: m.toSlot,
+          }),
+        });
+        if (!res.ok) throw new Error(`move ${m.kind}:${m.id} (${res.status})`);
+      }
+
+      // (c) Apply size patches. The route follows the kind.
+      for (const s of diff.sizePatches) {
+        const route = s.kind === "widget" ? "widgets" : "buttons";
+        const res = await authFetch(
+          `/${route}/${encodeURIComponent(String(s.id))}`,
+          { method: "PATCH", body: JSON.stringify({ size: s.size }) },
+        );
+        if (!res.ok)
+          throw new Error(`resize ${s.kind}:${s.id} (${res.status})`);
+      }
+
+      // (d) Reorders LAST: one reorder_items WS frame per affected page, pinning
+      // the draft's dense final order against the now-correct post-move
+      // membership. Item ids and page ids ride RAW (proven desktop path); the
+      // Unfiled page's batch is re-keyed to its real id.
+      for (const [pageId, items] of Object.entries(diff.reordersByPage)) {
+        const realPageId = resolvePage(pageId);
+        if (realPageId == null) continue;
         socket.send(
           JSON.stringify({
             v: 1,
             t: "reorder_items",
-            page_id: Number(pageId),
+            page_id: realPageId,
             items,
           }),
         );
       }
     } catch (error) {
-      showToast(`Save failed: ${error?.message || "socket error"}`);
+      // Optimistic-partial-apply: earlier sends that succeeded are already on the
+      // host, but the BASELINE is not advanced past the point of truth. The next
+      // host `state` broadcast (reconcile) re-seeds any page whose membership
+      // diverged, so the stale diff self-heals. T8 could make the whole commit
+      // transactional; 4.3b keeps the honest in-progress model from 4.3a.
+      showToast(`Save failed: ${error?.message || "host error"}`);
+      saveInFlightRef.current = false;
       return;
     }
-    // Optimistic, but NOT a claim of success: `baseDraft` advances so a later
-    // Save only reports what changed since, and the toast says the batch is
-    // *waiting* rather than saved — the client cannot verify acceptance from the
-    // send alone (the host replies to a rejected batch with silence). The truth
-    // arrives with the host's `state` broadcast, which the edit-mode reconcile in
-    // that handler uses to re-seed any page whose membership diverged, so a
-    // rejected/stale batch can never loop. Edit mode deliberately stays open; only
-    // `Done` closes it.
-    //
-    // 4.3b FOLLOW-UP: Save currently replays only `reordersByPage`. When it
-    // finalizes the multi-op commit, apply `moves`/`detachments` FIRST (they
-    // re-parent tiles and change page membership), then per-page `reordersByPage`
-    // batches computed against the post-move membership, then `sizePatches` — and
-    // confirm each class against the same host echo the reconcile keys off here.
+
+    // Same post-send semantics as 4.3a: advance the baseline to the committed
+    // draft (so a later Save only reports what changed since), keep edit mode
+    // open, and toast that the batch is *waiting* — acceptance is settled by the
+    // host echo, not by the send.
+    saveInFlightRef.current = false;
     setBaseDraft(draft);
-    showToast(batches.length ? "Sent — waiting for host" : "Nothing to save");
-  }, [baseDraft, draft, showToast]);
+    showToast("Sent — waiting for host");
+  }, [baseDraft, draft, pages, showToast]);
 
   // Discard: the draft is dropped and we leave. Deliberately performs no WS or
   // HTTP write at all — nothing was ever sent while editing, so there is nothing
@@ -1131,6 +1388,11 @@ export default function App() {
             gridColumn: `${p.col + 1} / span ${p.span.cols}`,
             gridRow: `${p.row + 1} / span ${p.span.rows}`,
           };
+          // A draft row carries its own normalized `key`; a host row does not, so
+          // the dnd-kit id is derived the same way in both cases. The React key
+          // stays the historical per-kind `item.id` outside edit mode. Declared
+          // up here so the widget tile can reuse it for tap-select in edit mode.
+          const sortableId = sortKeyOf(item);
           const tile =
             item.kind === "button" ? (
               <SortableButton
@@ -1153,20 +1415,21 @@ export default function App() {
             ) : (
               /* FEATURE: Live widgets — tiles interleave with the keys in the
                  same grid. They are not pressable: a tile shows, it does not
-                 act. */
+                 act. In edit mode a tap selects the widget so the toolbar can
+                 operate on it (4.3b carry-forward); `onSelect` is undefined
+                 outside edit mode so the tile stays exactly as before. */
               <WidgetTile
                 widget={item}
                 data={widgetData[item.id]}
                 sources={widgetSources}
+                onSelect={
+                  editMode ? () => handleTileTap(sortableId) : undefined
+                }
               >
                 <SystemMonitorWidget widget={item} data={widgetData[item.id]} />
               </WidgetTile>
             );
 
-          // A draft row carries its own normalized `key`; a host row does not, so
-          // the dnd-kit id is derived the same way in both cases. The React key
-          // stays the historical per-kind `item.id` outside edit mode.
-          const sortableId = sortKeyOf(item);
           return (
             <div key={item.key ?? item.id} style={placeStyle}>
               {editMode ? (
@@ -1347,6 +1610,7 @@ export default function App() {
           sensors={sensors}
           collisionDetection={rectIntersection}
           onDragStart={handleDragStart}
+          onDragOver={handleDragOver}
           onDragEnd={handleDragEnd}
           onDragCancel={handleDragCancel}
         >
@@ -1361,8 +1625,18 @@ export default function App() {
             {activeDragItem ? (
               <div
                 style={{
-                  width: layout ? layout.cell * activeDragSpan.cols : 88,
-                  height: layout ? layout.cell * activeDragSpan.rows : 88,
+                  // Match the grid's real footprint: a span of n cells is
+                  // n*cell + (n-1)*gap, not n*cell — the source cell occupies
+                  // that width in the CSS grid, so the ghost must too (the
+                  // placement math at the deck map's placeStyle uses `span n`).
+                  width: layout
+                    ? layout.cell * activeDragSpan.cols +
+                      layout.gap * (activeDragSpan.cols - 1)
+                    : 88,
+                  height: layout
+                    ? layout.cell * activeDragSpan.rows +
+                      layout.gap * (activeDragSpan.rows - 1)
+                    : 88,
                   borderRadius: 18,
                   opacity: 0.95,
                   boxShadow: "0 14px 34px rgba(0,0,0,0.6)",
@@ -1472,6 +1746,13 @@ export default function App() {
         dirty={dirty}
         onDone={handleDone}
         onSave={handleSave}
+        selected={selectedTile}
+        layout={layout}
+        pages={pages}
+        currentPage={currentPage}
+        onResize={handleResize}
+        onMoveToPage={handleMoveToPage}
+        onDetach={handleDetach}
       />
 
       {/* Inline Save feedback — deliberately a transient toast, not a dialog: a
