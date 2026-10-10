@@ -1,7 +1,6 @@
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -24,7 +23,8 @@ import {
 } from "./constants.js";
 import PairingScreen from "./PairingScreen.jsx";
 import { ButtonFace, Icon } from "./icons.jsx";
-import { columnsFor, spanStyle, totalCells } from "./widgets/layout.js";
+import { useDeckLayout } from "./layout/useDeckLayout.js";
+import { mergeLayout } from "./layout/layoutSettings.js";
 import { WidgetTile } from "./widgets/WidgetTile.jsx";
 import { SystemMonitorWidget } from "./widgets/SystemMonitorWidget.jsx";
 import {
@@ -254,7 +254,6 @@ export default function App() {
   const [widgetSources, setWidgetSources] = useState([]);
 
   const [disconnectActive, setDisconnectActive] = useState(false);
-  const [keySize, setKeySize] = useState(84);
   const deckRef = useRef(null);
   const swipeRef = useRef(null);
 
@@ -487,56 +486,40 @@ export default function App() {
     [widgets, currentPage],
   );
 
-  // A deck key is square. Size it from whichever axis runs out first rather
-  // than letting 1fr rows stretch it into a tall rectangle.
-  // FEATURE: Live widgets — cells, not items: a 2x2 widget is four keys' worth
-  // of space, and counting items would squeeze them into a grid that cannot
-  // hold them.
-  const layout = useMemo(() => {
-    const pageWidgets = widgetsForPage;
-    const count = totalCells(buttons) + totalCells(pageWidgets);
-    // Prefer the widest row that keeps keys reasonably large in landscape.
-    const cols = columnsFor([...buttons, ...pageWidgets], Math.max(count, 1));
-    return { cols, rows: Math.ceil(Math.max(count, 1) / cols) };
+  // FEATURE: Responsive layout — one slot-ordered list of every tile kind, so
+  // the engine interleaves buttons and widgets the way the host arranged them
+  // instead of drawing all keys first. The sort is stable (ES2019), so tied
+  // slots keep their merge order: buttons ahead of widgets. `position` is the
+  // fallback for talking to a host that predates `slot`.
+  const deckItems = useMemo(() => {
+    const merged = [
+      ...buttons.map((b) => ({ ...b, kind: "button" })),
+      ...widgetsForPage.map((w) => ({ ...w, kind: "widget" })),
+    ];
+    return merged.sort((a, b) => (a.slot ?? a.position) - (b.slot ?? b.position));
   }, [buttons, widgetsForPage]);
 
-  // Layout effect, not effect: the column count changes the moment a profile
-  // switches, so the size has to be right before the browser paints or the deck
-  // draws one frame of new columns at the old page's key size.
-  useLayoutEffect(() => {
-    const el = deckRef.current;
-    if (!el) return;
-    const measure = () => {
-      const gap = 8;
-      // Measure the content box: getBoundingClientRect includes the padding,
-      // which made keys a few pixels too big and pushed the last row under the
-      // container's clip.
-      const cs = getComputedStyle(el);
-      const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
-      const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
-      const box = el.getBoundingClientRect();
-      const w = (box.width - padX - (layout.cols - 1) * gap) / layout.cols;
-      const h = (box.height - padY - (layout.rows - 1) * gap) / layout.rows;
-      // Cap as well as floor: a four-key profile should not blow its keys up to
-      // fill the screen. Real decks keep a consistent key size whatever the
-      // page holds.
-      const next = Math.min(132, Math.max(44, Math.floor(Math.min(w, h))));
-      setKeySize((prev) => (Math.abs(prev - next) > 1 ? next : prev));
-    };
-    measure();
-    // ResizeObserver alone proved unreliable here — rotating the phone changes
-    // the viewport without the observed box reporting it in time — so the
-    // window events back it up. Both paths call the same measure.
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    window.addEventListener("resize", measure);
-    window.addEventListener("orientationchange", measure);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener("resize", measure);
-      window.removeEventListener("orientationchange", measure);
-    };
-  }, [layout]);
+  // Layout knobs: task 3.1 scope resolves the current page's layout_config over
+  // DEFAULT_SETTINGS only — the phone has no global settings read yet, and
+  // phase 6 wires the global scope in by replacing the null first argument.
+  const layoutSettings = useMemo(
+    () =>
+      mergeLayout(
+        null,
+        pages.find((p) => p.id === currentPage)?.layout_config,
+      ),
+    [pages, currentPage],
+  );
+
+  // The engine contract {cols, cell, gap, placements, scrollY}, measured from
+  // deckRef pre-paint and re-measured on resize/rotation by useDeckLayout.
+  // placements align with deckItems order; null until the first measure, so
+  // the render below must guard. Replaces the old columnsFor/keySize heuristic
+  // (which measured only the square cell and placed nothing explicitly).
+  const layout = useDeckLayout(deckRef, {
+    items: deckItems,
+    settings: layoutSettings,
+  });
 
   const pressButton = useCallback(async (id) => {
     if (wsRef.current?.readyState !== WebSocket.OPEN) {
@@ -830,7 +813,10 @@ export default function App() {
         </button>
       </div>
 
-      {/* FEATURE: Custom button size — 2x2 buttons use gridColumn/gridRow span 2 */}
+      {/* FEATURE: Responsive layout — one grid, one map: every tile is placed
+          explicitly from layout.placements (gridLine/span pinned to the
+          engine's column+row), so nothing relies on auto-flow or the old
+          2x2-only span rule. */}
       {/* Container */}
       <div
         ref={deckRef}
@@ -840,55 +826,75 @@ export default function App() {
         style={{
           flex: 1,
           minHeight: 0,
-          overflow: "hidden",
+          overflowX: "hidden",
+          // The engine degrades to vertical scroll only when height runs out
+          // (D6); before the first measure there is no layout and the deck
+          // stays exactly as clipped as it always was.
+          overflowY: layout?.scrollY ? "auto" : "hidden",
           paddingLeft: "max(env(safe-area-inset-left), 10px)",
           paddingRight: "max(env(safe-area-inset-right), 10px)",
           paddingTop: 4,
           paddingBottom: 4,
           // The browser must not claim horizontal drags as scrolls: it
           // cancels the pointer sequence and the swipe never completes.
-          touchAction: "none",
+          // Under scrollY the browser owns vertical pans and may cancel a
+          // sequence mid-scroll — harmless, because the swipe only ever fires
+          // on |dx|>=60 AND |dx|>=1.5|dy| (onDeckPointerUp): a cancelled
+          // vertical drag was never a page swipe anyway.
+          touchAction: layout?.scrollY ? "pan-y" : "none",
           display: "grid",
-          placeContent: "center",
-          gridTemplateColumns: `repeat(${layout.cols}, ${keySize}px)`,
-          gridAutoRows: `${keySize}px`,
-          gap: 8,
+          justifyContent: "center",
+          gridTemplateColumns: layout
+            ? `repeat(${layout.cols}, ${layout.cell}px)`
+            : "none",
+          gridAutoRows: layout ? `${layout.cell}px` : "auto",
+          gap: layout ? layout.gap : 8,
         }}
       >
         {buttons.length === 0 && status === "connected" && <SkeletonGrid />}
-        {buttons.map((btn) => (
-          <SortableButton
-            key={btn.id}
-            btn={btn}
-            pressing={pressing === btn.id}
-            onPress={pressButton}
-            volume={volume}
-            muted={muted}
-            micVolume={micVolume}
-            micMuted={micMuted}
-            sessions={sessions}
-            showLabels={showLabels}
-            onVolumeHoldStart={startVolumeHold}
-            onVolumeHoldStop={stopVolumeHold}
-            onConfirmHoldStart={beginConfirmHold}
-          />
-        ))}
-        {/* FEATURE: Live widgets — tiles after the keys, in the same grid. They
-            are not pressable: a tile shows, it does not act. */}
-        {widgetsForPage.map((widget) => (
-          <div key={widget.id} style={spanStyle(widget.size)}>
-            <WidgetTile
-              widget={widget}
-              data={widgetData[widget.id]}
-              sources={widgetSources}
-            >
-              <SystemMonitorWidget
-                widget={widget}
-                data={widgetData[widget.id]}
-              />
-            </WidgetTile>
-          </div>
-        ))}
+        {layout &&
+          deckItems.map((item, i) => {
+            const p = layout.placements[i];
+            if (!p) return null;
+            const placeStyle = {
+              gridColumn: `${p.col + 1} / span ${p.span.cols}`,
+              gridRow: `${p.row + 1} / span ${p.span.rows}`,
+            };
+            return item.kind === "button" ? (
+              <div key={item.id} style={placeStyle}>
+                <SortableButton
+                  btn={item}
+                  pressing={pressing === item.id}
+                  onPress={pressButton}
+                  volume={volume}
+                  muted={muted}
+                  micVolume={micVolume}
+                  micMuted={micMuted}
+                  sessions={sessions}
+                  showLabels={showLabels}
+                  onVolumeHoldStart={startVolumeHold}
+                  onVolumeHoldStop={stopVolumeHold}
+                  onConfirmHoldStart={beginConfirmHold}
+                />
+              </div>
+            ) : (
+              /* FEATURE: Live widgets — tiles interleave with the keys in the
+                 same grid. They are not pressable: a tile shows, it does not
+                 act. */
+              <div key={item.id} style={placeStyle}>
+                <WidgetTile
+                  widget={item}
+                  data={widgetData[item.id]}
+                  sources={widgetSources}
+                >
+                  <SystemMonitorWidget
+                    widget={item}
+                    data={widgetData[item.id]}
+                  />
+                </WidgetTile>
+              </div>
+            );
+          })}
       </div>
 
       {/* FEATURE: Deck layout — swipe changes page; the dots do the same by tap,
@@ -1153,9 +1159,8 @@ const SortableButton = memo(function SortableButton({
   const [holding, setHolding] = useState(false);
   const holdTimerRef = useRef(null);
 
-  const sizeStyle =
-    btn.size === "2x2" ? { gridColumn: "span 2", gridRow: "span 2" } : {};
-
+  // Sizing/spans live on the deck grid now (explicit placement in App's map),
+  // not on the tile — a 2x2 key is placed, not special-cased here.
   const isToggleOn =
     Number(btn.is_toggle) === 1 && Number(btn.toggle_state) === 1;
   const isToggle = Number(btn.is_toggle) === 1;
@@ -1289,7 +1294,6 @@ const SortableButton = memo(function SortableButton({
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
       style={{
-        ...sizeStyle,
         transform: pressing ? "scale(0.96)" : undefined,
         transition: mergedTransition,
         zIndex: isDragging ? 999 : "auto",
