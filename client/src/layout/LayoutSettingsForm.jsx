@@ -8,7 +8,15 @@
 // while "Apply to this page" is on with a real page behind it. All the diff
 // rules live in the pure layoutForm.js module beside it, unit-tested without
 // a DOM.
-import { useState } from "react";
+//
+// Phase 6, Task 6.2 adds the Presets section: Save-as-preset (a name + the
+// buildPresetSnapshot scope diff), an Apply picker, and a two-tap non-modal
+// Delete. It stays fetch-free: the snapshot is computed here from the form's
+// own pending diff, and every wire action is delegated to the container
+// callbacks (onSavePreset / onApplyPreset / onDeletePreset). The section
+// renders only when the preset props are provided, so tests (and any future
+// surface) can still mount the bare 6.1 form.
+import { useEffect, useRef, useState } from "react";
 import {
   COLS_MAX,
   COLS_MIN,
@@ -19,10 +27,13 @@ import {
   MIN_CELL_MAX,
   MIN_CELL_MIN,
   PRESET_CHOICES,
+  PRESET_NAME_MAX,
   buildPartial,
+  buildPresetSnapshot,
   computeSaveEnabled,
   initialValues,
   pickPreset,
+  sanitizePresetName,
   setValue,
 } from "./layoutForm.js";
 
@@ -84,6 +95,39 @@ const styles = {
     borderRadius: "50%",
     background: "#fff",
     transition: "left 0.15s ease",
+  }),
+  // Task 6.2 preset controls — same sheet tokens (#1a1a22 fills, #2a2a35
+  // hairlines), sized for the narrow mobile panel as everything else here.
+  presetRow: { display: "flex", gap: 4, alignItems: "center" },
+  presetInput: {
+    flex: 1,
+    minWidth: 0,
+    padding: "6px 10px",
+    borderRadius: 10,
+    border: "1px solid #2a2a35",
+    background: "#1a1a22",
+    color: "#e0e0ec",
+    fontSize: 11,
+  },
+  presetSelect: {
+    width: "100%",
+    padding: "6px 8px",
+    borderRadius: 10,
+    border: "1px solid #2a2a35",
+    background: "#1a1a22",
+    color: "#e0e0ec",
+    fontSize: 11,
+  },
+  presetButton: (danger) => ({
+    padding: "6px 10px",
+    borderRadius: 10,
+    border: `1px solid ${danger ? "#5c1a1a" : "#2a2a35"}`,
+    background: danger ? "#2e0d0d" : "#2a2a35",
+    color: danger ? "#f87171" : "#c0c0cc",
+    fontSize: 11,
+    fontWeight: 700,
+    cursor: "pointer",
+    flexShrink: 0,
   }),
 };
 
@@ -153,7 +197,21 @@ function SliderRow({ label, min, max, unit, value, onChange, hint }) {
   );
 }
 
-export default function LayoutSettingsForm({ initialConfig, pageName, onSave }) {
+export default function LayoutSettingsForm({
+  initialConfig,
+  pageName,
+  onSave,
+  // Task 6.2 preset contract (all optional — the section renders only when
+  // they are provided): the container's fetched preset rows, and its three
+  // wire callbacks. pageId / pageStoredConfig locate the page scope for the
+  // snapshot; without them a preset can still save/apply the global scope.
+  presets,
+  onSavePreset,
+  onApplyPreset,
+  onDeletePreset,
+  pageId,
+  pageStoredConfig,
+}) {
   // The diff itself: key -> pending value, present only when touched. The
   // display layerings (`changes.x ?? base.x`) never write back into it, so a
   // Save after an untouched form is provably `{}` (see layoutForm.test.js).
@@ -201,6 +259,111 @@ export default function LayoutSettingsForm({ initialConfig, pageName, onSave }) 
     // success, keep it open on failure); the form only guards double-saves.
     Promise.resolve(onSave(buildPartial(changes), scope)).finally(() =>
       setBusy(false),
+    );
+  };
+
+  // ── Task 6.2: presets ─────────────────────────────────────────────────────
+  // The snapshot reads the CURRENT view (pending diff layered over the merged
+  // config the form rendered) but never touches what the main Save emits —
+  // 6.1's smallest-diff invariant on the save path is untouched.
+  const presetsReady =
+    Array.isArray(presets) &&
+    typeof onSavePreset === "function" &&
+    typeof onApplyPreset === "function" &&
+    typeof onDeletePreset === "function";
+  // The page scope is only ever snapshotted/applied when a real, visible page
+  // backs the form (same pageName gate as the "Apply to this page" toggle).
+  const snapshotPageId = pageName != null ? pageId ?? null : null;
+
+  const [presetName, setPresetName] = useState("");
+  const [presetBusy, setPresetBusy] = useState(false);
+  const [selectedPresetId, setSelectedPresetId] = useState("");
+  // Two-tap inline delete confirm: the first tap flips the label to "Really?"
+  // for 3s (non-modal, no window.confirm — ruling 5).
+  const [deleteArmed, setDeleteArmed] = useState(false);
+  const deleteArmTimerRef = useRef(null);
+  const disarmDelete = () => {
+    clearTimeout(deleteArmTimerRef.current);
+    setDeleteArmed(false);
+  };
+  // The arm timer must not outlive the panel (the sheet closes on save).
+  useEffect(
+    () => () => clearTimeout(deleteArmTimerRef.current),
+    [],
+  );
+  // A deleted/unloaded preset cannot stay selected. Derived at render — the
+  // container filters the row out of `presets`, so the picker simply reads
+  // the placeholder again; no effect-write-back needed (react-hooks rule).
+  const selectedStillPresent =
+    presetsReady &&
+    selectedPresetId !== "" &&
+    presets.some((p) => p.id === selectedPresetId);
+  const effectiveSelectedId = selectedStillPresent ? selectedPresetId : "";
+
+  const snapshot = buildPresetSnapshot(
+    changes,
+    initialConfig,
+    snapshotPageId,
+    pageStoredConfig,
+  );
+  const cleanName = sanitizePresetName(presetName);
+  // Disabled when the name (trimmed) is empty, when neither scope has
+  // anything to say, or while the bounds are inverted (same guard as Save —
+  // a preset must not smuggle an impossible minCell > maxCell state).
+  const canSavePreset =
+    presetsReady &&
+    cleanName != null &&
+    Object.keys(snapshot).length > 0 &&
+    !boundsInverted &&
+    !presetBusy;
+  const selectedPreset = selectedStillPresent
+    ? presets.find((p) => p.id === effectiveSelectedId) ?? null
+    : null;
+
+  const savePreset = () => {
+    if (!canSavePreset) return;
+    setPresetBusy(true);
+    // Reset the name input on success (ledger ruling); a failed save keeps
+    // the typed name so the user can retry. The busy flag releases when the
+    // container's promise settles — the form owns no fetch but does own its
+    // double-tap guard.
+    Promise.resolve(onSavePreset(cleanName, snapshot))
+      .then((ok) => {
+        if (ok !== false) setPresetName("");
+      })
+      .finally(() => setPresetBusy(false));
+  };
+
+  const applyPresetFromPicker = (event) => {
+    const id = event.target.value;
+    setSelectedPresetId(id);
+    disarmDelete();
+    if (!id) return;
+    const preset = presets.find((p) => p.id === id);
+    if (!preset) return;
+    // "immediately invoke applyPreset(preset, currentPageId)" — ruling 5.
+    // If every write fails the container resolves false: put the picker back
+    // on the placeholder rather than show an applied preset it did not apply.
+    setPresetBusy(true);
+    Promise.resolve(onApplyPreset(preset, snapshotPageId))
+      .then((ok) => {
+        if (ok === false) setSelectedPresetId("");
+      })
+      .finally(() => setPresetBusy(false));
+  };
+
+  const tapDelete = () => {
+    if (!selectedPreset || presetBusy) return;
+    if (!deleteArmed) {
+      setDeleteArmed(true);
+      clearTimeout(deleteArmTimerRef.current);
+      deleteArmTimerRef.current = setTimeout(() => setDeleteArmed(false), 3000);
+      return;
+    }
+    disarmDelete();
+    setPresetBusy(true);
+    Promise.resolve(onDeletePreset(selectedPreset.id)).finally(
+      () => setPresetBusy(false),
     );
   };
 
@@ -309,6 +472,83 @@ export default function LayoutSettingsForm({ initialConfig, pageName, onSave }) 
       >
         {busy ? "Saving…" : "Save"}
       </button>
+
+      {/* Task 6.2 — the Presets section, at the BOTTOM of the form (after the
+          Apply-to-this-page controls and Save), rendered only when the
+          container provided the preset props. */}
+      {presetsReady ? (
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+            borderTop: "1px solid #22222a",
+            paddingTop: 10,
+          }}
+        >
+          <div style={styles.caption}>Presets</div>
+          {/* D4 copy — MANDATORY VERBATIM per the Phase 6 ruling; reviewers
+              fail this task if it is softened or reworded. */}
+          <span style={styles.hint}>
+            Presets save layout settings and responsive behavior. They do NOT
+            save tile placements.
+          </span>
+
+          {/* Save-as-preset: snapshot the CURRENT view; gated on a trimmed
+              non-empty name AND at least one scope with keys to say. */}
+          <div style={styles.presetRow}>
+            <input
+              type="text"
+              value={presetName}
+              onChange={(e) => setPresetName(e.target.value)}
+              aria-label="New preset name"
+              placeholder="Name this preset"
+              maxLength={PRESET_NAME_MAX}
+              style={styles.presetInput}
+            />
+            <button
+              type="button"
+              style={styles.presetButton(false)}
+              onClick={savePreset}
+              disabled={!canSavePreset}
+            >
+              {presetBusy ? "Saving…" : "Save as preset"}
+            </button>
+          </div>
+
+          {/* Apply-preset picker: saved presets newest-created first (the
+              container sorted them); picking one fires the container's apply
+              immediately. */}
+          <select
+            aria-label="Apply a preset"
+            value={effectiveSelectedId}
+            onChange={applyPresetFromPicker}
+            style={styles.presetSelect}
+          >
+            <option value="">
+              {presets.length ? "Select a preset…" : "No presets saved yet"}
+            </option>
+            {presets.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+
+          {/* Delete: first tap arms ("Really?" for 3s), second tap deletes.
+              Non-modal — the disconnect-confirm dialog is overkill here. */}
+          {selectedPreset ? (
+            <button
+              type="button"
+              style={styles.presetButton(deleteArmed)}
+              onClick={tapDelete}
+              disabled={presetBusy}
+            >
+              {deleteArmed ? "Really?" : "Delete preset"}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

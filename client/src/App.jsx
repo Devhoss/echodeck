@@ -10,6 +10,7 @@ import {
   isElectron,
   clearPairConfig,
   authFetch,
+  getApiUrl,
   jsonArray,
 } from "./constants.js";
 import PairingScreen from "./PairingScreen.jsx";
@@ -20,6 +21,14 @@ import { mergeLayout } from "./layout/layoutSettings.js";
 // smallest diff over the target scope's own stored config before the HTTP
 // call, because the host routes REPLACE the whole stored layout_config.
 import { mergeScopeConfig } from "./layout/layoutForm.js";
+// FEATURE: Layout presets (Task 6.2) — the REST layer over
+// GET/POST/DELETE /api/layout-presets. baseUrl is getApiUrl(), the same base
+// authFetch builds its pages/settings URLs from.
+import {
+  createPreset,
+  deletePreset,
+  listPresets,
+} from "./layout/presetsClient.js";
 // FEATURE: Edit Layout (Phase 4, Tasks 4.3a + 4.3b) — the pure draft model. 4.3a
 // used createDraft/reorder/diffDraft; 4.3b adds the per-item mutations
 // (resize/moveToPage/detach) for the toolbar and its full Save commit.
@@ -439,6 +448,11 @@ export default function App() {
   // after pairing (see the effect below) and written optimistically on save;
   // the host's `state` frame carries per-page configs but no global one.
   const [globalLayout, setGlobalLayout] = useState(null);
+  // FEATURE: Layout presets (Task 6.2) — the saved rows, cached in the
+  // container and refreshed when the sheet's Settings sub-panel opens (NOT
+  // per keystroke, NOT while the form is being typed in). The form owns the
+  // snapshot math; this state owns only the list the picker shows.
+  const [presets, setPresets] = useState([]);
 
   const [disconnectActive, setDisconnectActive] = useState(false);
   // FEATURE: Mobile customization (Task 5.2) — the control sheet's expanded
@@ -1083,6 +1097,153 @@ export default function App() {
       }
     },
     [currentPage, pages, globalLayout, showToast],
+  );
+
+  // FEATURE: Layout presets (Task 6.2) — see the `presets` state declared
+  // with the layout state above. Rows are fetched when the sheet's settings
+  // sub-panel opens (refreshPresets, fired by ControlSheet's onSettingsOpen)
+  // and cached here — never refetched per keystroke. Newest-created first:
+  // `created_at` is DB-assigned and ISO-comparable, the only order the host
+  // exposes.
+  const refreshPresets = useCallback(() => {
+    listPresets(getApiUrl())
+      .then((rows) =>
+        setPresets(
+          [...rows].sort((a, b) =>
+            String(b.created_at ?? "").localeCompare(
+              String(a.created_at ?? ""),
+            ),
+          ),
+        ),
+      )
+      .catch(() => {
+        /* best-effort like the /settings read: an unreachable host just means
+           the picker shows "no presets yet" until the next panel open */
+      });
+  }, []);
+
+  const handlePresetSave = useCallback(
+    async (name, config) => {
+      try {
+        const row = await createPreset(getApiUrl(), { name, config });
+        if (row && row.id) setPresets((prev) => [row, ...prev]);
+        showToast("Preset saved");
+        return true;
+      } catch {
+        showToast("Could not save preset");
+        return false;
+      }
+    },
+    [showToast],
+  );
+
+  // Apply = one whole-replacement write per scope the preset mentions, each
+  // fired independently (Promise.allSettled — a mid-way failure leaves the
+  // earlier writes applied, exactly what the toast then reports). Scopes the
+  // preset does not mention are left alone; pages the profile has never seen
+  // are skipped and counted into the message. D4: no reorder_items, no
+  // /items/move, no size PATCHes — placements are untouchable here.
+  const handlePresetApply = useCallback(
+    async (preset) => {
+      const config =
+        preset && preset.config && typeof preset.config === "object"
+          ? preset.config
+          : null;
+      if (!config) {
+        showToast("Could not apply preset");
+        return false;
+      }
+      const known = new Set(pages.map((p) => p.id));
+      const pageEntries = Object.entries(
+        config.pages && typeof config.pages === "object" ? config.pages : {},
+      );
+      const skipped = pageEntries.filter(([id]) => !known.has(id)).length;
+      const jobs = [];
+      if (config.defaults && typeof config.defaults === "object") {
+        const value = config.defaults;
+        jobs.push({
+          label: "global",
+          run: async () => {
+            const res = await authFetch("/settings", {
+              method: "POST",
+              body: JSON.stringify({ key: "layout_config", value }),
+            });
+            if (!res.ok) throw new Error(`global layout (${res.status})`);
+            setGlobalLayout(value);
+          },
+        });
+      }
+      for (const [id, value] of pageEntries) {
+        if (!known.has(id)) continue;
+        jobs.push({
+          label: "page",
+          run: async () => {
+            const res = await authFetch(
+              `/pages/${encodeURIComponent(id)}`,
+              { method: "PATCH", body: JSON.stringify({ layout_config: value }) },
+            );
+            if (!res.ok) throw new Error(`page layout (${res.status})`);
+            const updated = await res.json();
+            if (updated && updated.id)
+              setPages((prev) =>
+                prev.map((p) => (p.id === updated.id ? updated : p)),
+              );
+          },
+        });
+      }
+      if (!jobs.length) {
+        showToast(
+          skipped
+            ? "Preset pages are not on this profile"
+            : "Preset has no layout scopes",
+        );
+        return false;
+      }
+      const results = await Promise.allSettled(jobs.map((j) => j.run()));
+      let appliedGlobal = false;
+      let appliedPages = 0;
+      let failed = 0;
+      results.forEach((r, i) => {
+        if (r.status === "fulfilled") {
+          if (jobs[i].label === "global") appliedGlobal = true;
+          else appliedPages += 1;
+        } else failed += 1;
+      });
+      // ALL writes failed → false: the form puts the picker back on the
+      // placeholder instead of showing an applied preset it never applied.
+      if (!appliedGlobal && !appliedPages) {
+        showToast("Could not apply preset");
+        return false;
+      }
+      const parts = [];
+      if (appliedGlobal) parts.push("global");
+      if (appliedPages)
+        parts.push(`${appliedPages} page${appliedPages > 1 ? "s" : ""}`);
+      let msg = failed
+        ? `Preset partly applied: ${parts.join(" + ")} saved, ${failed} write${failed > 1 ? "s" : ""} failed`
+        : `Preset applied: ${parts.join(" + ")}`;
+      if (skipped) msg += ` (${skipped} preset page${skipped > 1 ? "s" : ""} not here)`;
+      showToast(msg);
+      return true;
+    },
+    [pages, showToast],
+  );
+
+  const handlePresetDelete = useCallback(
+    async (id) => {
+      try {
+        await deletePreset(getApiUrl(), id);
+        // {ok:false} (id already gone) filters just the same — the local list
+        // is what the user sees, and a row the host does not have must go.
+        setPresets((prev) => prev.filter((p) => p.id !== id));
+        showToast("Preset deleted");
+        return true;
+      } catch {
+        showToast("Could not delete preset");
+        return false;
+      }
+    },
+    [showToast],
   );
 
   const handleTileTap = useCallback((key) => {
@@ -1806,6 +1967,13 @@ export default function App() {
         layoutConfig={layoutSettings}
         pageName={sheetPageName}
         onLayoutSave={handleLayoutSave}
+        onSettingsOpen={refreshPresets}
+        presets={presets}
+        onPresetSave={handlePresetSave}
+        onPresetApply={handlePresetApply}
+        onPresetDelete={handlePresetDelete}
+        layoutPageId={currentPage}
+        layoutPageStored={currentDeckPage?.layout_config}
       />
 
       {/* FEATURE: Responsive layout — one grid, one map: every tile is placed

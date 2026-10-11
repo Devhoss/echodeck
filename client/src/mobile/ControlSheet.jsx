@@ -245,6 +245,17 @@ export default function ControlSheet({
   layoutConfig,
   pageName,
   onLayoutSave,
+  // FEATURE: Layout presets (Task 6.2) — the Presets section lives inside
+  // the shared LayoutSettingsForm; the sheet only ferries the container's
+  // state/callbacks down and announces the panel opening (fetch-on-open —
+  // App caches the rows, so this must NOT fire per keystroke).
+  onSettingsOpen,
+  presets,
+  onPresetSave,
+  onPresetApply,
+  onPresetDelete,
+  layoutPageId,
+  layoutPageStored,
 }) {
   const sheetRef = useRef(null);
   // FEATURE: Layout settings (Task 6.1) — the Settings toggle. While open the
@@ -607,7 +618,15 @@ export default function ControlSheet({
                 background: settingsOpen ? "#2a2a35" : "#1a1a22",
                 color: settingsOpen ? "#e0e0ec" : "#c0c0cc",
               }}
-              onClick={() => setSettingsOpen((v) => !v)}
+              onClick={() =>
+                setSettingsOpen((v) => {
+                  // Fetch-on-open (Task 6.2): announce only the transition
+                  // into the panel; the container caches, so re-clicks while
+                  // already open never refetch.
+                  if (!v) onSettingsOpen?.();
+                  return !v;
+                })
+              }
             >
               <Icon name="settings" size={12} />
               Settings
@@ -640,6 +659,12 @@ export default function ControlSheet({
               const ok = await onLayoutSave(partial, scope);
               if (ok) setSettingsOpen(false);
             }}
+            presets={presets}
+            onSavePreset={onPresetSave}
+            onApplyPreset={onPresetApply}
+            onDeletePreset={onPresetDelete}
+            pageId={layoutPageId}
+            pageStoredConfig={layoutPageStored}
           />
         </div>
       ) : null}

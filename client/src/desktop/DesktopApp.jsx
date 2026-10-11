@@ -64,6 +64,15 @@ import {
   applyActionTypeDefaults,
 } from "../actionRegistry.js";
 import { getApiUrl } from "../constants.js";
+// FEATURE: Layout presets (Task 6.2) — the REST layer over
+// GET/POST/DELETE /api/layout-presets. The desktop builds every URL from
+// api() (getApiUrl(), loopback so no token header needed), exactly like its
+// pages/settings calls elsewhere.
+import {
+  createPreset,
+  deletePreset,
+  listPresets,
+} from "../layout/presetsClient.js";
 
 // Resolved at call time (inside effects/handlers), always after preload injection
 const api = () => getApiUrl();
@@ -342,6 +351,10 @@ export default function DesktopApp({
   const [globalLayout, setGlobalLayout] = useState(null);
   const [showLayoutSettings, setShowLayoutSettings] = useState(false);
   const [layoutSettingsFlash, setLayoutSettingsFlash] = useState(null);
+  // FEATURE: Layout presets (Task 6.2) — the saved rows behind the modal's
+  // Presets section. Fetched when the modal opens (the effect below), cached
+  // in state, never refetched per keystroke — same policy as the phone.
+  const [presets, setPresets] = useState([]);
   const [showDevices, setShowDevices] = useState(false);
   // FEATURE: Auto-switch rules moved out of the sidebar — they are configured
   // occasionally, so they no longer hold permanent canvas space.
@@ -1177,6 +1190,152 @@ export default function DesktopApp({
       }
     },
     [currentPage, pages, globalLayout, setPages, flashLayout],
+  );
+
+  // FEATURE: Layout presets (Task 6.2) — fetch-on-open for the modal's
+  // Presets section. One GET per modal opening (cached in `presets`), newest
+  // created_at first — the same policy as the phone's sheet (App.jsx).
+  useEffect(() => {
+    if (!showLayoutSettings) return;
+    let cancelled = false;
+    listPresets(api())
+      .then((rows) => {
+        if (cancelled) return;
+        setPresets(
+          [...rows].sort((a, b) =>
+            String(b.created_at ?? "").localeCompare(
+              String(a.created_at ?? ""),
+            ),
+          ),
+        );
+      })
+      .catch(() => {
+        /* unreachable host mid-edit: the picker just shows no rows yet */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showLayoutSettings]);
+
+  const handlePresetSave = useCallback(async (name, config) => {
+    try {
+      const row = await createPreset(api(), { name, config });
+      if (row && row.id) setPresets((prev) => [row, ...prev]);
+      flashLayout("Preset saved");
+      return true;
+    } catch {
+      flashLayout("Couldn't save preset");
+      return false;
+    }
+  }, [flashLayout]);
+
+  // Apply = one whole-replacement write per scope the preset mentions (host
+  // routes REPLACE; unmentioned scopes are left alone, and a preset without
+  // `defaults` must NOT clear the global — per-scope ruling). Each write
+  // fires independently via Promise.allSettled; a mid-way failure keeps the
+  // earlier ones applied, and the single flash says which scopes landed.
+  // D4: presets never touch slots — no reorder, no /items/move, no sizes.
+  const handlePresetApply = useCallback(
+    async (preset) => {
+      const headers = { "Content-Type": "application/json" };
+      const config =
+        preset && preset.config && typeof preset.config === "object"
+          ? preset.config
+          : null;
+      if (!config) {
+        flashLayout("Couldn't apply preset");
+        return false;
+      }
+      const known = new Set(pages.map((p) => p.id));
+      const pageEntries = Object.entries(
+        config.pages && typeof config.pages === "object" ? config.pages : {},
+      );
+      const skipped = pageEntries.filter(([id]) => !known.has(id)).length;
+      const jobs = [];
+      if (config.defaults && typeof config.defaults === "object") {
+        const value = config.defaults;
+        jobs.push({
+          label: "global",
+          run: async () => {
+            const res = await fetch(`${api()}/settings`, {
+              method: "POST",
+              headers,
+              body: JSON.stringify({ key: "layout_config", value }),
+            });
+            if (!res.ok) throw new Error(`global layout (${res.status})`);
+            setGlobalLayout(value);
+          },
+        });
+      }
+      for (const [id, value] of pageEntries) {
+        if (!known.has(id)) continue;
+        jobs.push({
+          label: "page",
+          run: async () => {
+            const res = await fetch(
+              `${api()}/pages/${encodeURIComponent(id)}`,
+              { method: "PATCH", headers, body: JSON.stringify({ layout_config: value }) },
+            );
+            if (!res.ok) throw new Error(`page layout (${res.status})`);
+            const updated = await res.json();
+            if (updated && updated.id)
+              setPages((prev) =>
+                prev.map((p) => (p.id === updated.id ? updated : p)),
+              );
+          },
+        });
+      }
+      if (!jobs.length) {
+        flashLayout(
+          skipped
+            ? "Preset pages are not on this profile"
+            : "Preset has no layout scopes",
+        );
+        return false;
+      }
+      const results = await Promise.allSettled(jobs.map((j) => j.run()));
+      let appliedGlobal = false;
+      let appliedPages = 0;
+      let failed = 0;
+      results.forEach((r, i) => {
+        if (r.status === "fulfilled") {
+          if (jobs[i].label === "global") appliedGlobal = true;
+          else appliedPages += 1;
+        } else failed += 1;
+      });
+      // ALL writes failed → false: the picker stays on "Select a preset…"
+      // rather than flash a false "Applied".
+      if (!appliedGlobal && !appliedPages) {
+        flashLayout("Couldn't apply preset");
+        return false;
+      }
+      const parts = [];
+      if (appliedGlobal) parts.push("global");
+      if (appliedPages)
+        parts.push(`${appliedPages} page${appliedPages > 1 ? "s" : ""}`);
+      let msg = failed
+        ? `Preset partly applied: ${parts.join(" + ")} saved, ${failed} write${failed > 1 ? "s" : ""} failed`
+        : `Preset applied: ${parts.join(" + ")}`;
+      if (skipped) msg += ` (${skipped} preset page${skipped > 1 ? "s" : ""} not here)`;
+      flashLayout(msg);
+      return true;
+    },
+    [pages, setPages, flashLayout],
+  );
+
+  const handlePresetDelete = useCallback(
+    async (id) => {
+      try {
+        await deletePreset(api(), id);
+        setPresets((prev) => prev.filter((p) => p.id !== id));
+        flashLayout("Preset deleted");
+        return true;
+      } catch {
+        flashLayout("Couldn't delete preset");
+        return false;
+      }
+    },
+    [flashLayout],
   );
 
   async function disconnectDevice(clientId) {
@@ -2309,6 +2468,12 @@ export default function DesktopApp({
                 initialConfig={layoutSettings}
                 pageName={layoutModalPageName}
                 onSave={handleLayoutSave}
+                presets={presets}
+                onSavePreset={handlePresetSave}
+                onApplyPreset={handlePresetApply}
+                onDeletePreset={handlePresetDelete}
+                pageId={currentPage}
+                pageStoredConfig={currentDeckPage?.layout_config}
               />
             </div>
           </div>

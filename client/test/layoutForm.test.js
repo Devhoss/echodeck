@@ -1,22 +1,27 @@
-// Layout-settings FORM diff tests (Task 6.1). Pure module, `node --test`, no
-// DOM. Contract under test is the "smallest diff" invariant: the form renders
-// a merged engine settings object but only ever emits keys the user actively
-// touched, so an untouched save cannot freeze DEFAULT_SETTINGS values into a
-// scope and defeat the page > global > defaults cascade. Preset↔slider
-// clearing (named preset pick nulls the custom overrides; "custom" pick is a
-// reveal only) and the container's scope-merge (host routes REPLACE the whole
-// stored config; nulls delete) are the other two rules with real logic.
+// Layout-settings FORM diff tests (Tasks 6.1 + 6.2). Pure module, `node
+// --test`, no DOM. Contract under test is the "smallest diff" invariant: the
+// form renders a merged engine settings object but only ever emits keys the
+// user actively touched, so an untouched save cannot freeze DEFAULT_SETTINGS
+// values into a scope and defeat the page > global > defaults cascade.
+// Preset↔slider clearing (named preset pick nulls the custom overrides;
+// "custom" pick is a reveal only) and the container's scope-merge (host
+// routes REPLACE the whole stored config; nulls delete) are the other two
+// rules with real logic. The 6.2 section covers buildPresetSnapshot, which
+// reuses all of that discipline for the {defaults, pages} preset scope.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   GAP_MIN,
   PRESET_CHOICES,
+  PRESET_NAME_MAX,
   buildPartial,
+  buildPresetSnapshot,
   computeSaveEnabled,
   detectPreset,
   initialValues,
   mergeScopeConfig,
   pickPreset,
+  sanitizePresetName,
   setValue,
 } from "../src/layout/layoutForm.js";
 import { DEFAULT_SETTINGS, PRESETS } from "../src/layout/deckLayout.js";
@@ -235,4 +240,143 @@ test("computeSaveEnabled: a named-pick clear diff has valid bounds", () => {
     }),
     true,
   );
+});
+
+// --- Task 6.2: preset snapshots (buildPresetSnapshot) -----------------------
+// The four contract cases from the brief, plus the cascade guards. Remember:
+// applying a preset REPLACES each scope it mentions and leaves every other
+// scope alone, so a scope that would say nothing must be absent entirely.
+
+test("buildPresetSnapshot: nothing touched over an all-defaults deck emits {}", () => {
+  // The preset-save analogue of the 6.1 smallest-diff invariant: the form may
+  // DISPLAY balanced bounds (48/132/8) and a neutral 4 columns, but an
+  // untouched snapshot must not freeze them into the preset.
+  assert.deepEqual(buildPresetSnapshot({}, merged(), null, null), {});
+});
+
+test("buildPresetSnapshot: only defaults touched emits just {defaults}", () => {
+  const snap = buildPresetSnapshot({ gap: 12 }, merged(), null, null);
+  assert.deepEqual(snap, { defaults: { gap: 12 } });
+  assert.equal(snap.pages, undefined);
+});
+
+test("buildPresetSnapshot: a page touch with a non-default global emits both scopes", () => {
+  // Global preset large, user pending gap 9, page target p1 with no stored
+  // config: defaults carries the whole current global picture (large + the
+  // pending gap, per "smallest partial that means the same as what shows"),
+  // pages carries the page's new stored value.
+  const snap = buildPresetSnapshot(
+    { gap: 9 },
+    merged({ preset: "large" }, null),
+    "p1",
+    null,
+  );
+  assert.deepEqual(snap, {
+    defaults: { preset: "large", gap: 9 },
+    pages: { p1: { gap: 9 } },
+  });
+});
+
+test("buildPresetSnapshot: a page with no touched keys never produces a pages entry", () => {
+  // Empty pages entries are filtered out — a preset that says nothing about
+  // a page must leave that page's scope ALONE on apply, not replace it.
+  const snap = buildPresetSnapshot({}, merged({ gap: 11 }, null), "p1", {
+    cols: 5,
+  });
+  assert.deepEqual(snap, { defaults: { gap: 11 } });
+});
+
+test("buildPresetSnapshot: the page entry is its full NEW stored value, keeping its own stored keys", () => {
+  // Host PATCH replaces the page scope wholesale, so a touched-only diff
+  // would silently DROP the page's other stored knobs on apply. Keeping them
+  // is the same mergeScopeConfig discipline as 6.1's page save.
+  const snap = buildPresetSnapshot({ gap: 9 }, merged(null, { cols: 5, gap: 4 }), "p1", {
+    cols: 5,
+    gap: 4,
+  });
+  assert.deepEqual(snap.pages, { p1: { cols: 5, gap: 9 } });
+});
+
+test("buildPresetSnapshot: stored PAGE overrides never leak into defaults", () => {
+  // The merge the form renders is page > global; a page-owned key is not the
+  // global's opinion. Freezing it into defaults would spread one page's
+  // knobs across the whole deck on apply — the cascade-freezing 6.1 refuses.
+  const snap = buildPresetSnapshot(
+    { gap: 10 }, // gap touched on a page whose stored config owns cols
+    merged({ preset: "compact" }, { cols: 6 }),
+    "p1",
+    { cols: 6 },
+  );
+  assert.deepEqual(snap.defaults, { preset: "compact", gap: 10 });
+  assert.equal(snap.defaults.cols, undefined);
+  assert.deepEqual(snap.pages, { p1: { cols: 6, gap: 10 } });
+});
+
+test("buildPresetSnapshot: an untouched form over a customized global snapshots that scope", () => {
+  // The preset is a snapshot of the CURRENT state, not only of this session's
+  // edits — stored non-default knobs must ride along, while keys equal to the
+  // engine defaults (auto/balanced) stay dropped.
+  const snap = buildPresetSnapshot(
+    {},
+    merged({ mode: "custom", cols: 7, preset: "balanced" }, null),
+    null,
+    null,
+  );
+  assert.deepEqual(snap, { defaults: { mode: "custom", cols: 7 } });
+});
+
+test("buildPresetSnapshot: the UI-only custom marker alone produces no scopes at all", () => {
+  // pickPreset("custom") is a reveal: buildPartial filters the marker, so the
+  // snapshot sees an empty diff — no defaults keys and no page touches, hence
+  // no pages entry either. This is what the Save-as-preset gate reads.
+  const revealed = pickPreset({}, "custom");
+  assert.deepEqual(buildPresetSnapshot(revealed, merged(), "p1", { cols: 5 }), {});
+});
+
+test("buildPresetSnapshot: a named-preset pick folds its slider clears into both scopes", () => {
+  // Stored global preset large + explicit minCell 100; the user picks
+  // balanced (pickPreset emits the named preset plus null clears). The
+  // snapshot's global result must have the sliders GONE, not frozen at 100.
+  const changes = pickPreset({}, "balanced");
+  const snap = buildPresetSnapshot(
+    changes,
+    merged({ preset: "large", minCell: 100 }, null),
+    null,
+    null,
+  );
+  // balanced IS the engine default, and the cleared sliders resolve to the
+  // balanced bounds — so the smallest scope that means the same is empty, and
+  // an empty defaults scope is dropped per the ruling (presets never clear a
+  // scope on apply; documented edge).
+  assert.deepEqual(snap, {});
+  // The same pick over a NON-default stored sibling still snapshots that
+  // sibling — proving the drop is about default equality, not about clears.
+  const snap2 = buildPresetSnapshot(
+    pickPreset({ mode: "custom", cols: 7 }, "balanced"),
+    merged({ preset: "large", minCell: 100, cols: 7 }, null),
+    null,
+    null,
+  );
+  assert.deepEqual(snap2, { defaults: { mode: "custom", cols: 7 } });
+});
+
+test("buildPresetSnapshot: junk arguments cannot crash it", () => {
+  for (const junk of [null, undefined, "string", 42, []]) {
+    assert.doesNotThrow(() => buildPresetSnapshot(junk, junk, junk, junk));
+  }
+  // A numeric page id is a host-shaped id string; anything else is ignored.
+  assert.deepEqual(buildPresetSnapshot({ gap: 3 }, merged(), 7, null), {
+    defaults: { gap: 3 },
+  });
+});
+
+// --- sanitizePresetName ------------------------------------------------------
+
+test("sanitizePresetName trims, rejects blank, and caps at PRESET_NAME_MAX", () => {
+  assert.equal(sanitizePresetName("  Concert Mode  "), "Concert Mode");
+  assert.equal(sanitizePresetName("   "), null);
+  assert.equal(sanitizePresetName(""), null);
+  assert.equal(sanitizePresetName(null), null);
+  assert.equal(sanitizePresetName(42), null);
+  assert.equal(sanitizePresetName("x".repeat(PRESET_NAME_MAX + 30)).length, PRESET_NAME_MAX);
 });

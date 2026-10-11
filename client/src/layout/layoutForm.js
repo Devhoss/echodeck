@@ -5,7 +5,14 @@
 // page > global > defaults cascade. All of that bookkeeping lives here, so the
 // component carries no logic and the invariant is unit-testable without a DOM
 // (same extracted-helpers precedent as mobile/volumeTap.js).
-import { PRESETS, resolveBounds } from "./deckLayout.js";
+// Phase 6, Task 6.2: the preset snapshot rules. A preset is a named snapshot
+// of the layout KNOBS only (plan D4: "Presets save layout settings and
+// responsive behavior. They do NOT save tile placements.") — the global
+// defaults scope plus optional per-page scopes, never slots or sizes. The
+// snapshot reuses the same "smallest partial that means the same" discipline
+// as 6.1's save path, so the host's preset sanitizer (sanitizePresetConfig,
+// a per-scope pass of sanitizeLayoutFields) accepts every key it emits.
+import { DEFAULT_SETTINGS, PRESETS, resolveBounds } from "./deckLayout.js";
 
 // The segmented picker's options: the three engine presets plus the UI-only
 // "custom" choice. "custom" is deliberately NOT a preset name — the engine has
@@ -131,4 +138,84 @@ export function mergeScopeConfig(stored, partial) {
   const next = { ...base, ...(partial ?? {}) };
   for (const key of Object.keys(next)) if (next[key] === null) delete next[key];
   return next;
+}
+
+// The six keys a layout scope can hold — the DEFAULT_SETTINGS shape.
+const SNAPSHOT_KEYS = Object.keys(DEFAULT_SETTINGS);
+
+// The scope snapshot a preset stores, computed from the form's pending diff.
+// `changes` is the form's touched-key diff (the same object buildPartial
+// consumes), `initialConfig` the merged engine settings the form rendered,
+// `currentPageId` the page the "Apply to this page" target resolves to (null
+// when global-only), and `pageStored` that page's OWN stored layout_config
+// (null when none). Emits `{defaults?, pages?}` containing only scopes with
+// at least one key — a preset that mentions no scope changes no scope when
+// applied (host routes replace a scope wholesale; unmentioned scopes stay).
+//
+// The smallest-scope-diff rules:
+// - defaults = (merged effective MINUS keys the page scope owns) OVERLAID with
+//   the touched diff, then keys equal to DEFAULT_SETTINGS dropped. Subtracting
+//   page-owned keys matters because the page renders the MERGED config: a
+//   page-stored value frozen into defaults would leak that page's opinion
+//   into every page on apply (the exact cascade-freezing 6.1 guards against).
+//   A key whose global value equals an engine default is dropped too — the
+//   engine resolves it identically without it, and unmentioned scopes are
+//   left alone on apply (per-scope ruling; presets never clear a scope).
+// - pages[id] = the page's full NEW stored config (its own stored value with
+//   the diff layered over it, exactly what 6.1's page save PATCHes). Only
+//   emitted when the diff has keys — "the page has touched keys" — because an
+//   untouched page's stored config is profile-local placement of knobs, not
+//   something the user asked the preset to remember.
+export function buildPresetSnapshot(
+  changes,
+  initialConfig,
+  currentPageId,
+  pageStored,
+) {
+  const merged =
+    initialConfig && typeof initialConfig === "object" && !Array.isArray(initialConfig)
+      ? initialConfig
+      : {};
+  const stored =
+    pageStored && typeof pageStored === "object" && !Array.isArray(pageStored)
+      ? pageStored
+      : {};
+  const partial = buildPartial(changes);
+
+  const globalVisible = {};
+  for (const key of SNAPSHOT_KEYS) {
+    // The page scope owns this key: its stored value is what the merge shows.
+    if (stored[key] !== null && stored[key] !== undefined) continue;
+    const v = merged[key];
+    if (v === null || v === undefined || v === DEFAULT_SETTINGS[key]) continue;
+    globalVisible[key] = v;
+  }
+  const nextGlobal = mergeScopeConfig(globalVisible, partial);
+  const defaults = {};
+  for (const [key, value] of Object.entries(nextGlobal)) {
+    if (value !== DEFAULT_SETTINGS[key]) defaults[key] = value;
+  }
+
+  const out = {};
+  if (Object.keys(defaults).length) out.defaults = defaults;
+  if (
+    typeof currentPageId === "string" &&
+    currentPageId.length &&
+    Object.keys(partial).length
+  ) {
+    const page = mergeScopeConfig(stored, partial);
+    if (Object.keys(page).length) out.pages = { [currentPageId]: page };
+  }
+  return out;
+}
+
+// Preset-name rule mirrors the host's POST /api/layout-presets gate (a
+// trimmed non-empty string), plus a display-length cap the input enforces so
+// a wall-of-text name cannot wreck the picker. Returns null when unusable.
+export const PRESET_NAME_MAX = 60;
+export function sanitizePresetName(name) {
+  if (typeof name !== "string") return null;
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, PRESET_NAME_MAX);
 }
