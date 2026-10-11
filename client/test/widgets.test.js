@@ -26,6 +26,7 @@ import {
   WIDGET_TYPES,
   WIDGET_METRIC_IDS,
 } from "../src/widgets/registry.js";
+import { createDraft } from "../src/layout/layoutDraft.js";
 
 // ---- layout ----------------------------------------------------------------
 
@@ -193,4 +194,115 @@ test("the widget registry is self-consistent", () => {
     }
   }
   assert.deepEqual(widgetTypeById("nope").id, WIDGET_TYPES[0].id);
+});
+
+// ---- deck slot-merge-sort (decision D2) ------------------------------------
+//
+// The deck is now ONE slot-ordered list that merges buttons and widgets, so the
+// two kinds interleave in whatever order the host arranged them instead of all
+// keys drawing first. App.jsx / DesktopApp.jsx build that list inline (a JSX
+// `deckItems` memo, unimportable under `node --test`):
+//   merged = [...buttons.map(kind:"button"), ...widgets.map(kind:"widget")]
+//   merged.sort((a, b) => (a.slot ?? a.position) - (b.slot ?? b.position))
+// The pure exported module that densifies this same merged list into a working
+// draft is `createDraft` (client/src/layout/layoutDraft.js), which encodes the
+// identical contract: a single `(slot ?? position)` key (slot authoritative,
+// position only the legacy fallback) with a stable input-order tie-break, so a
+// tile merged earlier (buttons before widgets) wins a slot tie. These fixtures
+// reproduce the exact merge construction and pin that ordering end to end.
+
+// Mirror of the render path's merge: two separate kind arrays folded into one,
+// buttons tagged and concatenated ahead of widgets.
+const mergeDeck = (buttons, widgets) => [
+  ...buttons.map((b) => ({ ...b, kind: "button" })),
+  ...widgets.map((w) => ({ ...w, kind: "widget" })),
+];
+
+// The merged page's tile keys in draft slot order, plus their dense slots.
+const mergedPage = (deckItems, pageId = "p") => {
+  const draft = createDraft(deckItems);
+  return draft.items
+    .filter((it) => it.page_id === pageId)
+    .sort((a, b) => a.slot - b.slot)
+    .map((it) => ({ key: `${it.kind}:${it.id}`, slot: it.slot }));
+};
+
+test("slot merge: slot-ordered buttons and widgets interleave as the host arranged them", () => {
+  const buttons = [
+    { id: 1, page_id: "p", slot: 1 },
+    { id: 2, page_id: "p", slot: 3 },
+  ];
+  const widgets = [
+    { id: 10, page_id: "p", slot: 0 },
+    { id: 11, page_id: "p", slot: 2 },
+  ];
+  assert.deepEqual(
+    mergedPage(mergeDeck(buttons, widgets)),
+    [
+      { key: "widget:10", slot: 0 },
+      { key: "button:1", slot: 1 },
+      { key: "widget:11", slot: 2 },
+      { key: "button:2", slot: 3 },
+    ],
+  );
+});
+
+test("slot merge: tied slots keep buttons ahead of widgets (D2 tie-break)", () => {
+  // A button and a widget sharing a slot value is not a host-dense deck, but
+  // the merge order plus the stable tie-break must resolve it deterministically
+  // the way the render path does: buttons are concatenated first, so they win.
+  const buttons = [{ id: 1, page_id: "p", slot: 0 }];
+  const widgets = [{ id: 10, page_id: "p", slot: 0 }];
+  assert.deepEqual(
+    mergedPage(mergeDeck(buttons, widgets)),
+    [
+      { key: "button:1", slot: 0 },
+      { key: "widget:10", slot: 1 },
+    ],
+  );
+});
+
+test("slot merge: slot is authoritative and position is only the legacy fallback", () => {
+  // b1/w10 are legacy rows carrying only `position`; b2/w11 already carry `slot`.
+  // Both are folded into one comparable key (slot ?? position), so a carried slot
+  // (even a large one) is ranked on the same axis as a legacy position, exactly
+  // as the `(a.slot ?? a.position)` render comparator does.
+  const buttons = [
+    { id: 1, page_id: "p", position: 2 }, // legacy: no slot
+    { id: 2, page_id: "p", slot: 0 },
+  ];
+  const widgets = [
+    { id: 10, page_id: "p", position: 1 }, // legacy: no slot
+    { id: 11, page_id: "p", slot: 5 },
+  ];
+  // Ordering by (slot ?? position): b2@0, w10@1, b1@2, w11@5.
+  assert.deepEqual(
+    mergedPage(mergeDeck(buttons, widgets)),
+    [
+      { key: "button:2", slot: 0 },
+      { key: "widget:10", slot: 1 },
+      { key: "button:1", slot: 2 },
+      { key: "widget:11", slot: 3 },
+    ],
+  );
+});
+
+test("slot merge: every kind on a page is densified to a contiguous 0..n-1", () => {
+  // Dense slots are what the host's applyReorder accepts, so the merged order
+  // must leave no holes regardless of the incoming slot/position values.
+  const buttons = [
+    { id: 1, page_id: "p", slot: 7 },
+    { id: 2, page_id: "p", slot: 2 },
+    { id: 3, page_id: "p", position: 0 },
+  ];
+  const widgets = [
+    { id: 10, page_id: "p", slot: 4 },
+    { id: 11, page_id: "p", slot: 9 },
+  ];
+  const page = mergedPage(mergeDeck(buttons, widgets));
+  assert.deepEqual(
+    page.map((p) => p.slot),
+    [0, 1, 2, 3, 4],
+  );
+  assert.equal(page.length, 5);
 });
