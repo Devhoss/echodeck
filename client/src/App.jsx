@@ -17,6 +17,7 @@ import PairingScreen from "./PairingScreen.jsx";
 import { ButtonFace, Icon } from "./icons.jsx";
 import { useDeckLayout } from "./layout/useDeckLayout.js";
 import { mergeLayout } from "./layout/layoutSettings.js";
+import { visibleDeckPages } from "./layout/deckPages.js";
 // FEATURE: Layout settings (Task 6.1) — the container layers the form's
 // smallest diff over the target scope's own stored config before the HTTP
 // call, because the host routes REPLACE the whole stored layout_config.
@@ -856,6 +857,8 @@ export default function App() {
   const sheetPageName =
     currentDeckPage && !currentDeckPage.hidden ? currentDeckPage.name : null;
 
+  const visiblePages = useMemo(() => visibleDeckPages(pages), [pages]);
+
   // ── FEATURE: Edit Layout (Task 4.3a) ──────────────────────────────────────
   // Declared here — before the engine call below — because the measure hook has
   // to be fed the draft's tile order while editing, and it references
@@ -1664,17 +1667,20 @@ export default function App() {
       if (editMode) return;
       const startPt = swipeRef.current;
       swipeRef.current = null;
-      if (!startPt || pages.length < 2) return;
+      if (!startPt || visiblePages.length < 2) return;
       const dx = e.clientX - startPt.x;
       const dy = e.clientY - startPt.y;
       if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
 
-      const i = pages.findIndex((p) => p.id === currentPage);
+      const i = visiblePages.findIndex((p) => p.id === currentPage);
       if (i === -1) return;
-      const next = pages[(i + (dx < 0 ? 1 : -1) + pages.length) % pages.length];
+      const next =
+        visiblePages[
+          (i + (dx < 0 ? 1 : -1) + visiblePages.length) % visiblePages.length
+        ];
       if (next) switchPage(next.id);
     },
-    [editMode, pages, currentPage, switchPage],
+    [editMode, visiblePages, currentPage, switchPage],
   );
 
   // FEATURE: Mobile customization (Task 5.3, issue #9) — the outer-column
@@ -2089,7 +2095,7 @@ export default function App() {
 
       {/* FEATURE: Deck layout — swipe changes page; the dots do the same by tap,
           so the deck is never gesture-only. */}
-      {pages.length > 1 && (
+      {visiblePages.length > 1 && (
         <div
           style={{
             display: "flex",
@@ -2100,7 +2106,7 @@ export default function App() {
             flexShrink: 0,
           }}
         >
-          {pages.map((p) => {
+          {visiblePages.map((p) => {
             const active = p.id === currentPage;
             return (
               <button

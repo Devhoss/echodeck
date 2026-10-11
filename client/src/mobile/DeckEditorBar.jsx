@@ -21,6 +21,7 @@
  */
 import { useState } from "react";
 import { TILE_SIZES, spanFor } from "../layout/deckLayout.js";
+import { visibleDeckPages } from "../layout/deckPages.js";
 
 // The four engine sizes, drawn as short "1×1 … 2×2" labels. The label mirrors the
 // grid span exactly (width×height) so a 1x2 (tall) reads differently from a 2x1
@@ -115,7 +116,7 @@ export default function DeckEditorBar({
   // Visible move targets: real pages that are neither hidden nor the page the
   // tile is already on. The Unfiled target is offered separately and routes to
   // onDetach (not onMoveToPage) so a detach re-parents to the lazy Unfiled page.
-  const moveTargets = pages.filter((p) => !p.hidden && p.id !== currentPage);
+  const moveTargets = visibleDeckPages(pages).filter((p) => p.id !== currentPage);
 
   const closeMove = () => setMoveOpen(false);
 

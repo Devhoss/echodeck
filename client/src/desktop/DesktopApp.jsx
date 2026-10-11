@@ -42,6 +42,7 @@ import { ActionIcon, ButtonFace, Icon } from "../icons.jsx";
 import { WIDGET_TYPES, widgetTypeById } from "../widgets/registry.js";
 import { WidgetTile } from "../widgets/WidgetTile.jsx";
 import { TILE_SIZES } from "../layout/deckLayout.js";
+import { visibleDeckPages } from "../layout/deckPages.js";
 import { useDeckLayout } from "../layout/useDeckLayout.js";
 import { mergeLayout } from "../layout/layoutSettings.js";
 // FEATURE: Layout settings (Task 6.1) — shared form + the container-side
@@ -430,6 +431,8 @@ export default function DesktopApp({
   const currentDeckPage = pages.find((p) => p.id === currentPage);
   const layoutModalPageName =
     currentDeckPage && !currentDeckPage.hidden ? currentDeckPage.name : null;
+
+  const visiblePages = useMemo(() => visibleDeckPages(pages), [pages]);
 
   // The engine contract {cols, cell, gap, placements, scrollY}, measured from
   // canvasRef pre-paint and re-measured on resize by useDeckLayout. placements
@@ -1821,7 +1824,7 @@ export default function DesktopApp({
             </DragOverlay>
 
             <PageRail
-              pages={pages}
+              pages={visiblePages}
               currentPage={currentPage}
               onSelectPage={(id) => {
                 switchPage(id);
