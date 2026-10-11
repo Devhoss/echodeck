@@ -7,6 +7,7 @@ const { randomBytes, timingSafeEqual } = require("crypto");
 const os = require("os");
 const db = require("./db");
 const { moveItemSlots } = require("./itemOrder.js");
+const { firstVisiblePage } = require("./pageOrder");
 const {
   isValidButtonSize,
   sanitizeLayoutConfig,
@@ -365,6 +366,11 @@ Write-Output $f.FileName
 
 app.post("/api/pages", (req, res) => {
   const pages = db.getPages();
+  // Page reordering pins hidden pages at the tail, so a new page takes the slot
+  // just past the last VISIBLE page rather than `pages.length` — with an Unfiled
+  // page present those two values differ, and `pages.length` would land the new
+  // page behind Unfiled and re-sort it into the visible block on the next read.
+  const position = pages.filter((p) => !p.hidden).length;
   // FEATURE: Key labels — a new profile inherits the flag from the profile it
   // was created from, so a variant of a labelled page does not have to be
   // re-set by hand. Callers that name no parent get the stored default.
@@ -372,7 +378,7 @@ app.post("/api/pages", (req, res) => {
   const page = db.createPage(
     uuid(),
     req.body.name || "New Page",
-    pages.length,
+    position,
     parent ? parent.show_labels : req.body.show_labels,
   );
   // Broadcast: the new profile has to reach the phone's page dots too, which
@@ -1190,6 +1196,23 @@ wss.on("connection", (ws, req) => {
       }
       broadcastState();
     }
+
+    if (msg.t === "reorder_pages") {
+      // FEATURE: Page reordering — {page_ids:[...]} is the VISIBLE order only,
+      // so Unfiled is never part of a drag list (plan D3) and applyPageOrder can
+      // pin every hidden page behind it. All-or-nothing like reorder_items: a
+      // malformed frame is rejected with no broadcast, so no client flickers.
+      const submitted = msg.page_ids;
+      const page_ids = Array.isArray(submitted)
+        ? submitted.filter((id) => typeof id === "string")
+        : (submitted ?? []);
+      const result = db.applyPageReorder(page_ids);
+      if (result.error) {
+        console.warn(`[reorder_pages] rejected: ${result.error}`);
+        return;
+      }
+      broadcastState();
+    }
   });
 
   const cleanup = () => {
@@ -1227,7 +1250,11 @@ async function broadcastVolumeNow() {
 
 function sendState(ws, page_id) {
   const pages = db.getPages().map(toDeckPage);
-  const targetPage = page_id || autoPageId || pages[0]?.id;
+  // Page reordering made `pages[0]` a moving target that a client could, in
+  // principle, put a hidden page onto — so a fresh connection asks for the first
+  // VISIBLE page instead. applyPageReorder already pins hidden pages to the
+  // tail; this is the second half of that guarantee.
+  const targetPage = page_id || autoPageId || firstVisiblePage(pages)?.id;
   // Remember the page this socket is actually looking at. It is what the
   // widget fan-out filters on, and without it a freshly connected client has
   // no page and silently receives no live data until it switches.
@@ -1336,7 +1363,7 @@ async function evaluateAutoSwitch() {
 }
 
 function performSwitch(pages, rule) {
-  const nextPageId = rule?.page_id || pages[0].id;
+  const nextPageId = rule?.page_id || firstVisiblePage(pages)?.id || pages[0].id;
   const nextRuleId = rule?.id || null;
   if (nextPageId === autoPageId && nextRuleId === activeRuleId) return;
 
