@@ -33,11 +33,14 @@ export default defineConfig({
     use: { viewport: { width: v.w, height: v.h } },
   })),
   webServer: {
-    // Build first so the suite always runs against the production bundle;
-    // reuseExistingServer lets a locally already-previewing dist skip both.
+    // Build first so the suite always runs against the production bundle.
+    // reuseExistingServer is forced false so every run — local included —
+    // rebuilds and serves a FRESH dist; a leftover `vite preview` from a prior
+    // build can never silently serve stale output. CI is unchanged (was already
+    // starting its own server).
     command: `npm run build && npm run preview -- --port ${PORT} --strictPort`,
     url: BASE_URL,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
     timeout: 180_000,
     stdout: "pipe",
     stderr: "pipe",

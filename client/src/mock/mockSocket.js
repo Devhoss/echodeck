@@ -10,7 +10,7 @@
 // assert the edit-mode Save diff reaches the socket.
 //
 // The spec reaches it through `window.__MOCK_WS__` (`.sent`, `.pushFrame`).
-import fixture from "../../test/viewport/fixtures/deck.json";
+import fixture from "./fixtures/deck.json";
 import { isMockMode } from "./mockMode.js";
 
 // The real host pushes stats every ~3s; matching that cadence keeps
