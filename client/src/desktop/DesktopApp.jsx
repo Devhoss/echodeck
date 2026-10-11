@@ -3519,12 +3519,25 @@ const PageRailPill = memo(function PageRailPill({
         ...(active ? styles.pagePillActive : {}),
         transform: CSS.Transform.toString(transform),
         transition,
-        opacity: isDragging ? 0 : 1,
+        // A cancelled or in-progress drag must stay visible: the page pills have no
+        // DragOverlay ghost (the overlay only draws button/widget/action actives), so
+        // hiding the source would erase the tile being moved. Dim it exactly like the
+        // button tile does rather than hiding it like the widget tile, which can hide
+        // because its overlay carries a ghost.
+        opacity: isDragging ? 0.3 : 1,
         zIndex: isDragging ? 999 : "auto",
-        outlineStyle: "solid",
-        outlineWidth: 2,
-        outlineColor: isOver ? "var(--accent)" : "transparent",
-        outlineOffset: 1,
+        // The drop-target ring only. Writing the outline longhands unconditionally
+        // (with a "transparent" colour) is an inline declaration, so it outranks the
+        // UA :focus-visible ring and the pill loses its keyboard focus indicator —
+        // the one thing a keyboard reorder cannot afford.
+        ...(isOver
+          ? {
+              outlineStyle: "solid",
+              outlineWidth: 2,
+              outlineColor: "var(--accent)",
+              outlineOffset: 1,
+            }
+          : {}),
       }}
       onClick={() => {
         if (!isDragging) onSelect(page.id);
