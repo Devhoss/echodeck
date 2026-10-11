@@ -224,6 +224,30 @@ export function shiftPage(draft, pageId, delta) {
   return makeDraft(draft.items, draft.unfiledPageId, arrayMove(order, from, to));
 }
 
+/**
+ * Page reordering: heal a draft's page ORDER against the host's authoritative
+ * visible ids — prune pages the host no longer shows, append pages created since
+ * the draft was seeded. Never re-sorts: a surviving id keeps its slot, so an
+ * unsaved claim is never clobbered. Same reference when the sets already match.
+ * A stale id left in the order would poison the whole batch (the host's
+ * `reorder_pages` is all-or-nothing), and a page missing from it would render a
+ * toolbar row whose Earlier/Later buttons do nothing.
+ */
+export function reconcilePageOrder(draft, visibleIds) {
+  const order = draft.pageOrder;
+  const host = visibleIds ?? [];
+  const hostSet = new Set(host);
+  const orderSet = new Set(order);
+  const next = [
+    ...order.filter((id) => hostSet.has(id)),
+    ...host.filter((id) => !orderSet.has(id)),
+  ];
+  if (next.length === order.length && next.every((id, i) => id === order[i])) {
+    return draft;
+  }
+  return makeDraft(draft.items, draft.unfiledPageId, next);
+}
+
 export function moveToPage(draft, id, pageId) {
   const cur = draft.byId[id];
   if (!cur) return draft;

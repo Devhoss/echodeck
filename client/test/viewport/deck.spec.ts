@@ -489,6 +489,20 @@ test.describe("deck viewport matrix", () => {
     // before any tile is selected, because page order is not a per-item edit.
     await openPagesDisclosure(page);
 
+    // Active-page cue (the reviewer's Minor): exactly one Pages LIST row carries
+    // aria-current="true", and it is the CURRENT page's numbered row — the sole
+    // owner ruling on this surface that had no regression guard. Scoped to the
+    // disclosure panel because the pager dots reuse the same aria-current cue.
+    const pagesPanel = page
+      .getByRole("button", { name: "Pages ▸", exact: true })
+      .locator("xpath=ancestor::div[1]/following-sibling::div[1]");
+    const current = pagesPanel.locator('[aria-current="true"]');
+    await expect(current, "exactly one Pages row is the active page").toHaveCount(1);
+    expect(
+      (await current.innerText()).replace(/\s+/g, " ").trim(),
+      "the cue sits on the current page's numbered row",
+    ).toMatch(/^1\. Main/);
+
     // The ends of the list are dead ends, and that is what makes this surface
     // verifiable: the first page cannot go earlier, the last cannot go later.
     const earlier = page.getByRole("button", { name: "Earlier", exact: true });
@@ -728,6 +742,147 @@ test.describe("deck viewport matrix", () => {
     ).toBeGreaterThan(
       sent.map((f: any) => f.t).lastIndexOf("reorder_items"),
     );
+
+    assertNoRealSocket(captured);
+  });
+
+  // Save is optimistic: it advances the baseline and the host answers a rejected
+  // reorder_pages with silence, so a baseline-only comparison would strand the
+  // unaccepted order with Save disabled and no escape but leaving Edit Layout. The
+  // batch is measured against the HOST, so a rejected claim keeps Save enabled and
+  // a re-tap re-commits it — and once the host's echo carries the order the batch
+  // empties and Save goes dark. The mock is a pure sink (it never applies writes),
+  // which is exactly what makes the rejection path testable.
+  test("10. pages: a rejected order stays saveable and re-commits on a second Save", async ({
+    page,
+  }) => {
+    const { captured, fixture } = await openMockDeck(page);
+    await enterEditMode(page);
+    await openPagesDisclosure(page);
+
+    await page.getByRole("button", { name: "Later", exact: true }).first().click();
+    await expect
+      .poll(() => pagesListLabels(page), "Main steps behind Second")
+      .toEqual(["1. Second", "2. Main"]);
+
+    const saveBtn = page.getByRole("button", { name: "Save", exact: true });
+    const toast = page.locator('[role="status"]:not([id^="DndLiveRegion"])');
+    await expect(saveBtn, "a page move alone makes the draft dirty").toBeEnabled();
+    await saveBtn.click();
+    await expect(toast).toContainText("Sent", { timeout: 10_000 });
+
+    let frames = (await mockSentFrames(page)).filter(
+      (f: any) => f.t === "reorder_pages",
+    );
+    expect(frames.length, "exactly one page-order frame on the first Save").toBe(1);
+    expect(frames[0].page_ids).toEqual(["page_two", "page_main"]);
+
+    // The mock never accepted the order, so the draft still disagrees with the
+    // host's sequence — Save must STAY enabled. This is the retry the finding asked
+    // for; before the host-measured batch it went dark because the baseline matched.
+    await expect(
+      saveBtn,
+      "an order the host never accepted keeps Save enabled",
+    ).toBeEnabled();
+    await saveBtn.click();
+    await expect(toast).toContainText("Sent", { timeout: 10_000 });
+
+    frames = (await mockSentFrames(page)).filter(
+      (f: any) => f.t === "reorder_pages",
+    );
+    expect(frames.length, "the retry re-commits a second frame").toBe(2);
+    expect(frames[0].page_ids).toEqual(["page_two", "page_main"]);
+    expect(frames[1].page_ids, "identical batch both times").toEqual([
+      "page_two",
+      "page_main",
+    ]);
+
+    // Now the host agrees: push a state frame whose pages array is already in the
+    // batch's order ([page_two, page_main, page_hidden]), reusing the rest of the
+    // snapshot. The heal keeps the draft's set; the host comparison empties the
+    // batch, so Save goes dark — nothing left to send.
+    const agreed = {
+      ...fixture.state,
+      pages: [
+        fixture.state.pages[1],
+        fixture.state.pages[0],
+        fixture.state.pages[2],
+      ],
+    };
+    await page.evaluate((frame) => (window as any).__MOCK_WS__.pushFrame(frame), agreed);
+    await expect(
+      saveBtn,
+      "the host agreed; there is nothing left to commit",
+    ).toBeDisabled();
+
+    assertNoRealSocket(captured);
+  });
+
+  // A page the host creates AFTER the draft was seeded was the dead-row condition:
+  // pagesInOrder trails it as a live row, but the draft never owned it, so
+  // shiftPage returned the same draft and the row's Earlier/Later silently did
+  // nothing. reconcilePageOrder heals the draft's page-order SET from every state
+  // frame, so the new page is owned and its row is genuinely interactive.
+  test("11. pages: a page created mid-draft becomes a live, reorderable row", async ({
+    page,
+  }) => {
+    const { captured, fixture } = await openMockDeck(page);
+    await enterEditMode(page);
+
+    // The host creates one extra VISIBLE page (hidden absent). The mock never
+    // applies writes, so this frame is the only way the draft learns of it.
+    const withThree = {
+      ...fixture.state,
+      pages: [
+        ...fixture.state.pages,
+        { id: "page_three", name: "Third", position: 3 },
+      ],
+    };
+    await page.evaluate((frame) => (window as any).__MOCK_WS__.pushFrame(frame), withThree);
+
+    await openPagesDisclosure(page);
+    await expect
+      .poll(() => pagesListLabels(page), "the healed order is a full permutation")
+      .toEqual(["1. Main", "2. Second", "3. Third"]);
+    await expect
+      .poll(
+        () =>
+          page
+            .locator('[aria-label="Main"], [aria-label="Second"], [aria-label="Third"]')
+            .count(),
+        "the new page is reachable through the dots",
+      )
+      .toBe(3);
+
+    // The new row is the tail, so — because the healed order is a real permutation
+    // — its Earlier is live and its Later is correctly disabled (a genuine last
+    // row). The reviewer's draft said "both enabled"; that cannot hold for a tail
+    // row, and asserting the disabled Later is exactly the point: index-based
+    // disabling is now correct. Liveness is proven by the click, not the state.
+    const earlier = page.getByRole("button", { name: "Earlier", exact: true });
+    const later = page.getByRole("button", { name: "Later", exact: true });
+    await expect(earlier.last(), "the healed new row offers a working Earlier").toBeEnabled();
+    await expect(later.last(), "the tail row's Later is honestly disabled").toBeDisabled();
+
+    const saveBtn = page.getByRole("button", { name: "Save", exact: true });
+    await earlier.last().click();
+    await expect(
+      saveBtn,
+      "the new row is owned: its Earlier actually dirties the draft",
+    ).toBeEnabled();
+
+    await saveBtn.click();
+    const toast = page.locator('[role="status"]:not([id^="DndLiveRegion"])');
+    await expect(toast).toContainText("Sent", { timeout: 10_000 });
+
+    const frames = (await mockSentFrames(page)).filter(
+      (f: any) => f.t === "reorder_pages",
+    );
+    expect(frames.length, "one page-order frame for the new page").toBe(1);
+    expect(
+      frames[0].page_ids.includes("page_three"),
+      `the batch carries the created page; got ${JSON.stringify(frames[0].page_ids)}`,
+    ).toBe(true);
 
     assertNoRealSocket(captured);
   });

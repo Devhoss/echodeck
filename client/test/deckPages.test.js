@@ -1,7 +1,11 @@
 // Visible-deck-pages tests (final-review fix, D3). Pure module, `node --test`, no DOM.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { visibleDeckPages, pagesInOrder } from "../src/layout/deckPages.js";
+import {
+  visibleDeckPages,
+  pagesInOrder,
+  pageOrderBatch,
+} from "../src/layout/deckPages.js";
 
 test("empty input returns empty array", () => {
   assert.deepEqual(visibleDeckPages([]), []);
@@ -72,4 +76,34 @@ test("pagesInOrder drops ids the page list does not contain", () => {
 
 test("pagesInOrder survives null input", () => {
   assert.deepEqual(pagesInOrder(null, ["a"]), []);
+});
+
+// pageOrderBatch: the page-order batch to send, measured against the HOST's
+// sequence rather than only the draft's baseline. Pure module, `node --test`.
+
+test("pageOrderBatch returns [] for an equal permutation", () => {
+  const batch = pageOrderBatch({ pageOrder: ["a", "b", "c"] }, ["a", "b", "c"]);
+  assert.deepEqual(batch, []);
+});
+
+test("pageOrderBatch returns the draft order for a different sequence, same set", () => {
+  const draft = { pageOrder: ["c", "a", "b"] };
+  const batch = pageOrderBatch(draft, ["a", "b", "c"]);
+  // Assert the IDS by value — the implementation hands back the draft's own
+  // array, so this is a value check, not a reference check.
+  assert.deepEqual(batch, ["c", "a", "b"]);
+});
+
+test("pageOrderBatch returns [] when the host has an extra page (length differs)", () => {
+  // A length mismatch means the draft is stale (a page came or went); the heal
+  // in reconcilePageOrder owns that case, so this emits nothing.
+  assert.deepEqual(pageOrderBatch({ pageOrder: ["a", "b"] }, ["a", "b", "c"]), []);
+});
+
+test("pageOrderBatch returns [] when the host is missing a page (length differs)", () => {
+  assert.deepEqual(pageOrderBatch({ pageOrder: ["a", "b", "c"] }, ["a", "b"]), []);
+});
+
+test("pageOrderBatch returns [] for two empty lists", () => {
+  assert.deepEqual(pageOrderBatch({ pageOrder: [] }, []), []);
 });

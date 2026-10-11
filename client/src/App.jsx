@@ -18,7 +18,11 @@ import { useDeckLayout } from "./layout/useDeckLayout.js";
 import { mergeLayout } from "./layout/layoutSettings.js";
 // FEATURE: Page reordering — `visibleDeckPages` keeps the hidden Unfiled bucket out
 // of deck navigation; `pagesInOrder` repaints the pager in the draft's order.
-import { pagesInOrder, visibleDeckPages } from "./layout/deckPages.js";
+import {
+  pagesInOrder,
+  visibleDeckPages,
+  pageOrderBatch,
+} from "./layout/deckPages.js";
 // FEATURE: Edit Layout (Phase 4, Tasks 4.3a + 4.3b) — the pure draft model. 4.3a
 // used createDraft/reorder/diffDraft; 4.3b adds the per-item mutations
 // (resize/moveToPage/detach) for the toolbar and its full Save commit.
@@ -30,6 +34,7 @@ import {
   moveToPage,
   detach,
   shiftPage,
+  reconcilePageOrder,
 } from "./layout/layoutDraft.js";
 import DeckEditorBar from "./mobile/DeckEditorBar.jsx";
 // FEATURE: Mobile customization (Tasks 5.1 + 5.2) — the collapsed status
@@ -657,8 +662,16 @@ export default function App() {
               ? reseedPageFromServer(prev, pageId, serverItems)
               : prev;
           };
-          setDraft(reseedIfDiverged);
-          setBaseDraft(reseedIfDiverged);
+          const hostVisibleIds = visibleDeckPages(msg.pages).map((p) => p.id);
+          const reconcileIfDiverged = (prev) => {
+            if (!prev) return prev;
+            // Heal the page-order SET second: it must run even when the item path
+            // bails (the viewed page may be perfectly in sync while another page
+            // was created or deleted since this draft was seeded).
+            return reconcilePageOrder(reseedIfDiverged(prev), hostVisibleIds);
+          };
+          setDraft(reconcileIfDiverged);
+          setBaseDraft(reconcileIfDiverged);
         }
       }
       if (msg.t === "widget_data") {
@@ -962,23 +975,38 @@ export default function App() {
     useSensor(PointerSensor, { activationConstraint: { distance: 10 } }),
   );
 
+  const hostPageIds = useMemo(() => visiblePages.map((p) => p.id), [visiblePages]);
+
+  // FEATURE: Page reordering — the order to send, judged against the host rather
+  // than only the baseline. `diff.pageOrder` covers the unsaved claim; the host
+  // comparison covers the claim the baseline already accepted but the host never
+  // did (Save is optimistic; rejection is silent), which is what keeps Save
+  // enabled so the user can re-commit instead of leaving Edit Layout.
+  const pendingPageOrder = useMemo(() => {
+    if (!draft || !baseDraft) return [];
+    const fromBaseline = diffDraft(baseDraft, draft).pageOrder;
+    return fromBaseline.length ? fromBaseline : pageOrderBatch(draft, hostPageIds);
+  }, [draft, baseDraft, hostPageIds]);
+
   // Structural dirtiness, not reference dirtiness: a drag that landed back where
   // it started (or a no-op draft op) leaves `draft !== baseDraft` yet changes
   // nothing, and Save must not fire a pointless WS frame on that.
   const dirty = useMemo(() => {
-    if (!baseDraft || !draft || draft === baseDraft) return false;
+    if (!baseDraft || !draft) return false;
+    // FEATURE: Page reordering — the order axis is judged against the host, so it
+    // counts even after Save advanced the baseline onto a claim the host never
+    // accepted. Everything else stays baseline-only.
+    if (pendingPageOrder.length > 0) return true;
+    if (draft === baseDraft) return false;
     const diff = diffDraft(baseDraft, draft);
     return (
       Object.keys(diff.reordersByPage).length > 0 ||
       diff.sizePatches.length > 0 ||
       diff.moves.length > 0 ||
       diff.detachments.length > 0 ||
-      // FEATURE: Page reordering — a page-only edit must be saveable, so the deck's
-      // order counts toward dirtiness on its own (diff.pageOrder is [] when
-      // unchanged, so a no-op session still reports clean and Save stays disabled).
       diff.pageOrder.length > 0
     );
-  }, [baseDraft, draft]);
+  }, [baseDraft, draft, pendingPageOrder]);
 
   // The row under the finger, resolved from the SAME list the grid rendered, so
   // a page that is still represented by host rows (not yet folded into the
@@ -1234,8 +1262,9 @@ export default function App() {
     const hasDetaches = diff.detachments.length > 0;
     const hasSizes = diff.sizePatches.length > 0;
     // FEATURE: Page reordering — a page-only session has nothing but an order, and
-    // it still has to be saveable.
-    const hasPageOrder = diff.pageOrder.length > 0;
+    // it still has to be saveable. The batch is measured against the host (see
+    // pendingPageOrder), so a rejected order keeps Save enabled and re-commits.
+    const hasPageOrder = pendingPageOrder.length > 0;
     if (
       !reorderKeys.length &&
       !hasMoves &&
@@ -1352,7 +1381,7 @@ export default function App() {
           JSON.stringify({
             v: 1,
             t: "reorder_pages",
-            page_ids: diff.pageOrder,
+            page_ids: pendingPageOrder,
           }),
         );
       }
@@ -1374,7 +1403,7 @@ export default function App() {
     saveInFlightRef.current = false;
     setBaseDraft(draft);
     showToast("Sent — waiting for host");
-  }, [baseDraft, draft, pages, showToast]);
+  }, [baseDraft, draft, pages, showToast, pendingPageOrder]);
 
   // Discard: the draft is dropped and we leave. Deliberately performs no WS or
   // HTTP write at all — nothing was ever sent while editing, so there is nothing

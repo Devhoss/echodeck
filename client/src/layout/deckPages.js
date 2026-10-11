@@ -22,3 +22,17 @@ export function pagesInOrder(pages, order) {
   }
   return [...out, ...byId.values()];
 }
+
+// Page reordering: the batch the phone should send, measured against the HOST's
+// sequence rather than only the draft's baseline. Save is optimistic and the host
+// answers a rejected `reorder_pages` with silence, so a baseline-only comparison
+// strands an unaccepted order with Save disabled and no way to re-commit it.
+// Returns the draft's whole order when it differs from the host's, else [] — a
+// different LENGTH means the draft is stale (a page came or went) and the heal in
+// reconcilePageOrder owns that case, so this stays [].
+export function pageOrderBatch(draft, hostIds) {
+  const order = draft?.pageOrder ?? [];
+  const host = hostIds ?? [];
+  if (order.length !== host.length) return [];
+  return order.every((id, i) => id === host[i]) ? [] : order;
+}

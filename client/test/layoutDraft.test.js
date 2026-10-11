@@ -14,6 +14,7 @@ import {
   moveToPage,
   detach,
   shiftPage,
+  reconcilePageOrder,
   diffDraft,
 } from "../src/layout/layoutDraft.js";
 
@@ -543,4 +544,69 @@ test("diffDraft reports a page reorder independently of item changes", () => {
   assert.deepEqual(diff.reordersByPage, {});
   assert.deepEqual(diff.sizePatches, []);
   assert.deepEqual(diff.moves, []);
+});
+
+// ---- reconcilePageOrder (final polish fix: heal the page-order SET) ----
+// A draft's page order is healed against the host's authoritative visible ids:
+// prune pages the host no longer shows, append pages created since seeding. It
+// never re-sorts (a surviving id keeps its slot) and returns the SAME draft when
+// the sets already match, so both App setters no-op by reference.
+
+const orderOf = (order) => createDraft([tile("button", 1, order[0] || "p1", 0)], order);
+
+test("reconcilePageOrder returns the same reference for the same set, different sequence", () => {
+  // It must never reorder: only the SET is its business.
+  const d = orderOf(["p1", "p3", "p2"]);
+  assert.equal(reconcilePageOrder(d, ["p1", "p2", "p3"]), d);
+});
+
+test("reconcilePageOrder prunes a page the host dropped, survivors keep relative order", () => {
+  const d = orderOf(["p1", "p2", "p3"]);
+  const next = reconcilePageOrder(d, ["p1", "p3"]); // host deleted p2
+  assert.notEqual(next, d);
+  assert.deepEqual(next.pageOrder, ["p1", "p3"]);
+  assert.ok(!next.pageOrder.includes("p2"), "the removed id is gone");
+});
+
+test("reconcilePageOrder appends a new visible host page at the tail", () => {
+  const d = orderOf(["p1", "p2"]);
+  const next = reconcilePageOrder(d, ["p1", "p2", "p3"]); // host created p3
+  assert.deepEqual(next.pageOrder, ["p1", "p2", "p3"]);
+});
+
+test("reconcilePageOrder keeps the host's relative order among several new pages", () => {
+  const d = orderOf(["p1", "p2"]);
+  // p5 then p4 are both new to the order; they must trail in the host's own
+  // relative order (p5 ahead of p4), not be re-sorted.
+  const next = reconcilePageOrder(d, ["p1", "p2", "p5", "p4"]);
+  assert.deepEqual(next.pageOrder, ["p1", "p2", "p5", "p4"]);
+});
+
+test("reconcilePageOrder applies a create and a delete in one frame", () => {
+  const d = orderOf(["p1", "p2", "p3"]);
+  // host lost p2, gained p4.
+  const next = reconcilePageOrder(d, ["p1", "p3", "p4"]);
+  assert.deepEqual(next.pageOrder, ["p1", "p3", "p4"]);
+});
+
+test("reconcilePageOrder is identity for an equal set, including two empty lists", () => {
+  const d = orderOf(["p1", "p2"]);
+  assert.equal(reconcilePageOrder(d, ["p1", "p2"]), d);
+  const empty = createDraft([], []);
+  assert.equal(empty.pageOrder.length, 0);
+  assert.equal(reconcilePageOrder(empty, []), empty);
+});
+
+test("reconcilePageOrder preserves items and the unfiled marker on a changed set", () => {
+  let d = createDraft(
+    [tile("button", 1, "p1", 0), tile("widget", 2, "p2", 0)],
+    ["p1", "p2", "p3"],
+  );
+  d = detach(d, "widget:2", () => "__unfiled__");
+  const next = reconcilePageOrder(d, ["p1", "p2", "p3", "p4"]); // host created p4
+  assert.notEqual(next, d);
+  assert.equal(next.items, d.items, "the items array is the same reference");
+  assert.equal(next.unfiledPageId, "__unfiled__");
+  assert.equal(next.byId["button:1"], d.byId["button:1"], "byId still resolves a key");
+  assert.deepEqual(next.pageOrder, ["p1", "p2", "p3", "p4"]);
 });
