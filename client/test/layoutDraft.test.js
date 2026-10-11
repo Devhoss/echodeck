@@ -1,10 +1,10 @@
 // Deck-layout draft model tests (Task 4.2). Pure module, `node --test`, no DOM.
 // The draft is the mobile Edit Layout's in-memory working copy: createDraft
 // densifies per-page slots, every operation returns a NEW draft (never mutating
-// the base), and diffDraft collapses base -> draft into the four authoritative
-// batches Task 4.3 / Save replays to the host. The four return-shape keys are
-// the plan's Task 4.2 contract:
-//   diffDraft(base, draft) -> { reordersByPage, sizePatches, moves, detachments }
+// the base), and diffDraft collapses base -> draft into the authoritative
+// batches Task 4.3 / Save replays to the host. The return-shape keys are the
+// plan's Task 4.2 contract, plus pageOrder from the final polish (Task 7):
+//   diffDraft(base, draft) -> { reordersByPage, sizePatches, moves, detachments, pageOrder }
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -13,6 +13,7 @@ import {
   resize,
   moveToPage,
   detach,
+  shiftPage,
   diffDraft,
 } from "../src/layout/layoutDraft.js";
 
@@ -38,7 +39,13 @@ const pageSlots = (draft, pageId) =>
     .sort((a, b) => a.slot - b.slot)
     .map((it) => ({ kind: it.kind, id: it.id, slot: it.slot }));
 
-const EMPTY = { reordersByPage: {}, sizePatches: [], moves: [], detachments: [] };
+const EMPTY = {
+  reordersByPage: {},
+  sizePatches: [],
+  moves: [],
+  detachments: [],
+  pageOrder: [],
+};
 
 // One page (id 1) of interleaved buttons/widgets with dense slots.
 const mixedDeck = () => [
@@ -438,4 +445,102 @@ test("diff minimality: a page untouched by the draft emits no reorder batch", ()
   assert.deepEqual(replay.get(1), pageKeys(draft, 1));
   assert.deepEqual(replay.get(2), pageKeys(draft, 2));
   assert.deepEqual(replay.get(9), pageKeys(draft, 9));
+});
+
+// ---- page order (final polish: page reordering is draft-scoped) ----
+
+// One deck row at its simplest: kind, numeric id, page id, dense slot.
+const tile = (kind, id, page_id, slot, size = "1x1") => ({
+  kind,
+  id,
+  page_id,
+  slot,
+  size,
+});
+
+const ORDER = ["p1", "p2", "p3"];
+const orderDraft = (items = [tile("button", 1, "p1", 0)]) =>
+  createDraft(items, ORDER);
+
+test("createDraft keeps the supplied visible page order verbatim", () => {
+  assert.deepEqual(orderDraft().pageOrder, ["p1", "p2", "p3"]);
+});
+
+test("createDraft defaults to an empty page order and de-dupes junk input", () => {
+  assert.deepEqual(createDraft([tile("button", 1, "p1", 0)]).pageOrder, []);
+  assert.deepEqual(
+    createDraft([], ["p1", "p1", 7, null, "p2"]).pageOrder,
+    ["p1", "p2"],
+  );
+});
+
+test("shiftPage moves a page one step and returns a new draft", () => {
+  const d = orderDraft();
+  const next = shiftPage(d, "p3", -1);
+  assert.notEqual(next, d);
+  assert.deepEqual(next.pageOrder, ["p1", "p3", "p2"]);
+  assert.deepEqual(d.pageOrder, ["p1", "p2", "p3"]); // input untouched
+});
+
+test("shiftPage across several steps accumulates", () => {
+  let d = orderDraft();
+  d = shiftPage(d, "p3", -1);
+  d = shiftPage(d, "p3", -1);
+  assert.deepEqual(d.pageOrder, ["p3", "p1", "p2"]);
+});
+
+test("shiftPage at the ends and for unknown or absent pages returns the same draft reference", () => {
+  const d = orderDraft();
+  assert.equal(shiftPage(d, "p1", -1), d);
+  assert.equal(shiftPage(d, "p3", 1), d);
+  assert.equal(shiftPage(d, "nope", 1), d);
+});
+
+test("shiftPage preserves items, sizes and the unfiled marker", () => {
+  let d = orderDraft([tile("button", 1, "p1", 0), tile("widget", 2, "p2", 0)]);
+  d = detach(d, "widget:2", () => "__unfiled__");
+  const moved = shiftPage(d, "p1", 1);
+  assert.deepEqual(moved.pageOrder, ["p2", "p1", "p3"]);
+  assert.equal(moved.unfiledPageId, "__unfiled__");
+  assert.deepEqual(pageKeys(moved, "p1"), ["button:1"]);
+});
+
+test("item ops carry pageOrder forward unchanged", () => {
+  const items = [tile("button", 1, "p1", 0), tile("button", 2, "p1", 1)];
+  const d = createDraft(items, ORDER);
+  assert.deepEqual(resize(d, "button:1", "2x1").pageOrder, ORDER);
+  assert.deepEqual(moveToPage(d, "button:1", "p2").pageOrder, ORDER);
+  assert.deepEqual(
+    reorder(d, "button:1", "button:2").pageOrder,
+    ORDER,
+  );
+});
+
+test("diffDraft emits the new order only when it changed", () => {
+  const base = orderDraft();
+  assert.deepEqual(diffDraft(base, base).pageOrder, []);
+  assert.deepEqual(diffDraft(base, shiftPage(base, "p3", -1)).pageOrder, [
+    "p1",
+    "p3",
+    "p2",
+  ]);
+});
+
+test("diffDraft emits nothing when the two orders differ in length", () => {
+  // A page cannot be created or removed inside the item draft, so a length
+  // mismatch means a caller mixed drafts from different sessions — and the host
+  // would reject a partial batch anyway. Silence beats a guaranteed-rejected frame.
+  const base = orderDraft();
+  const odd = { ...base, pageOrder: ["p1", "p2"] };
+  assert.deepEqual(diffDraft(base, odd).pageOrder, []);
+});
+
+test("diffDraft reports a page reorder independently of item changes", () => {
+  const base = orderDraft([tile("button", 1, "p1", 0)]);
+  const d = shiftPage(base, "p3", -2);
+  const diff = diffDraft(base, d);
+  assert.deepEqual(diff.pageOrder, ["p3", "p1", "p2"]);
+  assert.deepEqual(diff.reordersByPage, {});
+  assert.deepEqual(diff.sizePatches, []);
+  assert.deepEqual(diff.moves, []);
 });
