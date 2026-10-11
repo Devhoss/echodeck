@@ -171,7 +171,10 @@ export default function ControlSheet({
     display: "flex",
     alignItems: "center",
     gap: 5,
-    height: 26,
+    // height 24 to match the connection pill and the Disconnect button already
+    // in this row, so the sheet's rows sit on one rhythm.
+    height: 24,
+    boxSizing: "border-box",
     padding: "0 10px",
     background: "#1a1a22",
     border: "1px solid #2a2a35",
@@ -238,17 +241,15 @@ export default function ControlSheet({
           EchoDeck host — this computer
         </div>
 
-        {/* A layout constraint, not a device rule: below 500 px the content
-            flows in two columns so it still fits the 220-px landscape cap
-            without internal scroll. */}
+        {/* The three remaining rows stack in a single column (see the flex
+            `.deck-sheet-grid` below); the narrow two-column trick and its
+            span-all overrides are gone now that the sheet fits the 220-px
+            landscape cap on its own. */}
         <div className="deck-sheet-grid">
           {/* FEATURE: System stats — CPU / RAM / clock pills (relocated from
               the header, same fixed slot widths, so nothing jumps). */}
           {stats && (
-            <div
-              className="deck-sheet-span-all"
-              style={{ display: "flex", alignItems: "center", gap: 5 }}
-            >
+            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
               <StatPill
                 label="CPU"
                 value={`${stats.cpu}%`}
@@ -263,13 +264,10 @@ export default function ControlSheet({
             </div>
           )}
 
-          {/* Connection status pill + Disconnect button — relocated verbatim
-              from the old header (the confirm modal itself stays in App.jsx;
-              only the trigger moved here). */}
-          <div
-            className="deck-sheet-span-all"
-            style={{ display: "flex", alignItems: "center", gap: 6 }}
-          >
+          {/* Connection status pill + Disconnect button + Edit Layout —
+              relocated verbatim from the old header (the confirm modal itself
+              stays in App.jsx; only the trigger moved here). */}
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <div
               style={{
                 display: "flex",
@@ -355,15 +353,15 @@ export default function ControlSheet({
       </div>
 
       <style>{`
+        /* One flow for every viewport: the sheet now holds three short rows, so
+           the narrow (<500px) two-column trick is no longer needed to fit the
+           220-px cap — and it never applied to landscape anyway, which is what
+           used to clip. */
         .deck-sheet-grid {
-          display: grid;
-          grid-template-columns: 1fr;
-          gap: 5px 14px;
-          align-items: center;
-        }
-        @media (max-width: 499px) {
-          .deck-sheet-grid { grid-template-columns: 1fr 1fr; }
-          .deck-sheet-span-all { grid-column: 1 / -1; }
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          align-items: stretch;
         }
       `}</style>
     </div>

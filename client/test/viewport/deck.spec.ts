@@ -105,30 +105,33 @@ const assertNoRealSocket = (captured: Captured) =>
   expect(captured.sockets, "no real WebSocket was ever attempted").toEqual([]);
 
 /**
- * Enter edit mode. Door 1 is the sheet's visible single-tap "Edit Layout"
- * control; on the shortest landscape viewports the sheet's max-height cap
- * clips it (its point is covered), so fall back to Door 2 — the Task 5.3
- * universal long-press door on a plain tile. Both are shipped production
- * entry points; the adaptation is only about which door the spec knocks on.
+ * Enter edit mode through the sheet's single-tap "Edit Layout" door. Task 6
+ * compacted the sheet to three short rows, so at every landscape viewport the
+ * button is always inside the min(55%, 220px) cap — no clipping and no
+ * long-press fallback. The two guards here are the regression net: the sheet
+ * must not overflow its cap (scrollHeight <= clientHeight once the open
+ * transition settles), and the Edit Layout click is only actionable when the
+ * button is not covered by the sheet's clipped box.
  */
 async function enterEditMode(page: Page) {
   await page.locator("[data-status-handle] button").click();
-  const editBtn = page.getByRole("button", { name: "Edit Layout", exact: true });
-  try {
-    await editBtn.click({ timeout: 2000 });
-  } catch {
-    // Clipped by the sheet cap — undo the open sheet and use the long-press
-    // door on tile 3, so the later "tap-select tile 1" step stays genuine.
-    await page.keyboard.press("Escape");
-    const t3 = page.locator('[data-deck-item="3"]');
-    await t3.scrollIntoViewIfNeeded();
-    const box = await t3.boundingBox();
-    expect(box, "tile 3 has a box").toBeTruthy();
-    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
-    await page.mouse.down();
-    await page.waitForTimeout(650); // the 500 ms long-press door
-    await page.mouse.up();
-  }
+  const sheet = page.locator("#deck-control-sheet");
+  await expect
+    .poll(
+      () => sheet.evaluate((el: HTMLElement) => (el as any).inert === true),
+      "the sheet opened (not inert)",
+    )
+    .toBe(false);
+  // Real "does not clip" assertion: the trimmed sheet fits its max-height cap,
+  // so nothing is hidden behind the overflow. Would fail if a row ever pushes
+  // the content past the cap again.
+  await expect
+    .poll(
+      () => sheet.evaluate((el: HTMLElement) => el.scrollHeight - el.clientHeight),
+      "the compacted sheet fits its cap (no internal clipping)",
+    )
+    .toBeLessThanOrEqual(1);
+  await page.getByRole("button", { name: "Edit Layout", exact: true }).click();
   await expect(page.getByRole("button", { name: "Done", exact: true })).toBeVisible();
 }
 
