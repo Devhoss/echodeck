@@ -366,6 +366,8 @@ echodeck/
 └── README.md
 ```
 
+The responsive deck grid is computed by a pure layout engine — see [`docs/layout-model.md`](docs/layout-model.md) for its contract, the slot/position ordering model, settings merge precedence, and worked examples.
+
 ---
 
 # Running the Project
