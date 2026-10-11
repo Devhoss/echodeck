@@ -70,7 +70,9 @@ jobs:
   #
   # Deliberately INDEPENDENT of `test` (no `needs:`): a host/client unit-test
   # flake must not mask a viewport regression — each suite keeps its own
-  # signal. The release jobs below do depend on this one.
+  # signal. Runs on every event including tag pushes (for reporting), but the
+  # release jobs deliberately do NOT depend on it: a transient browser-test
+  # flake must not block a `v*` release.
   viewport:
     name: Viewport matrix
     runs-on: windows-latest
