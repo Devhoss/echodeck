@@ -22,6 +22,7 @@ import QRCode from "qrcode";
 import deckIcon from "/deck-icon.png";
 import {
   DndContext,
+  KeyboardSensor,
   closestCenter,
   pointerWithin,
   DragOverlay,
@@ -35,6 +36,7 @@ import {
   SortableContext,
   rectSortingStrategy,
   arrayMove,
+  sortableKeyboardCoordinates,
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -201,6 +203,19 @@ const globalStyles = `
   select option { background: #222222; }
 
   button { font-family: var(--font-sans); }
+
+  /* FEATURE: Page reordering / widget affordance — a tile that can be dragged
+     says so. Inline styles cannot express :hover, so the affordance lives here
+     and the tile carries the class. The base opacity lives here too: an inline
+     opacity: 0 would outrank these rules in the cascade and the grip could
+     never fade in. */
+  .tile-grip {
+    opacity: 0;
+    transition: opacity 140ms var(--ease-out);
+  }
+  .deck-tile-draggable:hover .tile-grip,
+  .deck-tile-draggable:focus-visible .tile-grip { opacity: 0.85; }
+  .deck-tile-draggable:hover { cursor: grab; }
 `;
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -467,6 +482,12 @@ export default function DesktopApp({
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    // FEATURE: Accessible move — useSortable already puts role/tabIndex/
+    // aria-roledescription="sortable" on every tile, but with only a pointer
+    // sensor those attributes were dead weight. Space/Enter grabs, arrows move.
+    // sortableKeyboardCoordinates keeps the movement grid-aware, so a 2-wide
+    // tile still steps like the pointer does.
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
   // Dragging an action must only land on something the pointer is actually
@@ -1461,6 +1482,17 @@ export default function DesktopApp({
     setActiveId(active.id);
   }, []);
 
+  const handleDragCancel = useCallback(() => {
+    // A cancelled drag never reaches handleDragEnd, and a stale activeId keeps
+    // the drop-target rings lit on every tile — the reason a drag looked broken
+    // rather than merely unfinished. activeId is the only app-level state a
+    // drag start writes (handleDragStart sets nothing else); the library rows'
+    // isDragging and the droppables' isOver are dnd-kit's own and reset on
+    // cancel, and slotOverride is only ever written by handleDragEnd. So this
+    // one clear leaves nothing stranded.
+    setActiveId(null);
+  }, []);
+
   const handleDragEnd = useCallback(
     ({ active, over }) => {
       setActiveId(null);
@@ -1657,6 +1689,7 @@ export default function DesktopApp({
           collisionDetection={collisionDetection}
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
+          onDragCancel={handleDragCancel}
         >
           <div style={styles.canvasCol}>
             <div style={styles.canvasHead}>
@@ -1764,6 +1797,7 @@ export default function DesktopApp({
                           sources={widgetSources}
                           selected={selectedWidgetId === item.id}
                           onSelect={selectWidget}
+                          droppingAction={!!activeAction}
                         />
                       );
                     })}
@@ -3898,6 +3932,7 @@ const DesktopSortableWidget = memo(function DesktopSortableWidget({
   data,
   sources,
   onSelect,
+  droppingAction,
   placeCol,
   placeRow,
   placeCols,
@@ -3910,24 +3945,49 @@ const DesktopSortableWidget = memo(function DesktopSortableWidget({
     transform,
     transition,
     isDragging,
+    isOver,
   } = useSortable({ id: `${WIDGET_TILE_PREFIX}${widget.id}` });
+
+  // Same rule as the button: the ring only flashes while a library row is
+  // overhead, not while tiles reorder among themselves.
+  const isDropTarget = isOver && droppingAction;
 
   return (
     <div
       ref={setNodeRef}
       {...attributes}
       {...listeners}
+      className="deck-tile-draggable"
       style={{
         // Engine placement first, then the drag transform on top; minWidth/
         // minHeight:0 let the tile shrink inside its (possibly clamped) cell.
+        position: "relative",
         gridColumn: `${placeCol + 1} / span ${placeCols}`,
         gridRow: `${placeRow + 1} / span ${placeRows}`,
         minWidth: 0,
         minHeight: 0,
         transform: CSS.Transform.toString(transform),
         zIndex: isDragging ? 999 : "auto",
-        opacity: isDragging ? 0.3 : 1,
-        transition,
+        // Hide the source rather than dim it: the DragOverlay already draws this
+        // tile (activeWidget) and a 0.3 ghost under the finger reads as a
+        // tile that refused to move.
+        opacity: isDragging ? 0 : 1,
+        borderRadius: 8,
+        // Longhands, not the `outline` shorthand — see DesktopSortableButton's
+        // note on pending-substitution values in inline shorthand.
+        outlineStyle: "solid",
+        outlineWidth: 2,
+        outlineColor:
+          isDropTarget || selected ? "var(--accent)" : "transparent",
+        outlineOffset: 2,
+        boxShadow: isDropTarget ? "0 0 0 6px rgba(59,130,246,0.20)" : "none",
+        transition: [
+          transition,
+          "outline-color 140ms var(--ease-out)",
+          "box-shadow 140ms var(--ease-out)",
+        ]
+          .filter(Boolean)
+          .join(", "),
       }}
       onClick={(e) => {
         // Same guard as the button: a click that ends a drag is not a select.
@@ -3937,6 +3997,24 @@ const DesktopSortableWidget = memo(function DesktopSortableWidget({
         }
       }}
     >
+      {/* The tile is its own drag handle, so the grip marks the whole surface as
+          grabbable instead of being a separate handle. */}
+      <span
+        aria-hidden="true"
+        className="tile-grip"
+        style={{
+          position: "absolute",
+          top: 4,
+          right: 5,
+          fontSize: 10,
+          lineHeight: 1,
+          color: "#6b6b78",
+          pointerEvents: "none",
+          zIndex: 2,
+        }}
+      >
+        <Icon name="drag" size={10} />
+      </span>
       <WidgetTile
         widget={widget}
         data={data}
