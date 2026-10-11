@@ -113,7 +113,7 @@ jobs:
     name: Build Android APK
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [test, viewport]
+    needs: test
     permissions:
       contents: write
 
@@ -188,7 +188,7 @@ jobs:
     name: Build Windows EXE
     runs-on: windows-latest
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [test, viewport]
+    needs: test
     permissions:
       contents: write
 
