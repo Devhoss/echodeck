@@ -1,0 +1,60 @@
+{
+  "state": {
+    "t": "state",
+    "pages": [
+      { "id": "page_main", "name": "Main", "show_labels": 1 },
+      { "id": "page_two", "name": "Second", "show_labels": 1 }
+    ],
+    "current_page": "page_main",
+    "buttons": [
+      { "id": 1, "page_id": "page_main", "name": "One", "slot": 0, "size": "1x1", "action_type": "key", "action_value": "One", "icon": "keyboard" },
+      { "id": 2, "page_id": "page_main", "name": "Two", "slot": 1, "size": "1x1", "action_type": "key", "action_value": "Two", "icon": "keyboard" },
+      { "id": 3, "page_id": "page_main", "name": "Three", "slot": 2, "size": "2x1", "action_type": "key", "action_value": "Three", "icon": "rocket" },
+      { "id": 4, "page_id": "page_main", "name": "Tall", "slot": 3, "size": "1x2", "action_type": "key", "action_value": "Four", "icon": "timer" }
+    ],
+    "widgets": [
+      {
+        "id": 101,
+        "page_id": "page_main",
+        "name": "Host monitor",
+        "slot": 4,
+        "size": "2x2",
+        "widget_type": "system_monitor",
+        "icon": "server",
+        "source_id": null,
+        "config": { "metrics": ["cpu", "memory", "uptime"] },
+        "data": {
+          "cpu": 12,
+          "memory": { "used": 3435973837, "total": 17179869184, "percent": 20 },
+          "uptime": 7200,
+          "status": "online"
+        }
+      }
+    ]
+  },
+  "stats": { "t": "stats", "cpu": 37, "ram_used": 8, "ram_total": 32, "time": "12:00" },
+  "ticks": [
+    {
+      "t": "widget_data",
+      "data": {
+        "101": {
+          "cpu": 47,
+          "memory": { "used": 5153960755, "total": 17179869184, "percent": 30 },
+          "uptime": 7260,
+          "status": "online"
+        }
+      }
+    },
+    {
+      "t": "widget_data",
+      "data": {
+        "101": {
+          "cpu": 77,
+          "memory": { "used": 12884901888, "total": 17179869184, "percent": 75 },
+          "uptime": 7320,
+          "status": "online"
+        }
+      }
+    }
+  ]
+}

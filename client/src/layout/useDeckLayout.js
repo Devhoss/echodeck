@@ -5,6 +5,11 @@
 // Dependencies: React hooks only.
 import { useLayoutEffect, useRef, useState } from "react";
 import { computeDeckLayout } from "./deckLayout.js";
+// Task 7.1 viewport harness: a flag-gated counter on the two measure paths
+// the spec asserts against ("a widget_data tick must not re-measure the
+// grid"). No-op unless ?mock=1 — production cost is one function call that
+// returns after a cached boolean check.
+import { countDeckMeasure } from "../mock/mockMode.js";
 
 export function useDeckLayout(containerRef, { items, settings }) {
   const [layout, setLayout] = useState(null);
@@ -58,6 +63,7 @@ export function useDeckLayout(containerRef, { items, settings }) {
       const key = `${width}|${height}|${itemsKey}|${settingsKey}`;
       if (key === lastKey) return; // inputs unchanged: no recompute, no setState
       lastKey = key;
+      countDeckMeasure("recompute");
       const live = liveRef.current;
       const next = computeDeckLayout({ width, height, items: live.items, settings: live.settings });
       // State keeps the same object when the layout VALUE is unchanged, so a
@@ -83,7 +89,12 @@ export function useDeckLayout(containerRef, { items, settings }) {
     // Belt and suspenders: ResizeObserver alone proved unreliable on phone
     // rotation — the viewport changes without the box reporting in time —
     // so the window events back it up. All three paths call the same schedule.
-    const ro = new ResizeObserver(schedule);
+    // (The RO callback is wrapped only to count it for the Task 7.1 harness;
+    // countDeckMeasure is a cached-boolean no-op without ?mock=1.)
+    const ro = new ResizeObserver(() => {
+      countDeckMeasure("ro");
+      schedule();
+    });
     ro.observe(element);
     window.addEventListener("resize", schedule);
     window.addEventListener("orientationchange", schedule);

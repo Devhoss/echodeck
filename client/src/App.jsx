@@ -71,6 +71,12 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { WidgetTile } from "./widgets/WidgetTile.jsx";
 import { SystemMonitorWidget } from "./widgets/SystemMonitorWidget.jsx";
+// Playwright viewport harness (Task 7.1) — `?mock=1` swaps the phone socket
+// for a pure in-memory stand-in fed the canned fixture frames. Flag-guarded at
+// every call site, so the production bundle behaves byte-identically without
+// the query param.
+import { isMockMode } from "./mock/mockMode.js";
+import { createMockSocket } from "./mock/mockSocket.js";
 import {
   HOLD_REPEAT_ACTIONS,
   levelTargetFor,
@@ -525,13 +531,19 @@ export default function App() {
 
   useEffect(() => {
     const wsUrl = getWsUrl();
-    if (!wsUrl) return;
+    // Task 7.1 harness: `?mock=1` runs the real production App against an
+    // in-memory socket, so the deck needs neither a pairing nor a host. With
+    // the flag absent this branch never runs and the effect is unchanged.
+    const useMock = isMockMode();
+    if (!wsUrl && !useMock) return;
 
     lastMessageAtRef.current = Date.now();
-    const ws = new ReconnectingWebSocket(getWsUrl(), [], {
-      maxRetryTime: 10000,
-      reconnectionDelayGrowFactor: 1.5,
-    });
+    const ws = useMock
+      ? createMockSocket()
+      : new ReconnectingWebSocket(getWsUrl(), [], {
+          maxRetryTime: 10000,
+          reconnectionDelayGrowFactor: 1.5,
+        });
 
     const onOpen = () => {
       console.log("WS open", getWsUrl());
@@ -1812,6 +1824,9 @@ export default function App() {
   const deckGrid = (
     <div
       ref={deckRef}
+      // Stable selector for the Task 7.1 viewport spec: the grid container
+      // the tile rects are compared against. data-* is inert styling-wise.
+      data-deck-grid
       onPointerDown={onDeckPointerDown}
       onPointerUp={onDeckPointerUp}
       onPointerCancel={onDeckPointerCancel}
@@ -1895,7 +1910,15 @@ export default function App() {
             );
 
           return (
-            <div key={item.key ?? item.id} style={placeStyle}>
+            <div
+              key={item.key ?? item.id}
+              // Task 7.1 spec hook: the placement wrapper is the identical
+              // element tree in normal AND edit mode (DndContext renders no
+              // DOM of its own), so locating tiles by host id works either
+              // way. data-* carries no styling/behavior.
+              data-deck-item={item.id}
+              style={placeStyle}
+            >
               {editMode ? (
                 <DraggableTile
                   id={sortableId}
