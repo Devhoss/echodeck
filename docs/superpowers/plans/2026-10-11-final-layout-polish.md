@@ -246,12 +246,12 @@ module.exports = { applyPageOrder, firstVisiblePage };
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd host && node --test test/pageOrder.test.js`
-Expected: PASS — 15 tests, 0 failures.
+Expected: PASS — 13 tests, 0 failures.
 
 - [ ] **Step 5: Run the full host suite**
 
 Run: `cd host && npm test`
-Expected: PASS (135 existing + 15 new).
+Expected: PASS (135 existing + 13 new).
 
 - [ ] **Step 6: Commit**
 
