@@ -16,6 +16,10 @@ import PairingScreen from "./PairingScreen.jsx";
 import { ButtonFace, Icon } from "./icons.jsx";
 import { useDeckLayout } from "./layout/useDeckLayout.js";
 import { mergeLayout } from "./layout/layoutSettings.js";
+// FEATURE: Layout settings (Task 6.1) — the container layers the form's
+// smallest diff over the target scope's own stored config before the HTTP
+// call, because the host routes REPLACE the whole stored layout_config.
+import { mergeScopeConfig } from "./layout/layoutForm.js";
 // FEATURE: Edit Layout (Phase 4, Tasks 4.3a + 4.3b) — the pure draft model. 4.3a
 // used createDraft/reorder/diffDraft; 4.3b adds the per-item mutations
 // (resize/moveToPage/detach) for the toolbar and its full Save commit.
@@ -430,6 +434,11 @@ export default function App() {
   // The source list is what a tile prints as its host line. The phone never
   // fetched it, so every remote tile was labelled "This PC" here.
   const [widgetSources, setWidgetSources] = useState([]);
+  // FEATURE: Layout settings (Task 6.1) — the deck-wide layout_config the
+  // engine layers under page overrides (page > global > defaults). Read once
+  // after pairing (see the effect below) and written optimistically on save;
+  // the host's `state` frame carries per-page configs but no global one.
+  const [globalLayout, setGlobalLayout] = useState(null);
 
   const [disconnectActive, setDisconnectActive] = useState(false);
   // FEATURE: Mobile customization (Task 5.2) — the control sheet's expanded
@@ -471,6 +480,17 @@ export default function App() {
     return getWsUrl(); // non-null if already paired
   });
 
+  // Which surface this run renders. Hoisted above the effects below because
+  // the phone-only global-layout fetch has to skip the desktop surface, where
+  // DesktopApp owns that state itself (and hooks must not read it after the
+  // early return that lives further down).
+  const params = new URLSearchParams(window.location.search);
+  const forceDesktop =
+    params.get("desktop") === "1" ||
+    import.meta.env.VITE_FORCE_DESKTOP === "true";
+
+  const desktopMode = isElectron() || forceDesktop;
+
   // Forget this host and fall back to the pairing screen. Used both when the
   // user disconnects deliberately and when the host rejects our credential.
   // Clearing pairedHost tears down the socket via the effect's cleanup, which
@@ -486,6 +506,7 @@ export default function App() {
     setStats(null);
     setVolume(null);
     setMuted(false);
+    setGlobalLayout(null);
   }, []);
 
   useEffect(() => {
@@ -732,6 +753,33 @@ export default function App() {
     };
   }, [widgets, pairedHost]);
 
+  // FEATURE: Layout settings (Task 6.1) — the deck-wide layout_config. The
+  // host's `state` frame carries per-page layout_config (toDeckPage) but NO
+  // global one — sendState has no settings field — so the phone reads it once
+  // from GET /api/settings when the pairing comes up, then keeps it current
+  // through its own optimistic save. No polling: the fetch failure just means
+  // the deck runs on defaults until the next pairing. The desktop surface is
+  // skipped: DesktopApp reads /settings in its own boot fetch and owns the
+  // state there.
+  useEffect(() => {
+    if (!paired || desktopMode) return;
+    let cancelled = false;
+    authFetch("/settings")
+      .then((r) => r.json())
+      .then((d) => {
+        if (cancelled) return;
+        setGlobalLayout(
+          d && typeof d.layout_config === "object" && d.layout_config
+            ? d.layout_config
+            : null,
+        );
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [paired, desktopMode]);
+
   // FEATURE: Key labels — a per-page preference, so read it off the page being
   // viewed rather than remembering a deck-wide value. Held as state it lagged a
   // page behind whenever a profile was switched from elsewhere (auto-switch
@@ -762,14 +810,25 @@ export default function App() {
     );
   }, [buttons, widgetsForPage]);
 
-  // Layout knobs: task 3.1 scope resolves the current page's layout_config over
-  // DEFAULT_SETTINGS only — the phone has no global settings read yet, and
-  // phase 6 wires the global scope in by replacing the null first argument.
+  // Layout knobs (Phase 6.1): the current page's layout_config resolves over
+  // the deck-wide globalLayout, which itself resolves over DEFAULT_SETTINGS —
+  // the full page > global > defaults cascade. mergeLayout sanitizes both
+  // scopes, so a null/absent global (fetch pending or failed) is "no opinion".
   const layoutSettings = useMemo(
     () =>
-      mergeLayout(null, pages.find((p) => p.id === currentPage)?.layout_config),
-    [pages, currentPage],
+      mergeLayout(
+        globalLayout,
+        pages.find((p) => p.id === currentPage)?.layout_config,
+      ),
+    [globalLayout, pages, currentPage],
   );
+
+  // The sheet's "Apply to this page" target. A hidden page is the Unfiled
+  // sentinel — not user-configurable — so it reports no name and the form
+  // keeps the toggle hidden (global-only editing).
+  const currentDeckPage = pages.find((p) => p.id === currentPage);
+  const sheetPageName =
+    currentDeckPage && !currentDeckPage.hidden ? currentDeckPage.name : null;
 
   // ── FEATURE: Edit Layout (Task 4.3a) ──────────────────────────────────────
   // Declared here — before the engine call below — because the measure hook has
@@ -979,6 +1038,52 @@ export default function App() {
     setEditToast(text);
     setTimeout(() => setEditToast((cur) => (cur === text ? null : cur)), 2500);
   }, []);
+
+  // FEATURE: Layout settings (Task 6.1) — the container for LayoutSettingsForm
+  // (ruling: the component owns no fetch/toast, this callback owns both). The
+  // form's partial carries only touched keys, with explicit nulls as clears;
+  // because the host routes REPLACE the whole stored scope config, the partial
+  // is layered over the scope's OWN stored value (never over the merged
+  // display, which would freeze defaults into the wrong scope). On success the
+  // client updates optimistically — the pages array from the PATCH response,
+  // globalLayout in place (the `state` frame carries no global field to echo
+  // it back) — and reuses the existing edit-toast channel on failure. Returns
+  // true/false so the sheet can close its panel only on success.
+  const handleLayoutSave = useCallback(
+    async (partial, scope) => {
+      if (!Object.keys(partial).length) return true;
+      try {
+        if (scope === "page" && currentPage) {
+          const stored = pages.find((p) => p.id === currentPage)
+            ?.layout_config;
+          const next = mergeScopeConfig(stored, partial);
+          const res = await authFetch(
+            `/pages/${encodeURIComponent(currentPage)}`,
+            { method: "PATCH", body: JSON.stringify({ layout_config: next }) },
+          );
+          if (!res.ok) throw new Error(`page layout (${res.status})`);
+          const updated = await res.json();
+          if (updated && updated.id)
+            setPages((prev) =>
+              prev.map((p) => (p.id === updated.id ? updated : p)),
+            );
+        } else {
+          const next = mergeScopeConfig(globalLayout, partial);
+          const res = await authFetch("/settings", {
+            method: "POST",
+            body: JSON.stringify({ key: "layout_config", value: next }),
+          });
+          if (!res.ok) throw new Error(`global layout (${res.status})`);
+          setGlobalLayout(next);
+        }
+        return true;
+      } catch {
+        showToast("Could not save layout settings");
+        return false;
+      }
+    },
+    [currentPage, pages, globalLayout, showToast],
+  );
 
   const handleTileTap = useCallback((key) => {
     // A finished drag also emits a `click` on the tile, and letting that through
@@ -1490,13 +1595,6 @@ export default function App() {
     return true;
   }, []);
 
-  const params = new URLSearchParams(window.location.search);
-  const forceDesktop =
-    params.get("desktop") === "1" ||
-    import.meta.env.VITE_FORCE_DESKTOP === "true";
-
-  const desktopMode = isElectron() || forceDesktop;
-
   if (desktopMode) {
     return (
       <DesktopApp
@@ -1705,6 +1803,9 @@ export default function App() {
         disconnectActive={disconnectActive}
         setDisconnectActive={setDisconnectActive}
         editModeApiRef={editModeApiRef}
+        layoutConfig={layoutSettings}
+        pageName={sheetPageName}
+        onLayoutSave={handleLayoutSave}
       />
 
       {/* FEATURE: Responsive layout — one grid, one map: every tile is placed

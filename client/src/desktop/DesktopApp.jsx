@@ -44,6 +44,11 @@ import { WidgetTile } from "../widgets/WidgetTile.jsx";
 import { TILE_SIZES } from "../layout/deckLayout.js";
 import { useDeckLayout } from "../layout/useDeckLayout.js";
 import { mergeLayout } from "../layout/layoutSettings.js";
+// FEATURE: Layout settings (Task 6.1) — shared form + the container-side
+// scope merge (the host routes REPLACE the whole stored layout_config, so the
+// form's smallest diff is layered over the scope's own stored config).
+import { mergeScopeConfig } from "../layout/layoutForm.js";
+import LayoutSettingsForm from "../layout/LayoutSettingsForm.jsx";
 import { SystemMonitorWidget } from "../widgets/SystemMonitorWidget.jsx";
 import WidgetPanel from "../widgets/WidgetPanel.jsx";
 import {
@@ -327,6 +332,16 @@ export default function DesktopApp({
   const [outputDevices, setOutputDevices] = useState([]);
   const [pcMonitorDevice, setPcMonitorDevice] = useState("");
   const [audioSettingsSaved, setAudioSettingsSaved] = useState(false);
+  // FEATURE: Layout settings (Task 6.1) — the deck-wide layout_config, read
+  // from the boot GET /api/settings below (the WS `state` frame carries
+  // per-page configs but no global one) and written optimistically on save;
+  // the modal opened from ProfileMenu's "Layout settings…" item; and the
+  // transient post-save flash — the same 2-second tick pattern as
+  // audioSettingsSaved's "Saved" button, as a floating chip because the
+  // modal it belongs to has already dismissed.
+  const [globalLayout, setGlobalLayout] = useState(null);
+  const [showLayoutSettings, setShowLayoutSettings] = useState(false);
+  const [layoutSettingsFlash, setLayoutSettingsFlash] = useState(null);
   const [showDevices, setShowDevices] = useState(false);
   // FEATURE: Auto-switch rules moved out of the sidebar — they are configured
   // occasionally, so they no longer hold permanent canvas space.
@@ -384,17 +399,24 @@ export default function DesktopApp({
     return merged.sort((a, b) => eff(a) - eff(b));
   }, [buttons, widgetsForPage, slotOverride]);
 
-  // Layout knobs: desktop resolves the current page's layout_config over
-  // DEFAULT_SETTINGS only (same 3.1 scope as the phone); Phase 6 widens the
-  // first argument to the global scope.
+  // Layout knobs (Phase 6.1): the page's layout_config resolves over the
+  // deck-wide globalLayout, which resolves over DEFAULT_SETTINGS — the full
+  // page > global > defaults cascade, same wiring as the phone (App.jsx).
   const layoutSettings = useMemo(
     () =>
       mergeLayout(
-        null,
+        globalLayout,
         pages.find((p) => p.id === currentPage)?.layout_config,
       ),
-    [pages, currentPage],
+    [globalLayout, pages, currentPage],
   );
+
+  // The modal's "Apply to this page" target. A hidden page is the Unfiled
+  // sentinel — not user-configurable — so it reports no name and the form
+  // keeps the toggle hidden (global-only editing).
+  const currentDeckPage = pages.find((p) => p.id === currentPage);
+  const layoutModalPageName =
+    currentDeckPage && !currentDeckPage.hidden ? currentDeckPage.name : null;
 
   // The engine contract {cols, cell, gap, placements, scrollY}, measured from
   // canvasRef pre-paint and re-measured on resize by useDeckLayout. placements
@@ -498,6 +520,14 @@ export default function DesktopApp({
         setAutoSwitch(d.auto_profile_switching !== false);
         setPcSoundDevice(d.pc_sound_device ?? "");
         setPcMonitorDevice(d.pc_monitor_device ?? "");
+        // FEATURE: Layout settings (Task 6.1) — the deck-wide layout default
+        // rides in the same payload; the host null-safe-parses it, but a
+        // pre-Phase-2 host could omit the key, so guard rather than trust.
+        setGlobalLayout(
+          d.layout_config && typeof d.layout_config === "object"
+            ? d.layout_config
+            : null,
+        );
       })
       .catch(() => {});
 
@@ -1092,6 +1122,63 @@ export default function DesktopApp({
     setTimeout(() => setAudioSettingsSaved(false), 2000);
   }
 
+  // FEATURE: Layout settings (Task 6.1) — the desktop container for
+  // LayoutSettingsForm (ruling: the component owns no fetch/toast). Same
+  // contract as the phone's handleLayoutSave (App.jsx): the form's partial
+  // carries only touched keys with explicit nulls as clears; because the
+  // host routes REPLACE the whole stored scope config, the partial is layered
+  // over the scope's OWN stored value, never over the merged display. On
+  // success: optimistic state, modal dismiss, and the app's existing 2-second
+  // "Saved" tick pattern (audioSettingsSaved) re-used as a floating chip.
+  const flashLayout = useCallback((text) => {
+    setLayoutSettingsFlash(text);
+    setTimeout(
+      () => setLayoutSettingsFlash((cur) => (cur === text ? null : cur)),
+      2000,
+    );
+  }, []);
+
+  const handleLayoutSave = useCallback(
+    async (partial, scope) => {
+      const headers = { "Content-Type": "application/json" };
+      try {
+        if (Object.keys(partial).length) {
+          if (scope === "page" && currentPage) {
+            const stored = pages.find((p) => p.id === currentPage)
+              ?.layout_config;
+            const next = mergeScopeConfig(stored, partial);
+            const res = await fetch(
+              `${api()}/pages/${encodeURIComponent(currentPage)}`,
+              { method: "PATCH", headers, body: JSON.stringify({ layout_config: next }) },
+            );
+            if (!res.ok) throw new Error(`page layout (${res.status})`);
+            const updated = await res.json();
+            if (updated && updated.id)
+              setPages((prev) =>
+                prev.map((p) => (p.id === updated.id ? updated : p)),
+              );
+          } else {
+            const next = mergeScopeConfig(globalLayout, partial);
+            const res = await fetch(`${api()}/settings`, {
+              method: "POST",
+              headers,
+              body: JSON.stringify({ key: "layout_config", value: next }),
+            });
+            if (!res.ok) throw new Error(`global layout (${res.status})`);
+            setGlobalLayout(next);
+          }
+        }
+        setShowLayoutSettings(false);
+        flashLayout("Layout settings saved");
+      } catch {
+        // Keep the modal open so a failed save keeps its edits; the tick
+        // channel reports in red.
+        flashLayout("Couldn't save layout settings");
+      }
+    },
+    [currentPage, pages, globalLayout, setPages, flashLayout],
+  );
+
   async function disconnectDevice(clientId) {
     await fetch(`${api()}/clients/${clientId}`, { method: "DELETE" });
     setConnectedDevices((prev) => prev.filter((d) => d.id !== clientId));
@@ -1419,6 +1506,7 @@ export default function DesktopApp({
                 onAddPage={addPage}
                 onDeletePage={deletePage}
                 onOpenRules={() => setShowRules(true)}
+                onOpenLayoutSettings={() => setShowLayoutSettings(true)}
                 showLabels={showLabels}
                 onToggleLabels={() => {
                   // Per page, not deck-wide: the flag lives on the profile
@@ -2147,6 +2235,118 @@ export default function DesktopApp({
         </div>
       )}
 
+      {/* ── Layout Settings Modal (Task 6.1) ── */}
+      {/* Same shell as the Audio Settings modal above — same backdrop, card,
+          header strip and close button — carrying the shared
+          LayoutSettingsForm. The body gets an overflow guard the audio modal
+          never needed (the form is taller than the audio pickers). */}
+      {showLayoutSettings && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.7)",
+            backdropFilter: "blur(4px)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+          }}
+          onClick={() => setShowLayoutSettings(false)}
+        >
+          <div
+            style={{
+              background: "#1a1a1a",
+              border: "1px solid #313131",
+              borderRadius: 18,
+              width: 440,
+              maxWidth: "90vw",
+              boxShadow: "0 24px 80px rgba(0,0,0,0.7)",
+              overflow: "hidden",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "16px 20px",
+                borderBottom: "1px solid #252525",
+                background: "#121212",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <Icon name="drag" size={17} />
+                <span
+                  style={{ fontWeight: 700, fontSize: 14, color: "#e6e6e6" }}
+                >
+                  Layout Settings
+                </span>
+              </div>
+              <button
+                onClick={() => setShowLayoutSettings(false)}
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "#4f4f4f",
+                  cursor: "pointer",
+                  fontSize: 16,
+                  padding: "2px 6px",
+                }}
+              >
+                <Icon name="close" size={14} />
+              </button>
+            </div>
+            <div
+              style={{
+                padding: "4px 20px 24px",
+                maxHeight: "70vh",
+                overflowY: "auto",
+              }}
+            >
+              <LayoutSettingsForm
+                initialConfig={layoutSettings}
+                pageName={layoutModalPageName}
+                onSave={handleLayoutSave}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* The 2-second save tick, audioSettingsSaved's pattern relocated: the
+          modal it belongs to has already dismissed, so it floats as a status
+          chip over the canvas. */}
+      {layoutSettingsFlash && (
+        <div
+          role="status"
+          style={{
+            position: "fixed",
+            top: 16,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 1100,
+            padding: "8px 16px",
+            borderRadius: 10,
+            background: layoutSettingsFlash.startsWith("Couldn")
+              ? "#2e0d0d"
+              : "#0d2e1a",
+            border: `1px solid ${
+              layoutSettingsFlash.startsWith("Couldn") ? "#5c1a1a" : "#1a5c32"
+            }`,
+            color: layoutSettingsFlash.startsWith("Couldn")
+              ? "#f87171"
+              : "#34d399",
+            fontSize: 12,
+            fontWeight: 700,
+            pointerEvents: "none",
+          }}
+        >
+          {layoutSettingsFlash}
+        </div>
+      )}
+
       {showRules && currentPage && (
         <RuleEditorModal
           key={`${currentPage}-${ruleEditorKey}`}
@@ -2786,6 +2986,7 @@ function ProfileMenu({
   onAddPage,
   onDeletePage,
   onOpenRules,
+  onOpenLayoutSettings,
   showLabels,
   onToggleLabels,
   addingPage,
@@ -2961,6 +3162,30 @@ function ProfileMenu({
             <Icon name="settings" size={14} />
             Auto-switch rules…
           </button>
+
+          {/* FEATURE: Layout settings (Task 6.1) — opens the layout modal.
+              A div menuitem exactly like the profile rows above, so Enter/
+              Space activation is explicit and cannot double-fire the way a
+              native button with a keydown handler would. */}
+          <div
+            role="menuitem"
+            tabIndex={0}
+            style={styles.menuAction}
+            onClick={() => {
+              onOpenLayoutSettings();
+              setOpen(false);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onOpenLayoutSettings();
+                setOpen(false);
+              }
+            }}
+          >
+            <Icon name="settings" size={14} />
+            Layout settings…
+          </div>
         </div>
       )}
     </div>
