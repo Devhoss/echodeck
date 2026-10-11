@@ -60,10 +60,12 @@ Internal scoring values (`fill`, `score`) exist only on private candidate
 records and never leave the function (`deckLayout.js:57-67`).
 
 Rendering is deterministic (plan decision D5): tiles are placed from the
-contract, not CSS auto-flow — `gridColumn: col+1 / span span.cols`,
-`gridRow: row+1 / span span.rows` (`App.jsx:1722-1723`,
-`DesktopApp.jsx:4054-4055,4122-4123`), and `scrollY` toggles the scroller
-(`overflowY: auto`, `touchAction: pan-y` when true; `App.jsx:1695,1706`).
+contract, not CSS auto-flow — the phone tile map's `placeStyle` inline
+`gridColumn: col+1 / span span.cols` / `gridRow: row+1 / span span.rows`
+(applied as `style={placeStyle}` in `App.jsx`; the desktop equivalents at
+`DesktopApp.jsx:4054-4055,4122-4123`), and `scrollY` toggles the `deckGrid`
+scroller's inline styles in `App.jsx` (`overflowY: "auto"` and
+`touchAction: "pan-y"` when true).
 
 An empty page still gets sane sizing: one virtual 1x1 drives the score and its
 placement is dropped, so `placements.length === 0` (`deckLayout.js:45-47,75`).
@@ -149,8 +151,9 @@ only when every candidate was rejected for `cell < minCell`. Because
 ran out, never the width. In that case the engine packs at `cap` (columns are
 chosen from width alone), sets
 `cell = floor(clamp(cellW, minCell, maxCell))` and `scrollY: true`; the renderer
-then makes the deck vertically scrollable instead of clipping
-(`App.jsx:1695,1706`). In custom mode the scroll fallback still packs at `cap`,
+then makes the deck vertically scrollable instead of clipping (the `deckGrid`
+scroller's inline `overflowY`/`touchAction` in `App.jsx`). In custom mode the
+scroll fallback still packs at `cap`,
 so a too-wide custom preference is overridden by the width-only cap when
 height fails (`deckLayout.js:69-71`).
 
@@ -245,7 +248,8 @@ are `getPages()`'s `SELECT * FROM pages ORDER BY position, rowid`
   (`server.js:395-403`) can still write it per page — but a single-page write
   is non-atomic: it cannot express a full visible permutation nor re-pin the
   hidden tail, so it can break the hidden-last invariant. No client uses it
-  for ordering; the ws frame above is the only ordering path. The create-page
+  for ordering; the ws frame above is the only path the clients use to
+  reorder. The create-page
   route keeps its own contribution consistent by re-densifying through the
   sanctioned writer right after inserting (`server.js:379-386`).
 - **What reordering never rewrites.** The writer touches only `position`:
@@ -268,8 +272,9 @@ The same phone/desktop asymmetry as tile drag (section 6):
   single `reorder_pages` frame is the last step of the full draft diff, after
   every `reorder_items` batch, so a Unfiled page materialized mid-Save is
   already hidden and pinned by the host before the deck order lands
-  (`App.jsx:1376-1387`). **Done discards**: the draft is dropped
-  (`handleDone`, `App.jsx:1411-1412`) and nothing was ever sent.
+  (`App.jsx`, `handleSave`'s step (e) — the `reorder_pages` send).
+  **Done discards**: the draft is dropped (`handleDone` in `App.jsx`) and
+  nothing was ever sent.
 - **Desktop: immediate.** The desktop canvas has no draft, so a page-rail drop
   re-sorts optimistically and an immediate debounced (300 ms) `reorder_pages`
   is the write (`DesktopApp.jsx:1566-1591`) — exactly the model tile drags
@@ -277,8 +282,10 @@ The same phone/desktop asymmetry as tile drag (section 6):
   model re-appends the hidden pages behind the visible block
   (`DesktopApp.jsx:1577-1580`), mirroring the host's pinning so the local
   order equals the permutation about to be stored. A rejection self-converges:
-  the rail repaints from the next host `state` echo, so desktop needs no
-  Save-gate retry machinery.
+  the rail repaints from the next host `state` echo — a batch is only ever
+  rejected when the visible page set changed, and that change is itself a host
+  broadcast, so the echo always comes — and desktop needs no Save-gate retry
+  machinery.
 
 ### 7.3 Desktop page-rail drag conventions
 
@@ -296,7 +303,8 @@ The same phone/desktop asymmetry as tile drag (section 6):
   draws ghosts for button, action and widget actives only
   (`DesktopApp.jsx:1892-1948`) — no ghost exists for a `page:` active — so a
   dragged page pill dims to 0.3 and keeps its slot rather than vanishing
-  (`DesktopApp.jsx:3522-3528`), like the button tile (`:4034`). The
+  (`PageRailPill`'s `opacity: isDragging ? 0.3 : 1` line in `DesktopApp.jsx`),
+  like the button tile (`:4034`). The
   widget tile is the one that hides to 0 (`DesktopApp.jsx:4121-4131`) — and
   only because the overlay draws its ghost at the tile's real footprint, sized
   with the same `spanFor`-derived cell/gap the grid uses
@@ -340,8 +348,10 @@ The owner's division of the two surfaces, now settled:
   combined row with the connection pill, Disconnect and Edit Layout
   (`ControlSheet.jsx:248-352`). It carries no volume or mic controls.
 - **Detailed layout settings and presets are desktop-only.**
-  `LayoutSettingsForm` renders only in the desktop's Layout Settings modal
-  (`DesktopApp.jsx:2536,2601`) with its Presets section live (`:2601-2609`).
+  `LayoutSettingsForm` renders only in the desktop's Layout Settings modal —
+  the `showLayoutSettings`-guarded block in `DesktopApp.jsx`, at the
+  component's single render site — with its Presets section live (the form
+  receives `presets`/`onSavePreset`/`onApplyPreset`/`onDeletePreset` there).
   The phone still *renders* a desktop-configured layout — its read-only global
   fetch is `App.jsx:795-821` and the section 10 merge is shared — but it
   writes no layout config and exposes no preset affordance.
@@ -383,10 +393,10 @@ Mechanics:
   /api/pages/:id {layout_config}` for each page entry. Scopes the preset does
   not mention are left alone; apply fires **no** `reorder_items`, no
   `/api/items/move`, and no size PATCHes — placements are untouchable through
-  presets (`DesktopApp.jsx:1291`, `handlePresetApply`; the per-scope jobs it
-  builds are the global POST at `:1315-1329` and the page PATCHes at
-  `:1330-1346`). Saving and applying presets live only on the desktop —
-  section 8.
+  presets (`handlePresetApply` in `DesktopApp.jsx`; the per-scope jobs it
+  builds are the entries it pushes onto its local `jobs` array — the
+  `label: "global"` POST and the `label: "page"` PATCHes). Saving and applying
+  presets live only on the desktop — section 8.
 
 ## 10. Settings merge precedence
 
@@ -560,15 +570,17 @@ An honest map of what the suites guard — and what no suite can.
   viewports (`test/viewports.js`) × 11 tests (`test/viewport/deck.spec.ts`),
   154 runs, against a mock socket. Tests 1-3 guard no horizontal overflow and
   tiles landing on the engine's measured grid; the shared edit-mode entry
-  helper opens the sheet and asserts `scrollHeight - clientHeight <= 1`, so a
-  sheet row that ever outgrows the 220-px landscape cap fails (`:132-141`).
-  Tests 7-11 are the mobile page-reorder suite: Unfiled stays out of
-  navigation and a committed move emits exactly one `reorder_pages` — after
-  the item reorders, Save step (e) last (`:472`); Done restores the original
-  order and writes nothing (`:584`); a pending move survives a mid-draft host
-  fold and re-seed (`:644`); a host-rejected order stays saveable and
-  re-commits on a second Save, proving the host-measured batch rule (`:756`);
-  a page created mid-draft becomes a live reorderable row (`:826`).
+  helper `enterEditMode` opens the sheet and asserts
+  `scrollHeight - clientHeight <= 1`, so a sheet row that ever outgrows the
+  220-px landscape cap fails. Tests 7-11 are the mobile page-reorder suite,
+  cited by test number and name: test 7 "pages: the Unfiled page stays out of
+  navigation, and a move emits reorder_pages" — a committed move emits exactly
+  one `reorder_pages`, after the item reorders, as `handleSave`'s step (e);
+  test 8 "pages: Done (Discard) restores the original page order and never
+  writes it"; test 9 "pages: a pending page move survives a mid-draft fold and
+  a host re-seed"; test 10 "pages: a rejected order stays saveable and
+  re-commits on a second Save", proving the host-measured batch rule; test 11
+  "pages: a page created mid-draft becomes a live, reorderable row".
 
 **Not automated — human passes only.**
 
