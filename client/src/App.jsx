@@ -1478,12 +1478,16 @@ export default function App() {
   // gesture already claimed (see pullClaimedRef) is consumed here WITHOUT
   // toggling — otherwise the touch that opened the sheet by pulling would
   // close it again on release, since pointerup/click fire after the claim.
+  // Fix round 1 (Minor #2): the return value is the pull-claim signal the
+  // handle consults at click time — false = consumed by the pull (never arm
+  // the double-tap window), true = a genuine toggle.
   const toggleSheetFromHandle = useCallback(() => {
     if (pullClaimedRef.current) {
       pullClaimedRef.current = false;
-      return;
+      return false;
     }
     setSheetOpen((open) => !open);
+    return true;
   }, []);
 
   const params = new URLSearchParams(window.location.search);

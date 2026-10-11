@@ -246,8 +246,23 @@ export default function ControlSheet({
   // below is permanent and engine-independent belt-and-braces — the dismiss
   // listener unmounts the moment `open` flips false, so a guard tied to `open`
   // could never survive to catch the click that follows the pointerup.
+  //
+  // Fix round 1 (Important #1): the arm is SELF-INVALIDATING. On engines that
+  // honor the spec the dismissing click never arrives, so the slot would stay
+  // armed — and because mouse pointerId is constant (1), the user's NEXT mouse
+  // click within 1s would match and be silently swallowed. Any fresh capture
+  // pointerdown therefore clears the slot FIRST: a new pointer sequence proves
+  // the old trailing click will never arrive. The dismissing sequence itself
+  // is unaffected: its click fires before any new pointerdown, and the
+  // permanent clear runs before the (open-only) arm site, never after it.
   const swallowRef = useRef(null);
   useEffect(() => {
+    const onDocPointerDownClear = () => {
+      // Must be registered (and thus run) BEFORE the open-gated arm listener
+      // below, so an outside-tap dismiss still clears any stale slot and then
+      // arms fresh in the same event.
+      swallowRef.current = null;
+    };
     const onDocClick = (e) => {
       const s = swallowRef.current;
       if (!s) return;
@@ -257,8 +272,12 @@ export default function ControlSheet({
         e.preventDefault();
       }
     };
+    document.addEventListener("pointerdown", onDocPointerDownClear, true);
     document.addEventListener("click", onDocClick, true);
-    return () => document.removeEventListener("click", onDocClick, true);
+    return () => {
+      document.removeEventListener("pointerdown", onDocPointerDownClear, true);
+      document.removeEventListener("click", onDocClick, true);
+    };
   }, []);
 
   // Up-swipe-to-close tracking (the sheet is push-down, so the deck keeps its

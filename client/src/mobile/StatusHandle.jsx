@@ -31,6 +31,7 @@
 import { useRef, useState } from "react";
 import deck from "/deck-icon.png";
 import { ActionIcon, Icon } from "../icons.jsx";
+import { armDoubleTapOn } from "./handleTap.js";
 
 // Two taps within this window count as one deliberate double tap.
 const DOUBLE_TAP_MS = 350;
@@ -51,11 +52,23 @@ export default function StatusHandle({
   const handleClick = () => {
     const now = Date.now();
     const isDouble = now - lastTapAtRef.current < DOUBLE_TAP_MS;
-    // Arm the window only on a tap that just OPENED the sheet (sheetOpen is
-    // the pre-toggle state). A close-then-reopen pair is therefore never
-    // mistaken for a double tap, and a stale window cannot survive a close.
-    lastTapAtRef.current = sheetOpen ? 0 : now;
-    onToggle();
+    // App's toggleSheetFromHandle returns false exactly when the pull-claim
+    // consumed this click (the sheet was opened by a pull, and React has not
+    // re-rendered `sheetOpen` here yet — it is still the stale false). Such a
+    // click is not a tap and must never arm the window (fix round 1, Minor #2;
+    // see handleTap.js). Anything else (undefined from a bare callback) is
+    // treated as a genuine toggle.
+    const consumedByPull = onToggle() === false;
+    // Arm only on a tap that just OPENED the sheet (sheetOpen is the
+    // pre-toggle state). A close-then-reopen pair is therefore never
+    // mistaken for a double tap, a stale window cannot survive a close,
+    // and a pull-consumed click never arms.
+    lastTapAtRef.current = armDoubleTapOn({
+      clickConsumedByPull: consumedByPull,
+      sheetOpenAtClick: sheetOpen,
+    })
+      ? now
+      : 0;
     if (isDouble) onEnterEditMode?.();
   };
 
