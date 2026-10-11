@@ -9,8 +9,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  GAP_MIN,
   PRESET_CHOICES,
   buildPartial,
+  computeSaveEnabled,
   detectPreset,
   initialValues,
   mergeScopeConfig,
@@ -167,4 +169,70 @@ test("mergeScopeConfig result survives mergeLayout unchanged at its scope", () =
   assert.equal(after.cols, 5);
   assert.equal(after.gap, 12);
   assert.equal(after.preset, DEFAULT_SETTINGS.preset); // untouched keys still fall through
+});
+
+// --- gap floor -------------------------------------------------------------
+
+test("GAP_MIN is 1: gap=0 is not offered (both sanitizers reject it)", () => {
+  // host/src/layoutConfig.js and the client mirror layoutSettings.js both
+  // require gap > 0, and no engine PRESET uses 0. A 0 floor would let the
+  // optimistic save render a gapless deck then snap back on next pairing.
+  assert.equal(GAP_MIN, 1);
+});
+
+test("the gap floor builds a partial that survives the client sanitizer", () => {
+  // Take the minimum the slider can emit and prove it is accepted (not dropped)
+  // by the real mergeLayout sanitizer — the round-trip the optimistic path uses.
+  const partial = buildPartial(setValue({}, "gap", GAP_MIN));
+  assert.deepEqual(partial, { gap: 1 });
+  assert.equal(mergeLayout(null, partial).gap, 1);
+});
+
+// --- save gate (empty diff / inverted bounds) ------------------------------
+
+test("computeSaveEnabled: empty diff disables Save (no false-success flash)", () => {
+  assert.equal(computeSaveEnabled({ diffKeys: [], minCell: 48, maxCell: 132 }), false);
+});
+
+test("computeSaveEnabled: a real diff with valid bounds enables Save", () => {
+  assert.equal(
+    computeSaveEnabled({ diffKeys: ["gap"], minCell: 48, maxCell: 132 }),
+    true,
+  );
+});
+
+test("computeSaveEnabled: inverted bounds (minCell > maxCell) disable Save", () => {
+  assert.equal(
+    computeSaveEnabled({ diffKeys: ["minCell"], minCell: 100, maxCell: 50 }),
+    false,
+  );
+});
+
+test("computeSaveEnabled: a diff that is only the UI-only custom marker is empty", () => {
+  // buildPartial filters preset:"custom", so the diffKeys the form passes in is
+  // [] — a bare Custom reveal must not enable Save.
+  const revealed = pickPreset({}, "custom");
+  assert.deepEqual(buildPartial(revealed), {});
+  assert.equal(
+    computeSaveEnabled({
+      diffKeys: Object.keys(buildPartial(revealed)),
+      minCell: 48,
+      maxCell: 132,
+    }),
+    false,
+  );
+});
+
+test("computeSaveEnabled: a named-pick clear diff has valid bounds", () => {
+  // Named preset emits minCell:null/maxCell:null clears; the display values
+  // fall back to the preset bounds (never inverted), so Save is enabled.
+  const changes = pickPreset({}, "large");
+  assert.equal(
+    computeSaveEnabled({
+      diffKeys: Object.keys(buildPartial(changes)),
+      minCell: PRESETS.balanced.minCell,
+      maxCell: PRESETS.balanced.maxCell,
+    }),
+    true,
+  );
 });

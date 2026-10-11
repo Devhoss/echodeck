@@ -20,6 +20,7 @@ import {
   MIN_CELL_MIN,
   PRESET_CHOICES,
   buildPartial,
+  computeSaveEnabled,
   initialValues,
   pickPreset,
   setValue,
@@ -172,6 +173,19 @@ export default function LayoutSettingsForm({ initialConfig, pageName, onSave }) 
     gap: changes.gap ?? base.gap,
   };
 
+  // Save gate (see layoutForm.computeSaveEnabled): disabled while the diff is
+  // empty (a no-op Save would flash false success) or while the cell bounds are
+  // inverted (minCell > maxCell resolves a sub-minimum, broken grid). Track
+  // touches, not net changes — undoing a value back to its original still
+  // counts as a touch and keeps Save enabled (an already-tested invariant).
+  const partial = buildPartial(changes);
+  const boundsInverted = view.minCell > view.maxCell;
+  const canSave = computeSaveEnabled({
+    diffKeys: Object.keys(partial),
+    minCell: view.minCell,
+    maxCell: view.maxCell,
+  });
+
   const pickSegment = (key, value) =>
     setChanges((prev) =>
       key === "preset" ? pickPreset(prev, value) : setValue(prev, key, value),
@@ -262,6 +276,9 @@ export default function LayoutSettingsForm({ initialConfig, pageName, onSave }) 
             value={view.gap}
             onChange={(v) => pickSlider("gap", v)}
           />
+          {boundsInverted ? (
+            <span style={styles.hint}>maxCell must be at least minCell.</span>
+          ) : null}
         </div>
       ) : null}
 
@@ -284,7 +301,12 @@ export default function LayoutSettingsForm({ initialConfig, pageName, onSave }) 
         </div>
       ) : null}
 
-      <button type="button" style={styles.save} onClick={save} disabled={busy}>
+      <button
+        type="button"
+        style={styles.save}
+        onClick={save}
+        disabled={busy || !canSave}
+      >
         {busy ? "Saving…" : "Save"}
       </button>
     </div>

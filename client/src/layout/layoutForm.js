@@ -22,7 +22,12 @@ export const MIN_CELL_MIN = 20;
 export const MIN_CELL_MAX = 120;
 export const MAX_CELL_MIN = 40;
 export const MAX_CELL_MAX = 200;
-export const GAP_MIN = 0;
+// Floor is 1, NOT 0: both sanitizers (host/src/layoutConfig.js and the client
+// mirror in layoutSettings.js) require gap > 0, and no engine PRESET uses 0.
+// A GAP_MIN of 0 would let the optimistic setGlobalLayout({gap:0}) render a
+// gapless deck for a moment, only for the sanitizer to reject it and snap back
+// on the next pairing — a lie to the user. gap=0 as a real wish is Phase 8.
+export const GAP_MIN = 1;
 export const GAP_MAX = 20;
 
 // Which preset segment is lit: any non-null slider override reads as "custom"
@@ -96,6 +101,22 @@ export function buildPartial(changes) {
     out[key] = value;
   }
   return out;
+}
+
+// Save-button gate, kept pure so the UI decision is unit-tested without a DOM:
+// the Save is offered only when (a) the diff actually carries something to
+// send and (b) the min/max cell bounds are not inverted. Empty diff would fire
+// a no-op save that flashes a false "saved"; inverted bounds (minCell >
+// maxCell, reachable because the two sliders have independent ranges) would
+// resolve a sub-minimum grid — bounded but visually broken. The engine and
+// sanitizers stay as-is; this stops the inversion at the UI boundary.
+// `diffKeys` is the emitted partial's key list (length > 0 means "has diff");
+// minCell/maxCell are the current display values.
+export function computeSaveEnabled({ diffKeys, minCell, maxCell }) {
+  const hasDiff =
+    Array.isArray(diffKeys) ? diffKeys.length > 0 : Boolean(diffKeys);
+  if (!hasDiff) return false;
+  return !(minCell > maxCell);
 }
 
 // The host's routes REPLACE the whole stored layout_config for a scope
