@@ -43,7 +43,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { ActionIcon, ButtonFace, Icon } from "../icons.jsx";
 import { WIDGET_TYPES, widgetTypeById } from "../widgets/registry.js";
 import { WidgetTile } from "../widgets/WidgetTile.jsx";
-import { TILE_SIZES } from "../layout/deckLayout.js";
+import { spanFor, TILE_SIZES } from "../layout/deckLayout.js";
 import { visibleDeckPages } from "../layout/deckPages.js";
 import { useDeckLayout } from "../layout/useDeckLayout.js";
 import { mergeLayout } from "../layout/layoutSettings.js";
@@ -215,7 +215,16 @@ const globalStyles = `
   }
   .deck-tile-draggable:hover .tile-grip,
   .deck-tile-draggable:focus-visible .tile-grip { opacity: 0.85; }
-  .deck-tile-draggable:hover { cursor: grab; }
+  /* FEATURE: Widget affordance — \`cursor\` inherits, so the tile's own inline
+     cursor (WidgetTile.jsx:70 sets \`default\` without an onSelect) outranks any
+     rule on the wrapper and \`grab\` would never paint. Targeting the direct child
+     with !important is the only override that works against an inline
+     declaration; it is scoped to the hovered desktop tile, and deliberately NOT
+     \`*\`, so a widget's own interactive descendants keep their cursors. */
+  .deck-tile-draggable:hover,
+  .deck-tile-draggable:hover > * {
+    cursor: grab !important;
+  }
 `;
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -1616,6 +1625,13 @@ export default function DesktopApp({
           String(it.id) === activeIdStr.slice(WIDGET_TILE_PREFIX.length),
       ) || null
     : null;
+  // FEATURE: Widget affordance — the dragged tile's footprint for the drag
+  // ghost, resolved with the engine's own size parser (spanFor; packGrid runs
+  // it over the deck items to produce the placements whose span becomes the
+  // tile's gridColumn/gridRow, so the ghost matches the tile without a second
+  // parser). activeWidget is the deckItems record, which carries the widget's
+  // `size` straight from the host row.
+  const activeWidgetSpan = activeWidget ? spanFor(activeWidget.size) : null;
   const currentRule = profileRules.find((r) => r.page_id === currentPage);
   const phoneDevices = useMemo(
     () =>
@@ -1824,10 +1840,22 @@ export default function DesktopApp({
                   ghost
                 />
               ) : activeWidget ? (
+                // FEATURE: Widget affordance — the source tile hides itself while
+                // this overlay carries it (opacity: 0 at the sortable wrapper), so
+                // the ghost has to be drawn at the tile's real footprint or a 2×2
+                // widget visibly disappears into a 1×1 square mid-drag. The cell
+                // and gap come from the same `layout` contract that sizes and
+                // gaps the grid's tracks (see the grid container's own
+                // layout.cell / layout.gap use above), so N spanned cells measure
+                // N*cell + (N-1)*gap here exactly as they do on the deck.
                 <div
                   style={{
-                    width: layout?.cell ?? 72,
-                    height: layout?.cell ?? 72,
+                    width:
+                      activeWidgetSpan.cols * (layout?.cell ?? 72) +
+                      (activeWidgetSpan.cols - 1) * (layout?.gap ?? 12),
+                    height:
+                      activeWidgetSpan.rows * (layout?.cell ?? 72) +
+                      (activeWidgetSpan.rows - 1) * (layout?.gap ?? 12),
                     opacity: 0.9,
                   }}
                 >
