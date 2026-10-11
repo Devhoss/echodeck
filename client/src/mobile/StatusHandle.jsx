@@ -17,20 +17,47 @@
 // strip means "I intend to pull or open") and stays shown, rotated, while the
 // sheet is open as the tap-to-close affordance. No hover state — mobile-only
 // surface.
-import { useState } from "react";
+//
+// Universal Edit-Layout door (Task 5.3, carries the 4.3a ruling): a DOUBLE tap
+// on the strip enters edit mode directly — no ✏️ chip was added. Why: the
+// whole strip is a single <button>, so a nested chip button would be invalid
+// HTML and a sibling chip would take a reserved hit zone that steals strip
+// real estate even while reveal-on-intent keeps it invisible at rest. The
+// double tap costs zero layout, keeps the single-tap toggle instant (the
+// second tap's toggle merely closes what the first opened, and App's
+// enterEditMode closes the sheet as well), and works with keyboard too
+// (Enter/Space twice). The visible, single-tap door stays the sheet's own
+// "Edit Layout" button.
+import { useRef, useState } from "react";
 import deck from "/deck-icon.png";
 import { ActionIcon, Icon } from "../icons.jsx";
+
+// Two taps within this window count as one deliberate double tap.
+const DOUBLE_TAP_MS = 350;
 
 export default function StatusHandle({
   isConnected,
   micActive,
   sheetOpen,
   onToggle,
+  onEnterEditMode,
 }) {
   // "A downward gesture is active" is approximated the simplest correct way:
   // while the handle itself is being touched. See the reveal rule above.
   const [pulling, setPulling] = useState(false);
+  const lastTapAtRef = useRef(0);
   const chevronVisible = sheetOpen || pulling;
+
+  const handleClick = () => {
+    const now = Date.now();
+    const isDouble = now - lastTapAtRef.current < DOUBLE_TAP_MS;
+    // Arm the window only on a tap that just OPENED the sheet (sheetOpen is
+    // the pre-toggle state). A close-then-reopen pair is therefore never
+    // mistaken for a double tap, and a stale window cannot survive a close.
+    lastTapAtRef.current = sheetOpen ? 0 : now;
+    onToggle();
+    if (isDouble) onEnterEditMode?.();
+  };
 
   return (
     <div
@@ -64,7 +91,7 @@ export default function StatusHandle({
         aria-expanded={sheetOpen}
         aria-controls="deck-control-sheet"
         aria-label={sheetOpen ? "Close host controls" : "Open host controls"}
-        onClick={onToggle}
+        onClick={handleClick}
         onPointerDown={() => setPulling(true)}
         onPointerUp={() => setPulling(false)}
         onPointerCancel={() => setPulling(false)}

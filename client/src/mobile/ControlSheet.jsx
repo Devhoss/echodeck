@@ -240,6 +240,27 @@ export default function ControlSheet({
   editModeApiRef,
 }) {
   const sheetRef = useRef(null);
+  // A closed-by-outside-tap pointer sequence gets swallowed for its pointerdown
+  // AND its trailing click (Task 5.3, Rule 6): canceling pointerdown suppresses
+  // the browser's compatibility click on Chromium/WebKit, but the click guard
+  // below is permanent and engine-independent belt-and-braces — the dismiss
+  // listener unmounts the moment `open` flips false, so a guard tied to `open`
+  // could never survive to catch the click that follows the pointerup.
+  const swallowRef = useRef(null);
+  useEffect(() => {
+    const onDocClick = (e) => {
+      const s = swallowRef.current;
+      if (!s) return;
+      swallowRef.current = null;
+      if (e.pointerId === s.pointerId && Date.now() - s.at < 1000) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+    };
+    document.addEventListener("click", onDocClick, true);
+    return () => document.removeEventListener("click", onDocClick, true);
+  }, []);
+
   // Up-swipe-to-close tracking (the sheet is push-down, so the deck keeps its
   // own swipe handlers — this one lives only on the sheet box).
   const [swipeStartY, setSwipeStartY] = useState(null);
@@ -248,12 +269,21 @@ export default function ControlSheet({
     if (!open) return;
     sheetRef.current?.focus({ preventScroll: true });
     // Outside tap closes. The handle is excluded — its own onClick toggles,
-    // and closing here too would immediately reopen.
+    // and closing here too would immediately reopen. Modal overlays
+    // ([data-outside-tap-exempt]) are excluded too: they sit ABOVE the sheet,
+    // own their dismissal, and must not get one-swallowed.
     const onDocPointerDown = (e) => {
       const el = e.target instanceof Element ? e.target : null;
       if (!el) return;
       if (sheetRef.current?.contains(el)) return;
       if (el.closest("[data-status-handle]")) return;
+      if (el.closest("[data-outside-tap-exempt]")) return;
+      // Gesture arbitration (Task 5.3): swallow the dismissing sequence in the
+      // capture phase so nothing below the sheet — deck swipe, tile press,
+      // hold-to-confirm — ever sees it.
+      e.stopPropagation();
+      e.preventDefault();
+      swallowRef.current = { pointerId: e.pointerId, at: Date.now() };
       onClose();
     };
     document.addEventListener("pointerdown", onDocPointerDown, true);

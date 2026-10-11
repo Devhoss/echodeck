@@ -33,6 +33,13 @@ import DeckEditorBar from "./mobile/DeckEditorBar.jsx";
 // sheet it opens holds everything the header used to pin on screen.
 import StatusHandle from "./mobile/StatusHandle.jsx";
 import ControlSheet from "./mobile/ControlSheet.jsx";
+// FEATURE: Mobile customization (Task 5.3) — pure geometry of the pull-down
+// gesture (origin strip test + vertical-dominance test), unit-tested in
+// client/test/pullDownGesture.test.js.
+import {
+  isPullDownGesture,
+  originInPullZone,
+} from "./mobile/pullDownGesture.js";
 // FEATURE: Edit Layout — the same dnd-kit surface the desktop editor already
 // uses (see desktop/DesktopApp.jsx). Only the reorder plumbing is wired here.
 import {
@@ -432,6 +439,28 @@ export default function App() {
   const [sheetOpen, setSheetOpen] = useState(false);
   const deckRef = useRef(null);
   const swipeRef = useRef(null);
+  // FEATURE: Mobile customization (Task 5.3) — pull-down gesture state.
+  // `rootRef` is the mobile outer flex column; the gesture listens in its
+  // CAPTURE phase so a downward pull starting on the top strip is claimed
+  // before the handle's or a tile's own pointer handlers run.
+  // `pullPendingRef` holds the candidate sequence's origin (null = none);
+  // `safeTopPxRef` caches the computed env(safe-area-inset-top) padding once —
+  // getComputedStyle forces layout, so it must not run per pointermove.
+  // `sheetOpenRef` mirrors sheetOpen for the move handler's "already open
+  // claims nothing" rule without re-installing the listeners on every toggle.
+  const rootRef = useRef(null);
+  const pullPendingRef = useRef(null);
+  // Set when a pull-down CLAIMS the sequence; consumed by the handle's toggle
+  // so the click that trails the pull's pointerup does not immediately close
+  // the sheet the pull just opened (pointerup precedes click by spec, so the
+  // flag survives until either the trailing click consumes it or the next
+  // pointerdown clears it as stale).
+  const pullClaimedRef = useRef(false);
+  const safeTopPxRef = useRef(null);
+  const sheetOpenRef = useRef(false);
+  useEffect(() => {
+    sheetOpenRef.current = sheetOpen;
+  }, [sheetOpen]);
 
   const wsRef = useRef(null);
   const lastMessageAtRef = useRef(0);
@@ -1363,6 +1392,100 @@ export default function App() {
     [editMode, pages, currentPage, switchPage],
   );
 
+  // FEATURE: Mobile customization (Task 5.3, issue #9) — the outer-column
+  // pull-down gesture that opens the ControlSheet, arbitrated against every
+  // other pointer consumer on the screen:
+  //  - The listeners sit on the ROOT column in the CAPTURE phase, so a pull
+  //    that starts on the top strip is claimed before the handle's or a tile's
+  //    own pointerdown runs. pointerdown only RECORDS the origin — never
+  //    preventDefault/stopPropagation — so the handle tap path still fires and
+  //    toggles the sheet (Rule 1), and tile presses are untouched (Rule 4/5:
+  //    tiles never sit in the strip, so their sequences fail the origin test).
+  //  - pointermove claims the sequence once, only when the origin test passed
+  //    AND the travel is a deliberate vertical pull (Rule 2). If the sheet is
+  //    already open nothing is claimed — closing is the sheet's own affordance
+  //    (handle tap, up-swipe inside it, Escape, outside tap).
+  //  - In edit mode the gesture is not installed at all: a strip pointerdown
+  //    may be the start of a tile drag, and opening the sheet mid-drag would
+  //    jolt the reflowing layout — the same suppression the deck-level page
+  //    swipe above already uses.
+  useEffect(() => {
+    const root = rootRef.current;
+    // `paired` is a dep because the root column only mounts on the mobile
+    // route after pairing; under ?desktop=1/Electron the ref stays null and
+    // nothing is installed — the desktop surface keeps ProfileMenu untouched.
+    if (!root || editMode) return;
+    if (safeTopPxRef.current === null) {
+      const pt = getComputedStyle(root).getPropertyValue("padding-top");
+      safeTopPxRef.current = Number.parseFloat(pt) || 0;
+    }
+    const safeTopPx = safeTopPxRef.current;
+
+    const onPointerDown = (e) => {
+      // A fresh sequence always clears any unconsumed claim marker from the
+      // last one — a pull whose trailing click never reached the handle.
+      pullClaimedRef.current = false;
+      const el = e.target instanceof Element ? e.target : null;
+      const onHandle = !!el?.closest("[data-status-handle]");
+      if (!originInPullZone(e.clientY, safeTopPx, onHandle)) return;
+      pullPendingRef.current = { startX: e.clientX, startY: e.clientY };
+    };
+
+    const onPointerMove = (e) => {
+      const origin = pullPendingRef.current;
+      if (!origin || sheetOpenRef.current) return;
+      if (
+        isPullDownGesture(origin.startX, origin.startY, e.clientX, e.clientY)
+      ) {
+        // Complementary by construction to the deck's page-swipe test at App.jsx:1385 — that one rejects when |dx| < |dy| * 1.5, so a strictly vertical pull can never trigger a page change and vice versa.
+        pullPendingRef.current = null; // claim once; further moves must not re-fire
+        pullClaimedRef.current = true; // the trailing click must not re-toggle
+        setSheetOpen(true);
+      }
+    };
+
+    const clearPending = () => {
+      pullPendingRef.current = null;
+    };
+
+    root.addEventListener("pointerdown", onPointerDown, true);
+    root.addEventListener("pointermove", onPointerMove, true);
+    root.addEventListener("pointerup", clearPending);
+    root.addEventListener("pointercancel", clearPending);
+    return () => {
+      pullPendingRef.current = null;
+      pullClaimedRef.current = false;
+      root.removeEventListener("pointerdown", onPointerDown, true);
+      root.removeEventListener("pointermove", onPointerMove, true);
+      root.removeEventListener("pointerup", clearPending);
+      root.removeEventListener("pointercancel", clearPending);
+    };
+  }, [editMode, paired]);
+
+  // FEATURE: Mobile customization (Task 5.3) — the universal Edit Layout door
+  // on the handle: a DOUBLE tap enters edit mode directly (a single tap keeps
+  // toggling the sheet; the sheet's own "Edit Layout" button remains the
+  // visible, keyboard-reachable door). This path only ever ENTERS edit mode —
+  // it must never toggle out of an in-progress layout edit — and it closes the
+  // sheet the first tap opened so the editor is not born underneath it.
+  const enterEditModeFromHandle = useCallback(() => {
+    setSheetOpen(false);
+    if (editMode) return;
+    editModeApiRef.current?.toggleEditMode();
+  }, [editMode]);
+
+  // The handle's tap path. A click whose pointer sequence the pull-down
+  // gesture already claimed (see pullClaimedRef) is consumed here WITHOUT
+  // toggling — otherwise the touch that opened the sheet by pulling would
+  // close it again on release, since pointerup/click fire after the claim.
+  const toggleSheetFromHandle = useCallback(() => {
+    if (pullClaimedRef.current) {
+      pullClaimedRef.current = false;
+      return;
+    }
+    setSheetOpen((open) => !open);
+  }, []);
+
   const params = new URLSearchParams(window.location.search);
   const forceDesktop =
     params.get("desktop") === "1" ||
@@ -1521,6 +1644,7 @@ export default function App() {
 
   return (
     <div
+      ref={rootRef}
       style={{
         // `position: relative` anchors the edit-mode Save toast (the transient
         // `position: absolute` status element below), which is the only thing
@@ -1554,7 +1678,8 @@ export default function App() {
         isConnected={isConnected}
         micActive={micMuted === false && micVolume !== null && micVolume !== undefined}
         sheetOpen={sheetOpen}
-        onToggle={() => setSheetOpen((open) => !open)}
+        onToggle={toggleSheetFromHandle}
+        onEnterEditMode={enterEditModeFromHandle}
       />
 
       <ControlSheet
@@ -1764,6 +1889,9 @@ export default function App() {
 
       {showDisconnectConfirm && (
         <div
+          // Task 5.3: the sheet's outside-tap swallow exempts modal overlays —
+          // this one sits above everything (z-index 9999) and owns its dismissal.
+          data-outside-tap-exempt
           style={{
             position: "fixed",
             inset: 0,
