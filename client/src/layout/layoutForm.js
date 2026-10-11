@@ -4,7 +4,8 @@
 // save would freeze DEFAULT_SETTINGS values into the page scope and defeat the
 // page > global > defaults cascade. All of that bookkeeping lives here, so the
 // component carries no logic and the invariant is unit-testable without a DOM
-// (same extracted-helpers precedent as mobile/volumeTap.js).
+// (the project's standing extracted-helpers rule: keep pure logic in .js
+// modules beside the component, exactly like deckLayout.js and layoutDraft.js).
 // Phase 6, Task 6.2: the preset snapshot rules. A preset is a named snapshot
 // of the layout KNOBS only (plan D4: "Presets save layout settings and
 // responsive behavior. They do NOT save tile placements.") — the global

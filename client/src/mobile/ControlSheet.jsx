@@ -2,10 +2,10 @@
 // Everything the old 44-px header used to pin permanently on screen now lives
 // here, revealed on demand by StatusHandle: the CPU/RAM/time StatPills (moved
 // here from App.jsx, not duplicated), the connection pill and the
-// Disconnect button (relocated verbatim), plus the Edit Layout entry and the
-// layout-settings form panel (Task 6.1) the Settings button toggles.
+// Disconnect button (relocated verbatim), plus the Edit Layout entry.
 // Volume and mic live as deck buttons only — the sheet's level rows were
-// dropped in the final layout polish (phone = dashboard, desktop = config).
+// dropped in the final layout polish (phone = dashboard, desktop = config),
+// and detailed layout settings moved to the desktop modal for the same split.
 //
 // It is a PUSH-DOWN sheet, never an overlay: it sits in the same outer flex
 // column as the handle, directly above the deck, so opening it shrinks the
@@ -20,10 +20,6 @@
 import { useEffect, useRef, useState } from "react";
 import disconnect from "/disconnect.svg";
 import { Icon } from "../icons.jsx";
-// FEATURE: Layout settings (Task 6.1) — the Settings entry is a real door now:
-// it toggles an inline LayoutSettingsForm panel. The form is a pure controlled
-// component; the fetch + toast live in App.jsx (props onLayoutSave etc.).
-import LayoutSettingsForm from "../layout/LayoutSettingsForm.jsx";
 
 // FEATURE: System stats — pill component (moved here from App.jsx together
 // with its only remaining consumer; the header that used it is now the handle).
@@ -60,28 +56,8 @@ export default function ControlSheet({
   disconnectActive,
   setDisconnectActive,
   editModeApiRef,
-  layoutConfig,
-  pageName,
-  onLayoutSave,
-  // FEATURE: Layout presets (Task 6.2) — the Presets section lives inside
-  // the shared LayoutSettingsForm; the sheet only ferries the container's
-  // state/callbacks down and announces the panel opening (fetch-on-open —
-  // App caches the rows, so this must NOT fire per keystroke).
-  onSettingsOpen,
-  presets,
-  onPresetSave,
-  onPresetApply,
-  onPresetDelete,
-  layoutPageId,
-  layoutPageStored,
 }) {
   const sheetRef = useRef(null);
-  // FEATURE: Layout settings (Task 6.1) — the Settings toggle. While open the
-  // form sits in a sub-panel of its own below the rows; the sheet's push-down
-  // cap stays min(55%, 220px), so the panel — NOT the sheet — takes the
-  // scroll when the form outgrows what's left (documented exception to 5.2's
-  // no-scroll rule, see the report).
-  const [settingsOpen, setSettingsOpen] = useState(false);
   // A closed-by-outside-tap pointer sequence gets swallowed for its pointerdown
   // AND its trailing click (Task 5.3, Rule 6): canceling pointerdown suppresses
   // the browser's compatibility click on Chromium/WebKit, but the click guard
@@ -154,15 +130,9 @@ export default function ControlSheet({
 
   // Escape closes; Tab is trapped so the sheet behaves like a dialog while it
   // is expanded (and `inert` below removes it from the tab order when closed).
-  // Escape unwinds in steps: the layout-settings panel first, then the sheet —
-  // closing the sheet out from under an open form would feel like a jump.
   const onKeyDown = (e) => {
     if (e.key === "Escape") {
       e.preventDefault();
-      if (settingsOpen) {
-        setSettingsOpen(false);
-        return;
-      }
       onClose();
       return;
     }
@@ -187,17 +157,6 @@ export default function ControlSheet({
   };
 
   const onPointerDown = (e) => {
-    // Form inputs are vertical-travel thieves: never start a swipe from one
-    // (kept from the sheet-slider era as the swipe-thief guard). The
-    // layout-form panel is the same thief for its own scroll: vertical
-    // travel inside it scrolls the panel, it must not dismiss the sheet.
-    if (
-      e.target instanceof Element &&
-      (e.target.closest("input") || e.target.closest("[data-layout-form]"))
-    ) {
-      setSwipeStartY(null);
-      return;
-    }
     setSwipeStartY(e.clientY);
   };
 
@@ -251,10 +210,6 @@ export default function ControlSheet({
           "max-height 0.18s ease, opacity 0.18s ease, transform 0.18s ease",
         background: "linear-gradient(180deg, #18181c 0%, #141417 100%)",
         borderBottom: open ? "1px solid #2a2a2e" : "1px solid transparent",
-        // Task 6.1: a two-region column — fixed rows on top, and the settings
-        // panel takes what is left of the cap and scrolls ONLY inside itself
-        // (the cap above never grows, so the deck's box is unchanged by the
-        // form's content height).
         display: "flex",
         flexDirection: "column",
       }}
@@ -381,10 +336,12 @@ export default function ControlSheet({
               />
             </button>
 
-            {/* Edit Layout (Phase 4 entry point) and the Phase-6 placeholder. */}
+            {/* Edit Layout (Phase 4 entry point) — the sheet's only action
+                button: detailed layout settings live in the desktop's Layout
+                Settings modal now (phone = dashboard, desktop = config). */}
             <button
               type="button"
-              style={{ ...actionButtonStyle, marginLeft: "auto" }}
+              style={actionButtonStyle}
               onClick={() => {
                 editModeApiRef.current?.toggleEditMode();
                 onClose();
@@ -393,69 +350,9 @@ export default function ControlSheet({
               <Icon name="drag" size={12} />
               Edit Layout
             </button>
-
-            {/* Layout settings (Phase 6.1): was an aria-disabled placeholder
-                anchor; now a real door that toggles the form sub-panel below
-                the rows. */}
-            <button
-              type="button"
-              aria-expanded={settingsOpen}
-              style={{
-                ...actionButtonStyle,
-                background: settingsOpen ? "#2a2a35" : "#1a1a22",
-                color: settingsOpen ? "#e0e0ec" : "#c0c0cc",
-              }}
-              onClick={() => {
-                // Fetch-on-open (Task 6.2): announce the transition into the
-                // panel. Read the CURRENT settingsOpen from the closure and fire
-                // the side effect OUTSIDE the setSettingsOpen updater — a
-                // side-effect inside the updater is double-invoked under
-                // StrictMode, which fired the initial listPresets GET twice.
-                const next = !settingsOpen;
-                setSettingsOpen(next);
-                if (next) onSettingsOpen?.();
-              }}
-            >
-              <Icon name="settings" size={12} />
-              Settings
-            </button>
           </div>
         </div>
       </div>
-
-      {settingsOpen ? (
-        // The scroll exception (task brief ruling 3): the sheet's push-down
-        // cap min(55%, 220px) is untouched — the rows above keep their fixed
-        // height and this panel takes the remainder with `flex: 1` +
-        // `min-height: 0`, scrolling inside itself when the form outgrows it
-        // (≈70-90 px of visible form on a 220-px cap, then scroll).
-        <div
-          data-layout-form
-          style={{
-            flex: 1,
-            minHeight: 0,
-            overflowY: "auto",
-            WebkitOverflowScrolling: "touch",
-            padding: "0 max(env(safe-area-inset-left), 16px) 10px max(env(safe-area-inset-right), 16px)",
-            borderTop: "1px solid #22222a",
-          }}
-        >
-          <LayoutSettingsForm
-            initialConfig={layoutConfig}
-            pageName={pageName}
-            onSave={async (partial, scope) => {
-              const ok = await onLayoutSave(partial, scope);
-              if (ok) setSettingsOpen(false);
-            }}
-            presets={presets}
-            onSavePreset={onPresetSave}
-            onApplyPreset={onPresetApply}
-            onDeletePreset={onPresetDelete}
-            pageId={layoutPageId}
-            pageStoredConfig={layoutPageStored}
-          />
-        </div>
-      ) : null}
 
       <style>{`
         .deck-sheet-grid {
