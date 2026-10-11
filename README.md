@@ -366,7 +366,7 @@ echodeck/
 └── README.md
 ```
 
-The responsive deck grid is computed by a pure layout engine — see [`docs/layout-model.md`](docs/layout-model.md) for its contract, the slot/position ordering model, settings merge precedence, and worked examples.
+The responsive deck grid is computed by a pure layout engine — see [`docs/layout-model.md`](docs/layout-model.md) for its contract, the slot/position ordering model, the page-order model and the phone/desktop surface split, settings merge precedence, and worked examples.
 
 ---
 
@@ -503,7 +503,8 @@ If you want to build the APK locally without pushing a tag:
 - Active window detection & running app picker
 - Delayed app capture (3-second countdown)
 - Full Electron desktop UI (Elgato-style layout)
-- Drag-to-reorder buttons
+- Drag-to-reorder buttons and widgets
+- Reorder pages (desktop rail drag; mobile Edit Layout → Pages)
 - Per-profile key labels
 - Configurable live widgets (System Monitor: this PC or any SSH host)
 - Button toggle states

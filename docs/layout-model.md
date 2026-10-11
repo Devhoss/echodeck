@@ -3,9 +3,9 @@
 The responsive deck grid is produced by a pure engine and consumed verbatim by
 both renderers (phone and desktop). This document is the contract reference:
 what the engine takes and returns, how it scores a grid, when it clamps or
-scrolls, and how ordering (`slot`) and settings (`layout_config`, presets) are
-derived and merged. It is a reference, not a tutorial — every claim cites the
-code that implements it.
+scrolls, and how ordering (`slot` for tiles, `position` for pages) and settings
+(`layout_config`, presets) are derived and merged. It is a reference, not a
+tutorial — every claim cites the code that implements it.
 
 Primary files:
 
@@ -15,9 +15,11 @@ Primary files:
 | Measurement hook | `client/src/layout/useDeckLayout.js` |
 | Client settings merge | `client/src/layout/layoutSettings.js` |
 | Edit-mode draft (mobile) | `client/src/layout/layoutDraft.js` |
+| Visible-page + order-batch helpers | `client/src/layout/deckPages.js` |
 | Preset form/snapshot rules | `client/src/layout/layoutForm.js` |
 | Preset REST layer | `client/src/layout/presetsClient.js` |
 | Host slot/position derivation | `host/src/itemOrder.js` |
+| Host page-order validation | `host/src/pageOrder.js` |
 | Host storage + migrations | `host/src/db.js` |
 | Host validation | `host/src/layoutConfig.js` |
 | Host API + WS | `host/src/server.js` |
@@ -59,9 +61,9 @@ records and never leave the function (`deckLayout.js:57-67`).
 
 Rendering is deterministic (plan decision D5): tiles are placed from the
 contract, not CSS auto-flow — `gridColumn: col+1 / span span.cols`,
-`gridRow: row+1 / span span.rows` (`App.jsx:1867-1868`,
-`DesktopApp.jsx:3860-3861`), and `scrollY` toggles the scroller
-(`overflowY: auto`, `touchAction: pan-y` when true; `App.jsx:1840,1851`).
+`gridRow: row+1 / span span.rows` (`App.jsx:1722-1723`,
+`DesktopApp.jsx:4054-4055,4122-4123`), and `scrollY` toggles the scroller
+(`overflowY: auto`, `touchAction: pan-y` when true; `App.jsx:1695,1706`).
 
 An empty page still gets sane sizing: one virtual 1x1 drives the score and its
 placement is dropped, so `placements.length === 0` (`deckLayout.js:45-47,75`).
@@ -103,7 +105,7 @@ Each column reserves **2 × minCell** of width, so auto mode never resolves
 the single candidate is `clamp(settings.cols, 1, cap)`
 (`deckLayout.js:54-55`): a preferred column count is a **ceiling, never a
 floor** — `custom cols: 6` at 320 px resolves 3, at 1600 px resolves exactly 6
-(verified output in section 9).
+(verified output in section 11).
 
 For each candidate (`deckLayout.js:58-66`):
 
@@ -138,7 +140,7 @@ column — via raised `minCell` (the clamp case below: `minCell: 160` makes
 default settings 320 px resolves 2-3 readable columns, so even a lone `2x2`
 fits unclamped (`client/test/deckLayout.test.js:115-127`). Real clamped
 output: a lone `2x2` at `minCell: 160` is emitted as
-`span: { cols: 1, rows: 2, clamped: true }` and still placed (section 9).
+`span: { cols: 1, rows: 2, clamped: true }` and still placed (section 11).
 
 **Vertical scroll (height).** The fallback at `deckLayout.js:68-73` triggers
 only when every candidate was rejected for `cell < minCell`. Because
@@ -148,7 +150,7 @@ ran out, never the width. In that case the engine packs at `cap` (columns are
 chosen from width alone), sets
 `cell = floor(clamp(cellW, minCell, maxCell))` and `scrollY: true`; the renderer
 then makes the deck vertically scrollable instead of clipping
-(`App.jsx:1840,1851`). In custom mode the scroll fallback still packs at `cap`,
+(`App.jsx:1695,1706`). In custom mode the scroll fallback still packs at `cap`,
 so a too-wide custom preference is overridden by the width-only cap when
 height fails (`deckLayout.js:69-71`).
 
@@ -185,39 +187,177 @@ dense rank **within each kind**, rewritten whenever slots change. Old clients
   slots must be a permutation of `0..n-1` (`itemOrder.js:84-129`). On success
   `slot` = submitted slot and `position` = the item's dense rank within its
   kind, both written in one transaction (`itemOrder.js:117-128`,
-  `db.js:791-806`) — no client can desync them.
+  `db.js:791-810`) — no client can desync them.
 - **Sanctioned writers.** WS `reorder_items` `{page_id, items:[{kind,id,slot}]}`
-  (`server.js:1173-1189`); legacy WS `reorder_buttons`, folded into a full-page
+  (`server.js:1184-1203`); legacy WS `reorder_buttons`, folded into a full-page
   slot batch that preserves widget slots and lays the new button order back
-  into the button-occupied slots (`server.js:534-587,1162-1170`); and
+  into the button-occupied slots (`server.js:545-598,1173-1182`); and
   `POST /api/items/move` for cross-page moves, which re-parents the row then
-  applies both pages' reorders in one transaction (`server.js:589-630`,
-  `itemOrder.js:131-175`, `db.js:808-834`). `slot` is in no PATCH whitelist —
+  applies both pages' reorders in one transaction (`server.js:606-641`,
+  `itemOrder.js:131-175`, `db.js:838-864`). `slot` is in no PATCH whitelist —
   these writers derive it.
 - **Append rule.** Newly created rows are stamped `slot = page's button count +
   widget count` (one SELECT), so they append at the tail of the merged order
-  instead of interleaving mid-deck through the fallback (`db.js:767-785`,
-  used by `createButton` `db.js:683` and `createWidget` `db.js:910`).
+  instead of interleaving mid-deck through the fallback (`db.js:771-789`,
+  used by `createButton` `db.js:687` and `createWidget` `db.js:940`).
 - **Read rule.** Page rows load `ORDER BY COALESCE(slot, position), rowid` —
   rows that predate slot adoption or were created outside the writers fall
-  back to their legacy `position` (`db.js:619-628,752-764,866-873`).
+  back to their legacy `position` (`db.js:626-633,756-769,896-903`).
 - **Client merge.** Each surface builds one display list by stable-sorting
   `[...buttons, ...widgetsForPage]` on `(slot ?? position)`; ES stable sort
   breaks ties with merge order, so equal keys keep buttons ahead of widgets —
-  the exact legacy rendering (`App.jsx:824-837`; desktop adds an optimistic
-  slot overlay, `DesktopApp.jsx:395-413`). The mobile edit draft re-reads the
+  the exact legacy rendering (`App.jsx:843-851`; desktop adds an optimistic
+  slot overlay, `DesktopApp.jsx:436-448`). The mobile edit draft re-reads the
   same key and densifies each page to contiguous `0..n-1` slots, which is what
-  `applyReorder` accepts back (`layoutDraft.js:30-35,111-143`); `diffDraft`
-  emits full dense batches per affected page (`layoutDraft.js:218-273`).
+  `applyReorder` accepts back (`layoutDraft.js:35-41,137-168`); `diffDraft`
+  emits full dense batches per affected page (`layoutDraft.js:285-352`).
 
-## 7. D4: presets persist layout settings, not tile placements
+## 7. Page order (final polish)
+
+Pages have always been ordered by `pages.position` — `INTEGER DEFAULT 0` in the
+original `CREATE TABLE pages` (`db.js:32-39`). Adopting page reordering needed
+no schema migration; it added a UI and a wire verb over the existing key. Reads
+are `getPages()`'s `SELECT * FROM pages ORDER BY position, rowid`
+(`db.js:424-429`): the `rowid` tie-break keeps two rows that share a position
+(possible only after a partial historical write) in stable relative order.
+
+### 7.1 The wire: `reorder_pages {page_ids}`
+
+- **The sanctioned writer.** WS `reorder_pages` `{v:1, t:"reorder_pages",
+  page_ids:[...]}` (`server.js:1205-1218`) goes through `db.applyPageReorder`
+  (`db.js:822-836`) — one guarded transaction whose only UPDATE is
+  `pages.position`. This is the sanctioned writer of page order.
+- **Visible-only contract, hidden pinned behind.** `page_ids` must be the
+  complete permutation of the VISIBLE pages — hidden pages (the lazy "Unfiled"
+  bucket) are not reorder targets, and naming one rejects the batch
+  (`pageOrder.js:54-59`). The position map then pins every hidden page strictly
+  after the last visible one, preserving their relative order
+  (`pageOrder.js:69-76`). That is what keeps `pages[0]` navigable no matter
+  what a client submits — and why a newly paired phone never lands on Unfiled.
+- **All-or-nothing, and rejection is silence.** Any missing, unknown,
+  duplicated, or hidden-naming id rejects the whole batch with nothing written
+  (`pageOrder.js:32-78`, shared normaliser `pageOrder.js:94-98`). The host
+  logs a warning and returns — no ack frame, no broadcast
+  (`server.js:1213-1216`). A rejected batch is therefore invisible on the
+  socket, which is precisely why the phone's two heal rules exist (7.4).
+- **PATCH is an escape hatch, not the ordering path.** `position` remains in
+  the `PAGE_FIELDS` whitelist (`db.js:451-457`), so `PATCH /api/pages/:id`
+  (`server.js:395-403`) can still write it per page — but a single-page write
+  is non-atomic: it cannot express a full visible permutation nor re-pin the
+  hidden tail, so it can break the hidden-last invariant. No client uses it
+  for ordering; the ws frame above is the only ordering path. The create-page
+  route keeps its own contribution consistent by re-densifying through the
+  sanctioned writer right after inserting (`server.js:379-386`).
+- **What reordering never rewrites.** The writer touches only `position`:
+  page `id`, `name`, `show_labels`, `hidden` and `layout_config` are untouched
+  (`db.js:812-821`), and item `page_id`/`slot` are untouched by definition —
+  the item writers of section 6 stay the only ones. Profile rules are
+  unaffected: rules bind by `page_id` and rank by `priority`
+  (`ruleEngine.js:22`), independent of page order.
+
+### 7.2 Two commit models
+
+The same phone/desktop asymmetry as tile drag (section 6):
+
+- **Mobile: draft-scoped.** While in Edit Layout the order lives in
+  `draft.pageOrder`, built at draft entry from `visibleDeckPages(pages)` and
+  changed only by `shiftPage` (the toolbar's Earlier/Later rows,
+  `layoutDraft.js:218`, `DeckEditorBar.jsx:169`). The pager repaints
+  immediately from the draft via `pagesInOrder` (`deckPages.js:12-24`, wired
+  as `pagerPages` at `App.jsx:876-880`) — no host write. **Save commits**: the
+  single `reorder_pages` frame is the last step of the full draft diff, after
+  every `reorder_items` batch, so a Unfiled page materialized mid-Save is
+  already hidden and pinned by the host before the deck order lands
+  (`App.jsx:1376-1387`). **Done discards**: the draft is dropped
+  (`handleDone`, `App.jsx:1411-1412`) and nothing was ever sent.
+- **Desktop: immediate.** The desktop canvas has no draft, so a page-rail drop
+  re-sorts optimistically and an immediate debounced (300 ms) `reorder_pages`
+  is the write (`DesktopApp.jsx:1566-1591`) — exactly the model tile drags
+  already use with `reorder_items` (`DesktopApp.jsx:1594-1625`). The optimistic
+  model re-appends the hidden pages behind the visible block
+  (`DesktopApp.jsx:1577-1580`), mirroring the host's pinning so the local
+  order equals the permutation about to be stored. A rejection self-converges:
+  the rail repaints from the next host `state` echo, so desktop needs no
+  Save-gate retry machinery.
+
+### 7.3 Desktop page-rail drag conventions
+
+- **One `DndContext`, prefixed ids.** The rail pills are sortable under the
+  deck's single `DndContext` (`DesktopApp.jsx:1765-1771`; the rail renders at
+  `:1950` inside it), so their sortable ids carry a `page:` prefix —
+  `pageSortableId(id) = "page:" + id` (`DesktopApp.jsx:138-142`). The prefix
+  namespaces pills away from tile ids (raw uuids and `widgettile:`) and
+  library ids (`action:`/`app:`/`widget:`); a tile drop can never match a
+  `page:<uuid>` key, so the tile-reorder router misses on it
+  (`DesktopApp.jsx:1601-1604`), and no branch can put a `page:` id into
+  `items` or `page_ids`.
+- **Dim vs hide — the rule.** A dragged sortable stays visible by dimming
+  (`opacity: 0.3`) unless the `DragOverlay` carries a ghost of it. The overlay
+  draws ghosts for button, action and widget actives only
+  (`DesktopApp.jsx:1892-1948`) — no ghost exists for a `page:` active — so a
+  dragged page pill dims to 0.3 and keeps its slot rather than vanishing
+  (`DesktopApp.jsx:3522-3528`), like the button tile (`:4034`). The
+  widget tile is the one that hides to 0 (`DesktopApp.jsx:4121-4131`) — and
+  only because the overlay draws its ghost at the tile's real footprint, sized
+  with the same `spanFor`-derived cell/gap the grid uses
+  (`DesktopApp.jsx:1904-1922`). This convention was re-derived twice during
+  review; it is written once here so the next reader does not re-derive it.
+- **Keyboard.** The rail shares the deck's sensors — `PointerSensor` (6 px
+  activation) and `KeyboardSensor` with `sortableKeyboardCoordinates`
+  (`DesktopApp.jsx:502-510`); Space/Enter grab, arrows move.
+
+### 7.4 Phone heal rules
+
+Both exist because Save is optimistic and a rejected batch is met with silence
+(7.1):
+
+- **Set equality on every `state` frame.** `reconcilePageOrder(draft,
+  visibleIds)` prunes ids the host no longer shows and appends host-new ones,
+  never re-sorting — a surviving id keeps its slot, so an unsaved claim is
+  never clobbered, and the same reference comes back when the sets already
+  match (`layoutDraft.js:236-249`). It runs on both `draft` and `baseDraft`
+  after every `state` frame (`App.jsx:665-675`), keeping
+  `set(draft.pageOrder) === set(visible page ids)` at all times. Two
+  consequences: `pagesInOrder` is a pure permutation, so an unowned (dead)
+  toolbar row is unrepresentable; and a stale id can never poison the
+  all-or-nothing batch forever.
+- **The order batch is measured against the host.** `pageOrderBatch(draft,
+  hostIds)` returns the draft's whole order whenever it differs from the
+  host's visible order — a length mismatch means the heal owns that case, so
+  it stays `[]` (`deckPages.js:26-38`). The resulting `pendingPageOrder` feeds
+  BOTH `dirty` and the Save frame (`App.jsx:985-989,994-1009,1379-1387`), so
+  a claim the baseline accepted but the host rejected keeps Save enabled: the
+  user taps Save and the order is re-committed. A baseline-only comparison
+  would strand that claim — draft equal to baseline, Save dark, the only exit
+  leaving Edit Layout.
+
+## 8. Surface split: phone vs desktop (final polish)
+
+The owner's division of the two surfaces, now settled:
+
+- **The phone's control sheet is status + disconnect + Edit Layout.** Its grid
+  holds exactly two rows: the stats row (when `stats` is present) and one
+  combined row with the connection pill, Disconnect and Edit Layout
+  (`ControlSheet.jsx:248-352`). It carries no volume or mic controls.
+- **Detailed layout settings and presets are desktop-only.**
+  `LayoutSettingsForm` renders only in the desktop's Layout Settings modal
+  (`DesktopApp.jsx:2536,2601`) with its Presets section live (`:2601-2609`).
+  The phone still *renders* a desktop-configured layout — its read-only global
+  fetch is `App.jsx:795-821` and the section 10 merge is shared — but it
+  writes no layout config and exposes no preset affordance.
+- **Volume/mic are deck actions, not sheet controls.** Hold lives on deck
+  buttons; the hold-repeat itself is host-side — `volume_hold_start` installs
+  an 80 ms interval per client behind a generation guard, `volume_hold_stop`
+  tears it down (`server.js:1072-1132`).
+
+## 9. D4: presets persist layout settings, not tile placements
 
 Two distinct things are called "preset"; keep them apart:
 
 - **Engine presets** (`compact`/`balanced`/`large`) are cell-size bound sets
   inside `settings.preset` (section 2).
 - **Saved layout presets** (plan D4/D7) are rows in `layout_presets`
-  (`db.js:134-143`) holding a named JSON snapshot
+  (`db.js:135-144`) holding a named JSON snapshot
   `{ defaults?: {knobs}, pages?: { [pageId]: {knobs} } }` — the global
   `layout_config` scope and optional per-page scopes. `defaults`/`pages`
   values are exactly the six settings knobs of section 2, validated per scope
@@ -234,18 +374,21 @@ Mechanics:
 - **Save.** The settings form snapshots its pending diff into exactly one
   scope — global scope emits only the `defaults` diff, page scope only that
   page's full stored value — following the form's own scope toggle, never both
-  (`layoutForm.js:146-221`).
+  (`layoutForm.js:175-222`).
 - **Wire.** `GET/POST/DELETE /api/layout-presets`; there is no PUT — a preset
-  is immutable, edit it by delete + recreate (`server.js:632-665`,
+  is immutable, edit it by delete + recreate (`server.js:651-676`,
   `presetsClient.js:47-74`).
 - **Apply.** One whole-replacement write per mentioned scope:
   `POST /api/settings {key:"layout_config"}` for `defaults`, `PATCH
   /api/pages/:id {layout_config}` for each page entry. Scopes the preset does
   not mention are left alone; apply fires **no** `reorder_items`, no
   `/api/items/move`, and no size PATCHes — placements are untouchable through
-  presets (`App.jsx:1152-1210`; same rule on desktop, `DesktopApp.jsx:1237`).
+  presets (`DesktopApp.jsx:1291`, `handlePresetApply`; the per-scope jobs it
+  builds are the global POST at `:1315-1329` and the page PATCHes at
+  `:1330-1346`). Saving and applying presets live only on the desktop —
+  section 8.
 
-## 8. Settings merge precedence
+## 10. Settings merge precedence
 
 The real precedence chain the client renders with is
 **defaults → global → page** (`layoutSettings.js:1-7`):
@@ -256,19 +399,19 @@ settings = { ...DEFAULT_SETTINGS, ...sanitize(globalLayout), ...sanitize(pageLay
 
 - `globalLayout` is the deck-wide `layout_config` stored in the `settings`
   key/value table and delivered only via `GET /api/settings`
-  (`server.js:235-238,241-270`; fetched at `App.jsx:782-800`). The `state`
+  (`server.js:224-240,242-271`; fetched at `App.jsx:795-821`). The `state`
   frame carries each page's `layout_config` but no global scope, so the
   deck-wide value is not on the socket — it arrives only from the settings
   fetch.
-- The page scope is `pages.layout_config` (`db.js:237-242`), parsed to an
-  object or `null` in page serialization (`server.js:1289-1293`).
+- The page scope is `pages.layout_config` (`db.js:240-243`), parsed to an
+  object or `null` in page serialization (`server.js:1318-1328`).
 - `mergeLayout` (`layoutSettings.js:43-49`) sanitizes each scope with the
   client mirror of the host rules: invalid or absent keys are dropped, which
   reads as "no opinion at this scope" and falls through to the next layer,
   finally `DEFAULT_SETTINGS` (`layoutSettings.js:24-36`). A `null`/absent
   global (unpaired, fetch pending) contributes nothing.
 - Presets are **not** a fourth render-time layer. Applying one only rewrites
-  the stored global/page scopes (section 7); from the next state frame the
+  the stored global/page scopes (section 9); from the next state frame the
   same three-layer merge reads the new values.
 - Inside the engine, one more layering applies to the bounds specifically:
   explicit `minCell`/`maxCell`/`gap` in the merged settings override the bounds
@@ -283,9 +426,10 @@ Storage-side nuances (they keep the merge honest):
 - Host routes **replace** a scope wholesale; the settings UI therefore layers
   its diff over the scope's own stored config (`mergeScopeConfig`), never over
   merged display values, so saving one knob never freezes the other scopes'
-  cascade (`layoutForm.js:129-141`; `server.js:252-256`, `db.js:443-477`).
+  cascade (`layoutForm.js:136-142`; `server.js:253-257`, `db.js:417-421,
+  459-481`).
 
-## 9. Worked examples (real engine output)
+## 11. Worked examples (real engine output)
 
 Both examples use a 12-tile mixed fixture and `settings = DEFAULT_SETTINGS`
 (engine preset `balanced`: `minCell 48`, `maxCell 132`, `gap 8`) with the
@@ -388,3 +532,53 @@ item is still placed:
 Custom-cols ceiling — `{ ...DEFAULT_SETTINGS, mode: "custom", cols: 6 }` with
 12 `1x1` items: at 320 px resolves `{ cols: 3, cell: 101 }` (ceiling honored
 down to the readable cap), at 1600 px resolves `{ cols: 6, cell: 132 }`.
+
+## 12. Verification coverage
+
+An honest map of what the suites guard — and what no suite can.
+
+**Automated.**
+
+- **Host** (`cd host && npm test`). `host/test/pageOrder.test.js` pins the
+  pure validator: complete-visible-permutation acceptance, hidden pinned
+  strictly behind the visible block, all-or-nothing rejection of missing /
+  unknown / duplicate / hidden-naming / non-string ids, and `firstVisiblePage`
+  never surfacing a hidden page. `host/test/reorderPagesHandler.test.js`
+  mirrors the `server.js` `reorder_pages` block exactly and captures the frame
+  contract, including the rejection path: an invalid batch writes nothing and
+  answers with silence — no ack frame (7.1). Item ordering stays covered by
+  `itemOrder.test.js` and `reorderItemsHandler.test.js`.
+- **Client unit** (`cd client && npm test`). `test/deckPages.test.js` covers
+  `visibleDeckPages`, `pagesInOrder` (identity-preserving permutation,
+  unmentioned pages trailing, unknown ids dropped) and `pageOrderBatch` —
+  including its host-measured rule that a draft order differing from the
+  host's always produces a batch (7.4). `test/layoutDraft.test.js` covers the
+  draft's page-order axis end to end: `createDraft` seeding, `shiftPage`
+  moves, `reconcilePageOrder` set-equality healing on both sides without
+  re-sorting survivors, and `diffDraft().pageOrder`.
+- **Playwright viewport matrix** (`cd client && npm run test:viewport`): 14
+  viewports (`test/viewports.js`) × 11 tests (`test/viewport/deck.spec.ts`),
+  154 runs, against a mock socket. Tests 1-3 guard no horizontal overflow and
+  tiles landing on the engine's measured grid; the shared edit-mode entry
+  helper opens the sheet and asserts `scrollHeight - clientHeight <= 1`, so a
+  sheet row that ever outgrows the 220-px landscape cap fails (`:132-141`).
+  Tests 7-11 are the mobile page-reorder suite: Unfiled stays out of
+  navigation and a committed move emits exactly one `reorder_pages` — after
+  the item reorders, Save step (e) last (`:472`); Done restores the original
+  order and writes nothing (`:584`); a pending move survives a mid-draft host
+  fold and re-seed (`:644`); a host-rejected order stays saveable and
+  re-commits on a second Save, proving the host-measured batch rule (`:756`);
+  a page created mid-draft becomes a live reorderable row (`:826`).
+
+**Not automated — human passes only.**
+
+- dnd-kit sensors do not activate under Playwright's synthetic pointer events
+  (the desktop `PointerSensor` requires a real 6 px trusted drag,
+  `DesktopApp.jsx:502-505`), so no CI test drags anything. The desktop tile
+  drag affordances, `KeyboardSensor` tab-then-space moves, and the page-rail
+  pill drag (7.3) are verified only by a manual Electron pass.
+- Phone volume hold-repeat needs a real finger on a hardware button; the
+  host-side interval machinery behind it (`server.js:1072-1132`) has no
+  automated test either.
+- The Android device pass and the Electron desktop pass are scheduled
+  follow-ups; nothing in this document claims they have run.

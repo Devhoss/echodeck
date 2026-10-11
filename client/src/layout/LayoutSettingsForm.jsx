@@ -1,5 +1,5 @@
-// Phase 6, Task 6.1 — the layout settings form, shared by the phone's
-// ControlSheet panel and the desktop ProfileMenu modal. It is a PURE
+// Phase 6, Task 6.1 — the layout settings form. Desktop-only since the final
+// polish: it renders inside DesktopApp.jsx's Layout Settings modal. It is a PURE
 // CONTROLLED component: no fetch, no toast, no routing — the container owns
 // the HTTP call and its feedback. It renders a full merged engine settings
 // object (mergeLayout's output) and calls onSave(partial, scope) where
@@ -37,8 +37,8 @@ import {
   setValue,
 } from "./layoutForm.js";
 
-// Palette mirrors ControlSheet's dark tokens (#1a1a22 fills, #2a2a35 hairlines,
-// #3b82f6 accent) so the form reads as part of the sheet, not a web form.
+// Palette reuses the app's dark surface tokens (#1a1a22 fills, #2a2a35
+// hairlines, #3b82f6 accent) so the form reads as part of the desktop UI.
 const styles = {
   form: {
     display: "flex",
@@ -96,8 +96,8 @@ const styles = {
     background: "#fff",
     transition: "left 0.15s ease",
   }),
-  // Task 6.2 preset controls — same sheet tokens (#1a1a22 fills, #2a2a35
-  // hairlines), sized for the narrow mobile panel as everything else here.
+  // Task 6.2 preset controls — same dark tokens (#1a1a22 fills, #2a2a35
+  // hairlines), keeping the form's compact sizing the modal inherits.
   presetRow: { display: "flex", gap: 4, alignItems: "center" },
   presetInput: {
     flex: 1,
@@ -255,7 +255,7 @@ export default function LayoutSettingsForm({
     if (busy) return;
     setBusy(true);
     const scope = pageName != null && applyToPage ? "page" : "global";
-    // The container decides what happens next (close the sheet/modal on
+    // The container decides what happens next (close the modal on
     // success, keep it open on failure); the form only guards double-saves.
     Promise.resolve(onSave(buildPartial(changes), scope)).finally(() =>
       setBusy(false),
@@ -291,7 +291,7 @@ export default function LayoutSettingsForm({
     clearTimeout(deleteArmTimerRef.current);
     setDeleteArmed(false);
   };
-  // The arm timer must not outlive the panel (the sheet closes on save).
+  // The arm timer must not outlive the panel (the modal closes on save).
   useEffect(
     () => () => clearTimeout(deleteArmTimerRef.current),
     [],

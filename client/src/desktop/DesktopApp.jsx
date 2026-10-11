@@ -388,7 +388,7 @@ export default function DesktopApp({
   const [layoutSettingsFlash, setLayoutSettingsFlash] = useState(null);
   // FEATURE: Layout presets (Task 6.2) — the saved rows behind the modal's
   // Presets section. Fetched when the modal opens (the effect below), cached
-  // in state, never refetched per keystroke — same policy as the phone.
+  // in state, never refetched per keystroke.
   const [presets, setPresets] = useState([]);
   const [showDevices, setShowDevices] = useState(false);
   // FEATURE: Auto-switch rules moved out of the sidebar — they are configured
@@ -1189,13 +1189,15 @@ export default function DesktopApp({
   }
 
   // FEATURE: Layout settings (Task 6.1) — the desktop container for
-  // LayoutSettingsForm (ruling: the component owns no fetch/toast). Same
-  // contract as the phone's handleLayoutSave (App.jsx): the form's partial
+  // LayoutSettingsForm (ruling: the component owns no fetch/toast). The
+  // desktop's own onSave(partial, scope) contract: the form's partial
   // carries only touched keys with explicit nulls as clears; because the
   // host routes REPLACE the whole stored scope config, the partial is layered
-  // over the scope's OWN stored value, never over the merged display. On
-  // success: optimistic state, modal dismiss, and the app's existing 2-second
-  // "Saved" tick pattern (audioSettingsSaved) re-used as a floating chip.
+  // over the scope's OWN stored value, never over the merged display. Scope
+  // "page" PATCHes the current page's layout_config; anything else POSTs the
+  // global layout_config setting. On success: optimistic state, modal dismiss,
+  // and the app's existing 2-second "Saved" tick pattern
+  // (audioSettingsSaved) re-used as a floating chip.
   const flashLayout = useCallback((text) => {
     setLayoutSettingsFlash(text);
     setTimeout(
@@ -1247,7 +1249,7 @@ export default function DesktopApp({
 
   // FEATURE: Layout presets (Task 6.2) — fetch-on-open for the modal's
   // Presets section. One GET per modal opening (cached in `presets`), newest
-  // created_at first — the same policy as the phone's sheet (App.jsx).
+  // created_at first.
   useEffect(() => {
     if (!showLayoutSettings) return;
     let cancelled = false;

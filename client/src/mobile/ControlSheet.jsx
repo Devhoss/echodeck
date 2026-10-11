@@ -1,6 +1,7 @@
 // FEATURE: Mobile customization (Task 5.2) — the pull-down control sheet.
-// Everything the old 44-px header used to pin permanently on screen now lives
-// here, revealed on demand by StatusHandle: the CPU/RAM/time StatPills (moved
+// The status display the old 44-px header used to pin permanently on screen
+// now lives here, revealed on demand by StatusHandle: the CPU/RAM/time
+// StatPills (moved
 // here from App.jsx, not duplicated), the connection pill and the
 // Disconnect button (relocated verbatim), plus the Edit Layout entry.
 // Volume and mic live as deck buttons only — the sheet's level rows were
@@ -241,7 +242,7 @@ export default function ControlSheet({
           EchoDeck host — this computer
         </div>
 
-        {/* The three remaining rows stack in a single column (see the flex
+        {/* The two remaining rows stack in a single column (see the flex
             `.deck-sheet-grid` below); the narrow two-column trick and its
             span-all overrides are gone now that the sheet fits the 220-px
             landscape cap on its own. */}
@@ -353,7 +354,7 @@ export default function ControlSheet({
       </div>
 
       <style>{`
-        /* One flow for every viewport: the sheet now holds three short rows, so
+        /* One flow for every viewport: the sheet now holds two short rows, so
            the narrow (<500px) two-column trick is no longer needed to fit the
            220-px cap — and it never applied to landscape anyway, which is what
            used to clip. */

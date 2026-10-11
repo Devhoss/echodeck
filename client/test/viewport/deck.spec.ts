@@ -19,12 +19,14 @@
 //  6. edit mode: tap-select → resize → drag-reorder → Save, with the diff
 //     reaching the socket (captured `send()` frames) and REST (route capture)
 //
-// Three more, added with page reordering (final polish, Task 8):
+// Five more, added with page reordering (final polish, Task 8):
 //  7. the hidden Unfiled page stays out of the pager, and a draft page move
 //     commits exactly one reorder_pages frame — after the item reorders
 //  8. Done (Discard) restores the original page order and never writes it
 //  9. a pending page move survives the two mid-draft draft rebuilds (page fold,
 //     host re-seed)
+// 10. a host-rejected page order stays saveable and re-commits on a second Save
+// 11. a page created mid-draft becomes a live, reorderable row
 //
 // Standing owner rule verified in EVERY test: no WebSocket to port 9001 or any
 // host is ever attempted (page.on("websocket") stays empty), and all REST
@@ -113,7 +115,7 @@ const assertNoRealSocket = (captured: Captured) =>
 
 /**
  * Enter edit mode through the sheet's single-tap "Edit Layout" door. Task 6
- * compacted the sheet to three short rows, so at every landscape viewport the
+ * compacted the sheet to two short rows, so at every landscape viewport the
  * button is always inside the min(55%, 220px) cap — no clipping and no
  * long-press fallback. The two guards here are the regression net: the sheet
  * must not overflow its cap (scrollHeight <= clientHeight once the open

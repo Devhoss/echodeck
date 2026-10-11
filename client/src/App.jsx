@@ -39,7 +39,8 @@ import {
 import DeckEditorBar from "./mobile/DeckEditorBar.jsx";
 // FEATURE: Mobile customization (Tasks 5.1 + 5.2) — the collapsed status
 // handle replaces the old always-on header bar, and the push-down control
-// sheet it opens holds everything the header used to pin on screen.
+// sheet it opens holds the status display the header used to pin (the final
+// polish dropped the volume/mic rows: level changes are deck-button holds).
 import StatusHandle from "./mobile/StatusHandle.jsx";
 import ControlSheet from "./mobile/ControlSheet.jsx";
 // FEATURE: Mobile customization (Task 5.3) — pure geometry of the pull-down
@@ -409,9 +410,9 @@ export default function App() {
   const [currentPage, setCurrentPage] = useState(null);
   // FEATURE: Edit Layout (Phase 4) — draft-mode gate. While true a tile keeps
   // only its drag/select behavior; press, hold-confirm and volume-hold are
-  // suppressed below (Task 4.2 model: layoutDraft.js). Task 4.3 owns the entry
-  // door and the EditorBar, so nothing here lets a user flip this yet — the
-  // setter is handed off through editModeApiRef for that future control.
+  // suppressed below (Task 4.2 model: layoutDraft.js). The doors that flip it
+  // are the sheet's Edit Layout button and the handle double-tap, both through
+  // editModeApiRef (Tasks 4.3, 5.3).
   const [editMode, setEditMode] = useState(false);
   // FEATURE: Edit Layout (Task 4.3a) — the in-memory draft. `draft` is the live
   // working model (null outside edit mode); `baseDraft` is the snapshot it was
@@ -909,7 +910,8 @@ export default function App() {
     setEditMode(true);
   }, [editMode, deckItems, visiblePages]);
 
-  // Hand the toggle to the EditorBar / future control sheet (Tasks 4.3, 5.3).
+  // Hand the toggle to the EditorBar and the control sheet's Edit Layout
+  // button (Tasks 4.3, 5.3).
   // Mirrored from an effect, never during render, so the deck's default
   // (non-edit) behavior stays untouched.
   const editModeApiRef = useRef(null);
@@ -2123,10 +2125,9 @@ export default function App() {
 }
 
 // FEATURE: Mobile customization (Tasks 5.1 + 5.2) — StatPill and VolumePill
-// used to live here as header-only display. Their one consumer moved into the
-// ControlSheet, so StatPill moved with it (see mobile/ControlSheet.jsx) and
-// VolumePill's bar+% readout was upgraded to the sheet's slider row rather
-// than being kept in two places.
+// used to live here as header-only display. StatPill now lives with its one
+// consumer in mobile/ControlSheet.jsx; VolumePill was deleted outright in the
+// final polish — level adjustment is a deck-button hold action, not sheet UI.
 
 // ── FEATURE: Edit Layout (Task 4.3a) — the drag-capable tile shell ──────────
 // `useSortable` is a hook, so it cannot be called conditionally from inside
