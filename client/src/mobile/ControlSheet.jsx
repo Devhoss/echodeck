@@ -1,10 +1,11 @@
 // FEATURE: Mobile customization (Task 5.2) — the pull-down control sheet.
 // Everything the old 44-px header used to pin permanently on screen now lives
 // here, revealed on demand by StatusHandle: the CPU/RAM/time StatPills (moved
-// here from App.jsx, not duplicated), the VolumePill display logic (extracted
-// and upgraded to slider + minus/plus + mute), the connection pill and the
+// here from App.jsx, not duplicated), the connection pill and the
 // Disconnect button (relocated verbatim), plus the Edit Layout entry and the
 // layout-settings form panel (Task 6.1) the Settings button toggles.
+// Volume and mic live as deck buttons only — the sheet's level rows were
+// dropped in the final layout polish (phone = dashboard, desktop = config).
 //
 // It is a PUSH-DOWN sheet, never an overlay: it sits in the same outer flex
 // column as the handle, directly above the deck, so opening it shrinks the
@@ -18,17 +19,11 @@
 // `transition: transform …` styles below are automatically clamped.
 import { useEffect, useRef, useState } from "react";
 import disconnect from "/disconnect.svg";
-import { ActionIcon, Icon } from "../icons.jsx";
-import { sliderSetArgs } from "./volumeTap.js";
+import { Icon } from "../icons.jsx";
 // FEATURE: Layout settings (Task 6.1) — the Settings entry is a real door now:
 // it toggles an inline LayoutSettingsForm panel. The form is a pure controlled
 // component; the fetch + toast live in App.jsx (props onLayoutSave etc.).
 import LayoutSettingsForm from "../layout/LayoutSettingsForm.jsx";
-
-// One tap of the sheet's minus/plus keys. Matches VOLUME_STEP_DEFAULT in
-// App.jsx (and the host's fallback), because the sheet has no per-button step
-// to read from a tile config.
-const SHEET_HOLD_STEP = 5;
 
 // FEATURE: System stats — pill component (moved here from App.jsx together
 // with its only remaining consumer; the header that used it is now the handle).
@@ -54,190 +49,13 @@ function StatPill({ label, value, warn }) {
   );
 }
 
-// FEATURE: Volume controls — one level row (speaker or mic). The minus/plus
-// keys hold-to-repeat with the exact same WS protocol the tile volume keys use
-// (`startVolumeHold`/`stopVolumeHold`); the hold works there because the finger
-// stays down (start tick fires, interval installs, stop clears later). The
-// slider is different: a drag/tap emits `change` events, and each now sends one
-// absolute `volume_set` frame via `sliderSetArgs` + `sendVolumeSet`. The old
-// start/stop pair raced the host's async volume read and landed zero change
-// (see volumeTap.js). The mute button sends the sheet-only
-// `mute_toggle`/`mic_mute_toggle` frame; every level/mute state comes back
-// through the existing broadcast.
-function LevelRow({
-  kind,
-  label,
-  value,
-  muted,
-  startVolumeHold,
-  stopVolumeHold,
-  sendMuteToggle,
-  sendVolumeSet,
-  className,
-}) {
-  const level = value ?? 0;
-  // While a `volume_set` is in flight the `value` prop is still the pre-change
-  // echo, so the range thumb would rubber-band back mid-drag. Latch the last
-  // level we SENT and drive the input from it until the broadcast echo returns.
-  // This is derived state — reset it during render when the echoed prop changes
-  // (React's blessed pattern), which avoids both a render-time ref read and a
-  // setState-in-effect, each of which `react-hooks` lint forbids.
-  const [pending, setPending] = useState({ echoed: value, level: null });
-  if (pending.echoed !== value) {
-    setPending({ echoed: value, level: null });
-  }
-  const sliderValue = pending.level ?? (muted ? 0 : level);
-  const icon =
-    kind === "mic"
-      ? muted
-        ? "mic-off"
-        : "mic"
-      : muted
-        ? "volume-x"
-        : level > 50
-          ? "volume-2"
-          : "volume-1";
-
-  const keyButtonStyle = {
-    width: 28,
-    height: 28,
-    flexShrink: 0,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    background: "#1a1a22",
-    border: "1px solid #2a2a35",
-    borderRadius: 8,
-    color: "#aaa",
-    cursor: "pointer",
-    padding: 0,
-  };
-
-  return (
-    <div
-      className={className}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 6,
-        minWidth: 0,
-      }}
-    >
-      <ActionIcon
-        name={icon}
-        size={14}
-        style={{
-          flexShrink: 0,
-          color: muted ? "#f87171" : "#888",
-        }}
-      />
-      <span
-        style={{
-          width: 26,
-          flexShrink: 0,
-          fontSize: 9,
-          color: "#666",
-          textTransform: "uppercase",
-          letterSpacing: 0.5,
-        }}
-      >
-        {label}
-      </span>
-
-      <button
-        type="button"
-        aria-label={`${label} down`}
-        style={keyButtonStyle}
-        onPointerDown={() => startVolumeHold("down", SHEET_HOLD_STEP, kind)}
-        onPointerUp={stopVolumeHold}
-        onPointerCancel={stopVolumeHold}
-      >
-        <span style={{ fontSize: 15, lineHeight: 1 }}>−</span>
-      </button>
-
-      <input
-        type="range"
-        min={0}
-        max={100}
-        step={1}
-        value={sliderValue}
-        aria-label={`${label} level`}
-        onChange={(e) => {
-          const frame = sliderSetArgs(kind, e.target.value);
-          if (!frame) return;
-          // Absolute set: latch the value we send so the thumb tracks the
-          // finger until the host echo returns, then hand the frame to the WS.
-          setPending({ echoed: value, level: frame.level });
-          sendVolumeSet(frame.level, frame.target);
-        }}
-        style={{
-          flex: 1,
-          minWidth: 48,
-          accentColor: "#3b82f6",
-          height: 24,
-        }}
-      />
-
-      <button
-        type="button"
-        aria-label={`${label} up`}
-        style={keyButtonStyle}
-        onPointerDown={() => startVolumeHold("up", SHEET_HOLD_STEP, kind)}
-        onPointerUp={stopVolumeHold}
-        onPointerCancel={stopVolumeHold}
-      >
-        <span style={{ fontSize: 15, lineHeight: 1 }}>+</span>
-      </button>
-
-      <button
-        type="button"
-        aria-label={`${label} mute`}
-        aria-pressed={muted}
-        style={{
-          ...keyButtonStyle,
-          background: muted ? "#2e0d0d" : "#1a1a22",
-          border: `1px solid ${muted ? "#5c1a1a" : "#2a2a35"}`,
-        }}
-        onClick={() => sendMuteToggle(kind)}
-      >
-        <ActionIcon
-          name={icon}
-          size={14}
-          style={{ color: muted ? "#f87171" : "#aaa" }}
-        />
-      </button>
-
-      <span
-        style={{
-          width: 34,
-          flexShrink: 0,
-          textAlign: "right",
-          fontSize: 10,
-          color: muted ? "#f87171" : "#888",
-          fontVariantNumeric: "tabular-nums",
-        }}
-      >
-        {value === null || value === undefined ? "—" : muted ? "—" : `${value}%`}
-      </span>
-    </div>
-  );
-}
-
 export default function ControlSheet({
   id,
   open,
   onClose,
   stats,
-  volume,
-  muted,
-  micVolume,
-  micMuted,
   isConnected,
   status,
-  startVolumeHold,
-  stopVolumeHold,
-  sendMuteToggle,
-  sendVolumeSet,
   handleDisconnect,
   disconnectActive,
   setDisconnectActive,
@@ -369,8 +187,9 @@ export default function ControlSheet({
   };
 
   const onPointerDown = (e) => {
-    // The slider is a vertical-travel thief: never start a swipe from it.
-    // The layout-form panel is the same thief for its own scroll: vertical
+    // Form inputs are vertical-travel thieves: never start a swipe from one
+    // (kept from the sheet-slider era as the swipe-thief guard). The
+    // layout-form panel is the same thief for its own scroll: vertical
     // travel inside it scrolls the panel, it must not dismiss the sheet.
     if (
       e.target instanceof Element &&
@@ -488,38 +307,6 @@ export default function ControlSheet({
               <StatPill label="" value={stats.time} />
             </div>
           )}
-
-          {/* Volume + mic rows span BOTH columns in the narrow (<500px) flow.
-              Their min-content is ~236px (icon+label+readout with
-              flexShrink:0, plus a 48px slider floor), which cannot fit a ~172px
-              half-column on a 390px phone — the mute button and readout would be
-              clipped by the sheet's overflow:hidden. Full-width rows remove the
-              clip while the STATS row keeps the 2-column reclaim the brief
-              wanted. Above 499px the grid is single-column, so the class is a
-              no-op. */}
-          <LevelRow
-            kind="speaker"
-            label="Vol"
-            value={volume}
-            muted={muted}
-            className="deck-sheet-span-all"
-            startVolumeHold={startVolumeHold}
-            stopVolumeHold={stopVolumeHold}
-            sendMuteToggle={sendMuteToggle}
-            sendVolumeSet={sendVolumeSet}
-          />
-
-          <LevelRow
-            kind="mic"
-            label="Mic"
-            value={micVolume}
-            muted={micMuted}
-            className="deck-sheet-span-all"
-            startVolumeHold={startVolumeHold}
-            stopVolumeHold={stopVolumeHold}
-            sendMuteToggle={sendMuteToggle}
-            sendVolumeSet={sendVolumeSet}
-          />
 
           {/* Connection status pill + Disconnect button — relocated verbatim
               from the old header (the confirm modal itself stays in App.jsx;

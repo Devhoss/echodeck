@@ -1584,39 +1584,6 @@ export default function App() {
     wsRef.current.send(JSON.stringify({ t: "volume_hold_stop" }));
   }, []);
 
-  // FEATURE: Mobile customization (Task 5.2) — the sheet's mute buttons ask
-  // the host to toggle speaker/mic mute directly (no synthetic tile button).
-  // The new state comes back through the existing `volume` broadcast, so this
-  // only sends and never optimistically flips local state.
-  const sendMuteToggle = useCallback((kind) => {
-    if (wsRef.current?.readyState !== WebSocket.OPEN) return;
-    wsRef.current.send(
-      JSON.stringify({
-        v: 1,
-        t: kind === "mic" ? "mic_mute_toggle" : "mute_toggle",
-      }),
-    );
-  }, []);
-
-  // FEATURE: Mobile customization (Task 5.2, fix round 1) — the sheet's slider
-  // asks the host to set an ABSOLUTE level via the new `volume_set` frame. This
-  // replaces the old start/stop hold pair, which raced: the host's
-  // Voicemeeter-first `await getVolume()` is real async I/O, so a back-to-back
-  // stop arriving mid-await made the generation guard abandon the hold and land
-  // zero change on real hosts. No optimistic local flip — the level returns
-  // through the existing `volume` broadcast. `target` is only sent for the mic.
-  const sendVolumeSet = useCallback((level, target) => {
-    if (wsRef.current?.readyState !== WebSocket.OPEN) return;
-    wsRef.current.send(
-      JSON.stringify({
-        v: 1,
-        t: "volume_set",
-        level,
-        ...(target === "mic" ? { target: "mic" } : null),
-      }),
-    );
-  }, []);
-
   const handleDisconnect = useCallback(() => {
     setShowDisconnectConfirm(true);
   }, []);
@@ -1986,16 +1953,8 @@ export default function App() {
         open={sheetOpen}
         onClose={() => setSheetOpen(false)}
         stats={stats}
-        volume={volume}
-        muted={muted}
-        micVolume={micVolume}
-        micMuted={micMuted}
         isConnected={isConnected}
         status={status}
-        startVolumeHold={startVolumeHold}
-        stopVolumeHold={stopVolumeHold}
-        sendMuteToggle={sendMuteToggle}
-        sendVolumeSet={sendVolumeSet}
         handleDisconnect={handleDisconnect}
         disconnectActive={disconnectActive}
         setDisconnectActive={setDisconnectActive}
