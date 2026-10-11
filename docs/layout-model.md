@@ -255,8 +255,11 @@ settings = { ...DEFAULT_SETTINGS, ...sanitize(globalLayout), ...sanitize(pageLay
 ```
 
 - `globalLayout` is the deck-wide `layout_config` stored in the `settings`
-  key/value table and carried in the `state` payload / settings GET
-  (`server.js:235-238,241-270`; fetched at `App.jsx:782-800`).
+  key/value table and delivered only via `GET /api/settings`
+  (`server.js:235-238,241-270`; fetched at `App.jsx:782-800`). The `state`
+  frame carries each page's `layout_config` but no global scope, so the
+  deck-wide value is not on the socket — it arrives only from the settings
+  fetch.
 - The page scope is `pages.layout_config` (`db.js:237-242`), parsed to an
   object or `null` in page serialization (`server.js:1289-1293`).
 - `mergeLayout` (`layoutSettings.js:43-49`) sanitizes each scope with the
