@@ -2,8 +2,9 @@
   "state": {
     "t": "state",
     "pages": [
-      { "id": "page_main", "name": "Main", "show_labels": 1 },
-      { "id": "page_two", "name": "Second", "show_labels": 1 }
+      { "id": "page_main", "name": "Main", "position": 0, "show_labels": 1 },
+      { "id": "page_two", "name": "Second", "position": 1, "show_labels": 1 },
+      { "id": "page_hidden", "name": "Unfiled", "position": 2, "show_labels": 0, "hidden": true }
     ],
     "current_page": "page_main",
     "buttons": [

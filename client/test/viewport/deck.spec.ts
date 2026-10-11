@@ -19,6 +19,13 @@
 //  6. edit mode: tap-select → resize → drag-reorder → Save, with the diff
 //     reaching the socket (captured `send()` frames) and REST (route capture)
 //
+// Three more, added with page reordering (final polish, Task 8):
+//  7. the hidden Unfiled page stays out of the pager, and a draft page move
+//     commits exactly one reorder_pages frame — after the item reorders
+//  8. Done (Discard) restores the original page order and never writes it
+//  9. a pending page move survives the two mid-draft draft rebuilds (page fold,
+//     host re-seed)
+//
 // Standing owner rule verified in EVERY test: no WebSocket to port 9001 or any
 // host is ever attempted (page.on("websocket") stays empty), and all REST
 // traffic to the host origin is intercepted by page.route before the network.
@@ -139,6 +146,46 @@ async function mockSentFrames(page: Page) {
   return page.evaluate(() =>
     (window as any).__MOCK_WS__.sent.map((s: string) => JSON.parse(s)),
   );
+}
+
+/**
+ * FEATURE: Page reordering — the Pages disclosure's row labels in list order
+ * ("1. Main", …). The panel is the sibling div right after the group holding
+ * [Pages ▸], and its only <span>s are those labels (Earlier / Later are buttons),
+ * so this reads exactly the sequence the user sees while reordering — the draft's
+ * order, not the host's.
+ */
+async function pagesListLabels(page: Page): Promise<string[]> {
+  const panel = page
+    .getByRole("button", { name: "Pages ▸", exact: true })
+    .locator("xpath=ancestor::div[1]/following-sibling::div[1]");
+  const texts = await panel.locator("span").allInnerTexts();
+  return texts.map((t) => t.replace(/\s+/g, " ").trim());
+}
+
+/**
+ * The pager dots in DOM order, by page name. A dot's only accessible name is the
+ * page name (`aria-label={p.name}`), so this is both "how many pages navigate"
+ * (D3: never the hidden Unfiled one) and "in which order" (the draft's, while
+ * editing).
+ */
+async function dotOrder(page: Page): Promise<string[]> {
+  return page
+    .locator('button[aria-label="Main"], button[aria-label="Second"]')
+    .evaluateAll((els) => els.map((el) => el.getAttribute("aria-label")));
+}
+
+/**
+ * Open the Pages disclosure. It is bar-local UI state (like `moveOpen`) and the
+ * bar stays mounted with `editMode` as a prop, so a re-entered session can already
+ * be showing the list — the toggle only fires when it is not.
+ */
+async function openPagesDisclosure(page: Page) {
+  const trigger = page.getByRole("button", { name: "Pages ▸", exact: true });
+  await expect(trigger, "toolbar offers page order").toBeVisible();
+  const rows = page.getByRole("button", { name: "Earlier", exact: true });
+  if ((await rows.count()) === 0) await trigger.click();
+  await expect(rows.first(), "the Pages list is open").toBeVisible();
 }
 
 test.describe("deck viewport matrix", () => {
@@ -418,6 +465,269 @@ test.describe("deck viewport matrix", () => {
     );
     expect(patch, "resize emitted PATCH /api/buttons/1").toBeTruthy();
     expect(JSON.parse(patch!.postData!)).toEqual({ size: "1x2" });
+
+    assertNoRealSocket(captured);
+  });
+
+  test("7. pages: the Unfiled page stays out of navigation, and a move emits reorder_pages", async ({
+    page,
+  }) => {
+    const { captured } = await openMockDeck(page);
+
+    // D3 still holds after reordering landed: a hidden page never reaches the
+    // dots. Counted rather than eyeballed, because the fixture now has three
+    // pages and only two are visible.
+    const dotCount = await page
+      .locator(
+        '[aria-label="Main"], [aria-label="Second"], [aria-label="Unfiled"]',
+      )
+      .count();
+    expect(dotCount, "Unfiled stays absent from the pager").toBe(2);
+
+    await enterEditMode(page);
+    // FEATURE: Page reordering — a DECK-level control: the disclosure is offered
+    // before any tile is selected, because page order is not a per-item edit.
+    await openPagesDisclosure(page);
+
+    // The ends of the list are dead ends, and that is what makes this surface
+    // verifiable: the first page cannot go earlier, the last cannot go later.
+    const earlier = page.getByRole("button", { name: "Earlier", exact: true });
+    await expect(earlier.first()).toBeDisabled();
+    const later = page.getByRole("button", { name: "Later", exact: true });
+    await expect(later.last()).toBeDisabled();
+    expect(await pagesListLabels(page), "opens in the host's order").toEqual([
+      "1. Main",
+      "2. Second",
+    ]);
+
+    await later.first().click(); // Main steps behind Second
+    await expect
+      .poll(() => pagesListLabels(page), "the list repaints in draft order")
+      .toEqual(["1. Second", "2. Main"]);
+    await expect
+      .poll(() => dotOrder(page), "the pager dots follow the draft")
+      .toEqual(["Second", "Main"]);
+
+    const saveBtn = page.getByRole("button", { name: "Save", exact: true });
+    await expect(
+      saveBtn,
+      "a page move alone makes the draft saveable",
+    ).toBeEnabled();
+
+    // One item change in the same session, so Save emits BOTH frame families and
+    // the ordering rule becomes observable: the page batch must not overtake the
+    // item reorders it depends on.
+    const t1 = page.locator('[data-deck-item="1"]');
+    await t1.scrollIntoViewIfNeeded();
+    await t1.click();
+    const moveBtn = page.getByRole("button", {
+      name: "Move to page ▸",
+      exact: true,
+    });
+    await expect(moveBtn, "toolbar offers the move menu").toBeVisible();
+    await moveBtn.click();
+    // Scoped like test 6: inside the bar only — a dot is also a button whose
+    // accessible name is "Second".
+    const editorBar = moveBtn.locator("xpath=ancestor::div[2]");
+    await editorBar.getByRole("button", { name: "Second", exact: true }).click();
+
+    const before = await mockSentFrames(page);
+    expect(
+      before.filter((f: any) => f.t === "reorder_pages").length,
+      "no page-order write while the draft is open",
+    ).toBe(0);
+
+    await saveBtn.click();
+    const toast = page.locator('[role="status"]:not([id^="DndLiveRegion"])');
+    await expect(toast).toContainText("Sent", { timeout: 10_000 });
+
+    const sent = await mockSentFrames(page);
+    const frames = sent.filter((f: any) => f.t === "reorder_pages");
+    expect(frames.length, "one page-order frame per Save").toBe(1);
+    expect(frames[0].v).toBe(1);
+    expect(frames[0].page_ids).toEqual(["page_two", "page_main"]);
+    expect(
+      frames[0].page_ids.includes("page_hidden"),
+      "a hidden page is never part of the batch",
+    ).toBe(false);
+
+    const kinds = sent.map((f: any) => f.t);
+    const lastItem = kinds.lastIndexOf("reorder_items");
+    expect(lastItem, "the Save also emitted the item reorder").toBeGreaterThan(
+      -1,
+    );
+    expect(
+      kinds.indexOf("reorder_pages"),
+      "reorder_pages rides after every reorder_items frame",
+    ).toBeGreaterThan(lastItem);
+
+    assertNoRealSocket(captured);
+  });
+
+  // Step 10 of the plan asked for a throwaway Discard check. It is permanent
+  // instead: "Discard restores the original page order" is an owner ruling, so it
+  // deserves a regression guard, not a one-off observation.
+  test("8. pages: Done (Discard) restores the original page order and never writes it", async ({
+    page,
+  }) => {
+    const { captured } = await openMockDeck(page);
+    await enterEditMode(page);
+    await openPagesDisclosure(page);
+    expect(await pagesListLabels(page)).toEqual(["1. Main", "2. Second"]);
+
+    await page.getByRole("button", { name: "Later", exact: true }).first().click();
+    await expect
+      .poll(() => pagesListLabels(page), "the move is pending in the draft")
+      .toEqual(["1. Second", "2. Main"]);
+    await expect
+      .poll(() => dotOrder(page), "pending, and visible on the dots")
+      .toEqual(["Second", "Main"]);
+
+    await page.getByRole("button", { name: "Done", exact: true }).click();
+    await expect(
+      page.getByRole("button", { name: "Pages ▸", exact: true }),
+      "Done leaves edit mode",
+    ).toBeHidden();
+
+    // Asserted on the wire, not on the pixels: a frame already sent cannot be
+    // undone by leaving edit mode, so "Discard never persisted it" is the real
+    // half of the owner's ruling.
+    const sent = await mockSentFrames(page);
+    expect(
+      sent.filter((f: any) => f.t === "reorder_pages").length,
+      "Discard never emitted a page-order frame",
+    ).toBe(0);
+
+    // Re-enter: the draft re-seeds from the host's authoritative order, so the
+    // original order is back on the list AND the dots, and Save is clean again.
+    await enterEditMode(page);
+    await openPagesDisclosure(page);
+    await expect
+      .poll(() => pagesListLabels(page), "Discard restored the page order")
+      .toEqual(["1. Main", "2. Second"]);
+    await expect
+      .poll(() => dotOrder(page), "the dots show the restored order")
+      .toEqual(["Main", "Second"]);
+    await expect(
+      page.getByRole("button", { name: "Save", exact: true }),
+      "a discarded page move leaves nothing pending",
+    ).toBeDisabled();
+
+    const after = await mockSentFrames(page);
+    expect(
+      after.filter((f: any) => f.t === "reorder_pages").length,
+      "still zero page-order frames for the whole session",
+    ).toBe(0);
+    assertNoRealSocket(captured);
+  });
+
+  // Regression guard for the two draft-rebuild sites the page order has to survive:
+  // foldPageIntoDraft (a page the draft does not own yet) and
+  // reseedPageFromServer (a host snapshot whose membership diverged). Both call
+  // createDraft, whose pageOrder defaults to [] — so if either forgot to pass
+  // draft.pageOrder through, a pending page move resets silently and Save emits no
+  // reorder_pages frame at all.
+  test("9. pages: a pending page move survives a mid-draft fold and a host re-seed", async ({
+    page,
+  }) => {
+    const { captured, fixture } = await openMockDeck(page);
+    await enterEditMode(page);
+    await openPagesDisclosure(page);
+    await page.getByRole("button", { name: "Later", exact: true }).first().click();
+    await expect
+      .poll(() => pagesListLabels(page), "the page move is pending")
+      .toEqual(["1. Second", "2. Main"]);
+
+    // (A) FOLD. The draft owns only the viewed page's rows, so the first edit on
+    // another page rebuilds it through foldPageIntoDraft -> createDraft. A real
+    // host answers a page switch with that page's `state` frame; the mock socket
+    // does not, so push one for page_two carrying a tile of its own.
+    await page.evaluate((pages) => {
+      (window as any).__MOCK_WS__.pushFrame({
+        t: "state",
+        pages,
+        current_page: "page_two",
+        buttons: [
+          {
+            id: 77,
+            page_id: "page_two",
+            name: "Seventy",
+            slot: 0,
+            size: "1x1",
+            action_type: "key",
+            action_value: "Seven",
+            icon: "keyboard",
+          },
+        ],
+        widgets: [],
+      });
+    }, fixture.state.pages);
+    const t77 = page.locator('[data-deck-item="77"]');
+    await expect(t77, "the framed page renders its own tile").toBeVisible();
+    await t77.click();
+    await page.getByRole("button", { name: "1×2", exact: true }).click();
+    await expect
+      .poll(
+        () => pagesListLabels(page),
+        "folding page_two into the draft kept the pending page move",
+      )
+      .toEqual(["1. Second", "2. Main"]);
+
+    // (B) RE-SEED. Move a page_main tile off its page, deliver the host snapshot
+    // for page_main, and the draft's membership for that page now disagrees with
+    // the server's — the exact condition reseedPageFromServer rebuilds under.
+    await page.locator('button[aria-label="Main"]').click(); // switchPage
+    const t1 = page.locator('[data-deck-item="1"]');
+    await t1.scrollIntoViewIfNeeded();
+    await t1.click();
+    const moveBtn = page.getByRole("button", {
+      name: "Move to page ▸",
+      exact: true,
+    });
+    await moveBtn.click();
+    await moveBtn
+      .locator("xpath=ancestor::div[2]")
+      .getByRole("button", { name: "Second", exact: true })
+      .click();
+    await expect(
+      t1,
+      "the moved tile leaves page_main in the draft",
+    ).toBeHidden();
+
+    await page.evaluate((state) => (window as any).__MOCK_WS__.pushFrame(state), fixture.state);
+    await expect(
+      t1,
+      "the host snapshot re-seeded page_main into the draft",
+    ).toBeVisible();
+    await expect
+      .poll(
+        () => pagesListLabels(page),
+        "the re-seed kept the pending page move",
+      )
+      .toEqual(["1. Second", "2. Main"]);
+
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    const toast = page.locator('[role="status"]:not([id^="DndLiveRegion"])');
+    await expect(toast).toContainText("Sent", { timeout: 10_000 });
+
+    const sent = await mockSentFrames(page);
+    const frames = sent.filter((f: any) => f.t === "reorder_pages");
+    expect(
+      frames.length,
+      `both rebuilds preserved draft.pageOrder; sent=${JSON.stringify(sent)}`,
+    ).toBe(1);
+    expect(frames[0].page_ids).toEqual(["page_two", "page_main"]);
+    // The re-seeded page_main re-converged with the server, so it no longer needs
+    // an item batch; the moved tile shows up on page_two's page only.
+    expect(sent.filter((f: any) => f.t === "reorder_items").map((f: any) => f.page_id)).toEqual([
+      "page_two",
+    ]);
+    expect(
+      sent.map((f: any) => f.t).indexOf("reorder_pages"),
+      "page order still commits after the item batches",
+    ).toBeGreaterThan(
+      sent.map((f: any) => f.t).lastIndexOf("reorder_items"),
+    );
 
     assertNoRealSocket(captured);
   });

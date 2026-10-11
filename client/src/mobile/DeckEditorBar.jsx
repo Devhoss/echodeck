@@ -5,7 +5,10 @@
  * Tasks 4.3a + 4.3b). Task 4.3a shipped the deck-level shell — [Done] to discard
  * and exit, [Save] to replay the draft diff to the host. Task 4.3b adds the
  * per-item toolbar for the selected tile: size segments, [Move to page ▸], and
- * [Remove from page] (which detaches to Unfiled, never deletes).
+ * [Remove from page] (which detaches to Unfiled, never deletes). The final
+ * polish adds one DECK-LEVEL group, [Pages ▸], whose Earlier / Later buttons move
+ * a visible page inside the draft's page order — no host write any sooner than
+ * Save, and it renders even when no tile is selected.
  *
  * It is a `flexShrink: 0` row placed after the deck and the page dots, so it
  * sits below both rather than covering them. The dots and the rail are the only
@@ -60,11 +63,16 @@ function SegmentButton({ active, disabled, label, onClick }) {
   );
 }
 
-function ToolButton({ label, active, onClick }) {
+// `disabled` mirrors SegmentButton's treatment: the button is a real disabled
+// control (no click, no focus action), and the muted fill/color/opacity say so.
+// Page reordering needs it — "Earlier" on the first page and "Later" on the last
+// are dead ends, and shiftPage returns the SAME draft for them anyway.
+function ToolButton({ label, active, disabled, onClick }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       style={{
         height: 30,
         padding: "0 12px",
@@ -73,10 +81,11 @@ function ToolButton({ label, active, onClick }) {
           ? "1px solid rgba(61,143,214,0.5)"
           : "1px solid rgba(255,255,255,0.12)",
         background: active ? "rgba(61,143,214,0.2)" : "rgba(255,255,255,0.06)",
-        color: "#c9c9d4",
+        color: disabled ? "#43434d" : "#c9c9d4",
         fontSize: 12,
         fontWeight: 600,
-        cursor: "pointer",
+        cursor: disabled ? "default" : "pointer",
+        opacity: disabled ? 0.4 : 1,
         whiteSpace: "nowrap",
       }}
     >
@@ -97,12 +106,17 @@ export default function DeckEditorBar({
   selected = null,
   layout = null,
   pages = [],
+  // FEATURE: Page reordering — the VISIBLE pages in DRAFT order (App's `pagerPages`),
+  // so the list and the dots always read the same sequence while editing.
+  orderedPages = [],
   currentPage = null,
   onResize,
   onMoveToPage,
   onDetach,
+  onShiftPage = null,
 }) {
   const [moveOpen, setMoveOpen] = useState(false);
+  const [pagesOpen, setPagesOpen] = useState(false);
   if (!editMode) return null;
 
   const id = selected?.key ?? null;
@@ -137,6 +151,88 @@ export default function DeckEditorBar({
         background: "linear-gradient(180deg, #161618 0%, #1c1c1f 100%)",
       }}
     >
+      {/* FEATURE: Page reordering — a deck-level control, so it renders with no
+          tile selected. Order is part of the draft: these taps move a page inside
+          draft.pageOrder and nothing reaches the host until Save, exactly like a
+          tile drag. Move earlier / Move later rather than dragging, because the
+          dots are 7 px tall and this is the touch surface. */}
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: 8,
+          minWidth: 0,
+        }}
+      >
+        <ToolButton
+          label="Pages ▸"
+          active={pagesOpen}
+          onClick={() => setPagesOpen((o) => !o)}
+        />
+      </div>
+
+      {pagesOpen && (
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+            width: "100%",
+            padding: "6px 8px",
+            borderRadius: 10,
+            border: "1px solid rgba(255,255,255,0.1)",
+            background: "rgba(255,255,255,0.03)",
+            boxSizing: "border-box",
+          }}
+        >
+          {orderedPages.length <= 1 && (
+            <span style={{ fontSize: 11, color: "#55555f" }}>
+              Only one page
+            </span>
+          )}
+          {orderedPages.map((p, i) => (
+            <div
+              key={p.id}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                minWidth: 0,
+              }}
+            >
+              <span
+                aria-current={p.id === currentPage ? "true" : undefined}
+                style={{
+                  flex: "1 1 auto",
+                  minWidth: 0,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  fontSize: 12,
+                  fontWeight: 600,
+                  // The active page has to stay obvious while reordering, and the
+                  // dots are too subtle on this surface.
+                  color: p.id === currentPage ? "#eaf3fb" : "#9a9aa6",
+                }}
+              >
+                {i + 1}. {p.name || "Page"}
+              </span>
+              <ToolButton
+                label="Earlier"
+                disabled={i === 0}
+                onClick={() => onShiftPage?.(p.id, -1)}
+              />
+              <ToolButton
+                label="Later"
+                disabled={i === orderedPages.length - 1}
+                onClick={() => onShiftPage?.(p.id, 1)}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+
       {selected && id && (
         <div
           style={{

@@ -16,7 +16,9 @@ import PairingScreen from "./PairingScreen.jsx";
 import { ButtonFace, Icon } from "./icons.jsx";
 import { useDeckLayout } from "./layout/useDeckLayout.js";
 import { mergeLayout } from "./layout/layoutSettings.js";
-import { visibleDeckPages } from "./layout/deckPages.js";
+// FEATURE: Page reordering — `visibleDeckPages` keeps the hidden Unfiled bucket out
+// of deck navigation; `pagesInOrder` repaints the pager in the draft's order.
+import { pagesInOrder, visibleDeckPages } from "./layout/deckPages.js";
 // FEATURE: Edit Layout (Phase 4, Tasks 4.3a + 4.3b) — the pure draft model. 4.3a
 // used createDraft/reorder/diffDraft; 4.3b adds the per-item mutations
 // (resize/moveToPage/detach) for the toolbar and its full Save commit.
@@ -27,6 +29,7 @@ import {
   resize,
   moveToPage,
   detach,
+  shiftPage,
 } from "./layout/layoutDraft.js";
 import DeckEditorBar from "./mobile/DeckEditorBar.jsx";
 // FEATURE: Mobile customization (Tasks 5.1 + 5.2) — the collapsed status
@@ -173,10 +176,14 @@ const arrayMoveKeys = (list, from, to) => {
 // would find the tile absent from `draft.byId` and no-op on the first action for
 // every page after the first. `createDraft` re-densifies per page, so an
 // already-edited page keeps the order the user made. Pure, module-scope.
+// FEATURE: Page reordering — `draft.pageOrder` MUST be carried through this
+// rebuild: createDraft defaults it to [], so folding a page mid-session would
+// silently RESET a page move the user already made, exactly like the item rows
+// would reset if their slots were dropped.
 const foldPageIntoDraft = (draft, pageId, serverRows) =>
   draftHasPage(draft, pageId)
     ? draft
-    : createDraft([...draft.items, ...serverRows]);
+    : createDraft([...draft.items, ...serverRows], draft.pageOrder);
 
 // FEATURE: Edit Layout (Task 4.3a review) — reconcile ONE page's rows against
 // the host's authoritative snapshot. A `state` frame carries per-item rows for
@@ -218,12 +225,20 @@ const draftPageDiverges = (draft, pageId, serverItems) => {
 // membership for the page disagrees with the server — so after a Save (baseline ==
 // draft) a divergent page re-seeds in BOTH and the two converge to identical
 // server rows, and no stale (or spurious) batch is emitted for it again.
+// FEATURE: Page reordering — the rebuild keeps THIS model's own `pageOrder`. It is
+// applied to the draft and to the baseline separately, so an unsaved page move
+// survives the re-seed on the draft while the baseline keeps the order the host
+// still has — exactly the diff Save must emit. Dropping the order here would reset
+// both to [] and silently swallow the pending move.
 const reseedPageFromServer = (draft, pageId, serverItems) => {
   if (!draft) return draft;
-  return createDraft([
-    ...draft.items.filter((it) => it.page_id !== pageId),
-    ...serverItems,
-  ]);
+  return createDraft(
+    [
+      ...draft.items.filter((it) => it.page_id !== pageId),
+      ...serverItems,
+    ],
+    draft.pageOrder,
+  );
 };
 
 // FEATURE: Soundboard — reusable audio player
@@ -837,6 +852,22 @@ export default function App() {
 
   const visiblePages = useMemo(() => visibleDeckPages(pages), [pages]);
 
+  // FEATURE: Page reordering — the pager reflects the draft's order while editing,
+  // so a Move earlier / Move later tap shows up immediately on the dots. Outside
+  // edit mode this is `visiblePages` unchanged (the draft is null), so normal
+  // navigation keeps reading the host's authoritative order. Deliberately scoped to
+  // the dots and the toolbar's Pages list ONLY: `switchPage` (which addresses pages
+  // by id), the deck-swipe handler's `findIndex`/modulo over `visiblePages`, and
+  // handleSave's Unfiled-page lookup over the full `pages` list all stay as they
+  // were — a draft order is not a fact the host has accepted yet.
+  const pagerPages = useMemo(
+    () =>
+      editMode && draft
+        ? pagesInOrder(visiblePages, draft.pageOrder)
+        : visiblePages,
+    [editMode, draft, visiblePages],
+  );
+
   // ── FEATURE: Edit Layout (Task 4.3a) ──────────────────────────────────────
   // Declared here — before the engine call below — because the measure hook has
   // to be fed the draft's tile order while editing, and it references
@@ -857,13 +888,13 @@ export default function App() {
       setEditMode(false);
       return;
     }
-    const seeded = createDraft(deckItems);
+    const seeded = createDraft(deckItems, visiblePages.map((p) => p.id));
     setDraft(seeded);
     setBaseDraft(seeded);
     setSelectedTileId(null);
     setPreviewOrder(null);
     setEditMode(true);
-  }, [editMode, deckItems]);
+  }, [editMode, deckItems, visiblePages]);
 
   // Hand the toggle to the EditorBar / future control sheet (Tasks 4.3, 5.3).
   // Mirrored from an effect, never during render, so the deck's default
@@ -941,7 +972,11 @@ export default function App() {
       Object.keys(diff.reordersByPage).length > 0 ||
       diff.sizePatches.length > 0 ||
       diff.moves.length > 0 ||
-      diff.detachments.length > 0
+      diff.detachments.length > 0 ||
+      // FEATURE: Page reordering — a page-only edit must be saveable, so the deck's
+      // order counts toward dirtiness on its own (diff.pageOrder is [] when
+      // unchanged, so a no-op session still reports clean and Save stays disabled).
+      diff.pageOrder.length > 0
     );
   }, [baseDraft, draft]);
 
@@ -1061,14 +1096,14 @@ export default function App() {
   const handleLongPressEnterEdit = useCallback(
     (key) => {
       if (editMode) return;
-      const seeded = createDraft(deckItems);
+      const seeded = createDraft(deckItems, visiblePages.map((p) => p.id));
       setDraft(seeded);
       setBaseDraft(seeded);
       setSelectedTileId(key);
       setPreviewOrder(null);
       setEditMode(true);
     },
-    [editMode, deckItems],
+    [editMode, deckItems, visiblePages],
   );
 
   // ── FEATURE: Edit Layout (Task 4.3b) — per-item toolbar mutations ──────────
@@ -1146,6 +1181,21 @@ export default function App() {
     [draft, currentPage, deckItems, requestUnfiledPage],
   );
 
+  // FEATURE: Page reordering — no foldPageIntoDraft here: page order lives on
+  // its own axis from the item rows, so it needs neither the viewed page's rows
+  // nor a selection. The draft is the only place it changes.
+  // `shiftPage` returns the SAME reference for an unknown id and for a move past
+  // either end (exactly the buttons the toolbar disables), so the reference test
+  // below is what keeps a dead-end tap from churning state.
+  const handleShiftPage = useCallback(
+    (pageId, delta) => {
+      if (!draft) return;
+      const next = shiftPage(draft, pageId, delta);
+      if (next !== draft) setDraft(next);
+    },
+    [draft],
+  );
+
   // The row the toolbar acts on, resolved from the SAME list the grid rendered
   // (host rows are still valid, they just lack a normalized `key`), and always
   // given one so the callbacks get the composite draft op id. If the selected id
@@ -1162,7 +1212,10 @@ export default function App() {
   // contract requires: (a) materialize the hidden Unfiled page, (b) moves +
   // detachments re-parent tiles, (c) size patches, then (d) per-page reorder
   // batches applied LAST so each pins the authoritative dense order against the
-  // page's POST-move membership (the host's applyReorder is all-or-nothing).
+  // page's POST-move membership (the host's applyReorder is all-or-nothing), and
+  // finally (e) the one reorder_pages frame — after the item batches, so a Unfiled
+  // page materialized by (a) is already hidden and pinned to the tail by the host
+  // before the deck order is committed.
   //
   // Id typing (verified against host + the proven desktop sender):
   //   - POST /api/items/move requires `typeof id === "string"` (server.js:600),
@@ -1180,7 +1233,16 @@ export default function App() {
     const hasMoves = diff.moves.length > 0;
     const hasDetaches = diff.detachments.length > 0;
     const hasSizes = diff.sizePatches.length > 0;
-    if (!reorderKeys.length && !hasMoves && !hasDetaches && !hasSizes) {
+    // FEATURE: Page reordering — a page-only session has nothing but an order, and
+    // it still has to be saveable.
+    const hasPageOrder = diff.pageOrder.length > 0;
+    if (
+      !reorderKeys.length &&
+      !hasMoves &&
+      !hasDetaches &&
+      !hasSizes &&
+      !hasPageOrder
+    ) {
       showToast("Nothing to save");
       return;
     }
@@ -1265,10 +1327,10 @@ export default function App() {
           throw new Error(`resize ${s.kind}:${s.id} (${res.status})`);
       }
 
-      // (d) Reorders LAST: one reorder_items WS frame per affected page, pinning
-      // the draft's dense final order against the now-correct post-move
-      // membership. Item ids and page ids ride RAW (proven desktop path); the
-      // Unfiled page's batch is re-keyed to its real id.
+      // (d) Item reorders after the REST writes: one reorder_items WS frame per
+      // affected page, pinning the draft's dense final order against the
+      // now-correct post-move membership. Item ids and page ids ride RAW (proven
+      // desktop path); the Unfiled page's batch is re-keyed to its real id.
       for (const [pageId, items] of Object.entries(diff.reordersByPage)) {
         const realPageId = resolvePage(pageId);
         if (realPageId == null) continue;
@@ -1278,6 +1340,19 @@ export default function App() {
             t: "reorder_items",
             page_id: realPageId,
             items,
+          }),
+        );
+      }
+
+      // (e) Page order LAST. One frame for the whole deck, and it only ever
+      // carries visible pages — a Unfiled page materialized in (a) is hidden, so
+      // the host pins it to the tail itself and the batch stays valid either way.
+      if (hasPageOrder) {
+        socket.send(
+          JSON.stringify({
+            v: 1,
+            t: "reorder_pages",
+            page_ids: diff.pageOrder,
           }),
         );
       }
@@ -1821,8 +1896,12 @@ export default function App() {
       )}
 
       {/* FEATURE: Deck layout — swipe changes page; the dots do the same by tap,
-          so the deck is never gesture-only. */}
-      {visiblePages.length > 1 && (
+          so the deck is never gesture-only. FEATURE: Page reordering — painted from
+          `pagerPages`, which is `visiblePages` outside edit mode and the DRAFT's
+          order while editing, so an Earlier / Later tap is visible on the dots
+          immediately. Nothing else moves off `visiblePages`: switching, swiping and
+          Save all keep reading the host's authoritative order. */}
+      {pagerPages.length > 1 && (
         <div
           style={{
             display: "flex",
@@ -1833,7 +1912,7 @@ export default function App() {
             flexShrink: 0,
           }}
         >
-          {visiblePages.map((p) => {
+          {pagerPages.map((p) => {
             const active = p.id === currentPage;
             return (
               <button
@@ -1890,10 +1969,12 @@ export default function App() {
         selected={selectedTile}
         layout={layout}
         pages={pages}
+        orderedPages={pagerPages}
         currentPage={currentPage}
         onResize={handleResize}
         onMoveToPage={handleMoveToPage}
         onDetach={handleDetach}
+        onShiftPage={handleShiftPage}
       />
 
       {/* Inline Save feedback — deliberately a transient toast, not a dialog: a
