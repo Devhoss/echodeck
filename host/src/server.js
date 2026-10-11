@@ -7,7 +7,7 @@ const { randomBytes, timingSafeEqual } = require("crypto");
 const os = require("os");
 const db = require("./db");
 const { moveItemSlots } = require("./itemOrder.js");
-const { firstVisiblePage } = require("./pageOrder");
+const { firstVisiblePage, normalizeSubmittedPageIds } = require("./pageOrder.js");
 const {
   isValidButtonSize,
   sanitizeLayoutConfig,
@@ -366,11 +366,6 @@ Write-Output $f.FileName
 
 app.post("/api/pages", (req, res) => {
   const pages = db.getPages();
-  // Page reordering pins hidden pages at the tail, so a new page takes the slot
-  // just past the last VISIBLE page rather than `pages.length` — with an Unfiled
-  // page present those two values differ, and `pages.length` would land the new
-  // page behind Unfiled and re-sort it into the visible block on the next read.
-  const position = pages.filter((p) => !p.hidden).length;
   // FEATURE: Key labels — a new profile inherits the flag from the profile it
   // was created from, so a variant of a labelled page does not have to be
   // re-set by hand. Callers that name no parent get the stored default.
@@ -378,13 +373,23 @@ app.post("/api/pages", (req, res) => {
   const page = db.createPage(
     uuid(),
     req.body.name || "New Page",
-    position,
+    pages.length,
     parent ? parent.show_labels : req.body.show_labels,
   );
+  // Re-densify through the sanctioned writer: the fresh row sits past everything
+  // (including Unfiled), and this pulls it back to the end of the VISIBLE block
+  // while pinning hidden pages behind it — so `position` stays unique and
+  // pages[0] stays visible. Non-fatal: a failed tidy leaves the page usable.
+  const tidy = db.applyPageReorder(
+    db.getPages().filter((p) => !p.hidden).map((p) => p.id),
+  );
+  if (tidy.error) console.warn(`[createPage] order not re-densified: ${tidy.error}`);
   // Broadcast: the new profile has to reach the phone's page dots too, which
   // otherwise wait for the next unrelated edit to paint.
   broadcastState();
-  res.json(toDeckPage(page));
+  // Re-read the row: the tidy above may have rewritten its position, and the
+  // caller should not see the pre-densification value.
+  res.json(toDeckPage(db.getPage(page.id)));
 });
 
 app.patch("/api/pages/:id", (req, res) => {
@@ -1202,11 +1207,9 @@ wss.on("connection", (ws, req) => {
       // so Unfiled is never part of a drag list (plan D3) and applyPageOrder can
       // pin every hidden page behind it. All-or-nothing like reorder_items: a
       // malformed frame is rejected with no broadcast, so no client flickers.
-      const submitted = msg.page_ids;
-      const page_ids = Array.isArray(submitted)
-        ? submitted.filter((id) => typeof id === "string")
-        : (submitted ?? []);
-      const result = db.applyPageReorder(page_ids);
+      // normalizeSubmittedPageIds is shared with the frame-contract test
+      // (test/reorderPagesHandler.test.js), so the test guards this code path.
+      const result = db.applyPageReorder(normalizeSubmittedPageIds(msg.page_ids));
       if (result.error) {
         console.warn(`[reorder_pages] rejected: ${result.error}`);
         return;
@@ -1253,8 +1256,11 @@ function sendState(ws, page_id) {
   // Page reordering made `pages[0]` a moving target that a client could, in
   // principle, put a hidden page onto — so a fresh connection asks for the first
   // VISIBLE page instead. applyPageReorder already pins hidden pages to the
-  // tail; this is the second half of that guarantee.
-  const targetPage = page_id || autoPageId || firstVisiblePage(pages)?.id;
+  // tail; this is the second half of that guarantee. The `pages[0]` tail keeps
+  // the pre-feature behaviour for a pathological all-hidden deck (same last
+  // resort as performSwitch), so `current_page` never silently disappears.
+  const targetPage =
+    page_id || autoPageId || firstVisiblePage(pages)?.id || pages[0]?.id;
   // Remember the page this socket is actually looking at. It is what the
   // widget fan-out filters on, and without it a freshly connected client has
   // no page and silently receives no live data until it switches.

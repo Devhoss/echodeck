@@ -10,7 +10,7 @@ const {
   sourceDefaults,
 } = require("./widgets/widgetShape.js");
 const { backfillSlots, applyReorder } = require("./itemOrder.js");
-const { applyPageOrder } = require("./pageOrder");
+const { applyPageOrder } = require("./pageOrder.js");
 const {
   BUTTON_SIZES,
   sanitizeLayoutConfig,
@@ -815,16 +815,23 @@ function applyItemReorder(page_id, submitted) {
  * so Unfiled can never become pages[0]. One transaction writing only
  * `pages.position` — ids, names, show_labels, hidden and layout_config are never
  * touched, and item slots/page_id are untouched by definition (the item writers
- * above stay the only ones). Returns {ok} or {error} with nothing written.
+ * above stay the only ones). Returns {ok} or {error} with nothing written: the
+ * transaction is guarded like moveItemToPage, so a SQLITE_BUSY/disk-level throw
+ * becomes a rejection instead of an unhandled rejection in the ws handler.
  */
 function applyPageReorder(submittedIds) {
   const rows = getPages();
   const result = applyPageOrder(rows, submittedIds);
   if (result.error) return { error: result.error };
   const update = db.prepare(`UPDATE pages SET position=? WHERE id=?`);
-  db.transaction(() => {
+  const run = db.transaction(() => {
     for (const [id, position] of result.positions) update.run(position, id);
-  })();
+  });
+  try {
+    run();
+  } catch (e) {
+    return { error: e.message };
+  }
   return { ok: true };
 }
 

@@ -1,27 +1,26 @@
 /**
- * reorder_pages frame-contract test (final polish). Like
- * reorderItemsHandler.test.js this cannot import server.js or db.js (ABI), so
- * the handler's normalisation step is mirrored here VERBATIM from server.js —
- * edit both together if the frame shape changes. The writer it feeds is
- * validated by test/pageOrder.test.js.
+ * reorder_pages frame-contract test (final polish). The normalisation under
+ * test is the PRODUCTION one, not a copy: pageOrder.normalizeSubmittedPageIds
+ * is what the handler in src/server.js (`msg.t === "reorder_pages"`) calls
+ * before db.applyPageReorder (src/db.js) forwards to pageOrder.applyPageOrder.
+ * Like reorderItemsHandler.test.js this cannot import server.js or db.js
+ * (better-sqlite3 is compiled against Electron's ABI), but the two halves of
+ * this contract now share one function, so deleting or skewing the handler's
+ * normalisation breaks this test instead of passing it silently.
+ * The writer it feeds is validated by test/pageOrder.test.js.
  */
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const { applyPageOrder } = require("../src/pageOrder");
+const {
+  applyPageOrder,
+  normalizeSubmittedPageIds,
+} = require("../src/pageOrder.js");
 
-// verbatim from server.js: missing page_ids coerces to [] and every submitted
-// entry is filtered to strings, so a malformed frame rejects cleanly instead of
-// throwing; any other non-array batch is passed through untouched so
-// applyPageOrder's own type guard reports it.
-function normalizePageIds(msg) {
-  const submitted = msg.page_ids;
-  return Array.isArray(submitted)
-    ? submitted.filter((id) => typeof id === "string")
-    : (submitted ?? []);
-}
-
+// handle() mirrors server.js's reorder_pages block exactly: normalise the
+// frame's page_ids, then feed applyPageOrder (via db.applyPageReorder in
+// production). Both now call the same exported normaliser.
 function handle(msg, pages) {
-  return applyPageOrder(pages, normalizePageIds(msg));
+  return applyPageOrder(pages, normalizeSubmittedPageIds(msg.page_ids));
 }
 
 test("reorder_pages: a complete visible batch yields dense positions", () => {
@@ -68,4 +67,23 @@ test("reorder_pages: hidden pages keep tail positions regardless of the batch", 
     [...positions].map(([id, p]) => `${id}=${p}`),
     ["c=0", "a=1", "b=2", "u=3"],
   );
+});
+
+// --- normalizeSubmittedPageIds, tested directly (the production function) ---
+
+test("normalizeSubmittedPageIds: non-array batches pass through for applyPageOrder to report", () => {
+  assert.equal(normalizeSubmittedPageIds("a"), "a");
+  assert.deepEqual(normalizeSubmittedPageIds({}), {});
+  // …and the validator's type guard fires on them, not a coverage error.
+  const pages = [{ id: "a", hidden: 0 }];
+  assert.match(handle({ page_ids: {} }, pages).error, /must be an array/);
+});
+
+test("normalizeSubmittedPageIds: null/undefined normalise to an empty batch", () => {
+  assert.deepEqual(normalizeSubmittedPageIds(null), []);
+  assert.deepEqual(normalizeSubmittedPageIds(undefined), []);
+});
+
+test("normalizeSubmittedPageIds: arrays are filtered to strings only", () => {
+  assert.deepEqual(normalizeSubmittedPageIds([1, "a", null]), ["a"]);
 });

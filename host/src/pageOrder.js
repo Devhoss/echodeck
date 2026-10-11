@@ -83,4 +83,18 @@ function firstVisiblePage(pages) {
   return pages.find((p) => p && !p.hidden) ?? null;
 }
 
-module.exports = { applyPageOrder, firstVisiblePage };
+/**
+ * Normalise a `reorder_pages` frame's `page_ids` before it reaches
+ * applyPageOrder: an array is filtered to strings; a non-array is passed
+ * through untouched (null/undefined becoming []) so applyPageOrder's own type
+ * guard reports the real shape problem instead of an invented empty batch
+ * masquerading as a coverage failure. Shared by the server.js reorder_pages
+ * handler and its frame-contract test, so the two can never drift apart.
+ */
+function normalizeSubmittedPageIds(pageIds) {
+  return Array.isArray(pageIds)
+    ? pageIds.filter((id) => typeof id === "string")
+    : (pageIds ?? []);
+}
+
+module.exports = { applyPageOrder, firstVisiblePage, normalizeSubmittedPageIds };
