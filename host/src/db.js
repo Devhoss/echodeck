@@ -10,6 +10,7 @@ const {
   sourceDefaults,
 } = require("./widgets/widgetShape.js");
 const { backfillSlots, applyReorder } = require("./itemOrder.js");
+const { applyPageOrder } = require("./pageOrder");
 const {
   BUTTON_SIZES,
   sanitizeLayoutConfig,
@@ -421,7 +422,10 @@ function setSetting(key, value) {
 
 // --- Pages ---
 function getPages() {
-  return db.prepare("SELECT * FROM pages ORDER BY position").all();
+  // FEATURE: Page reordering — `rowid` is the tie-break, so two rows sharing a
+  // position (possible only after a partial historical write) keep a stable
+  // relative order instead of an unspecified one.
+  return db.prepare("SELECT * FROM pages ORDER BY position, rowid").all();
 }
 function createPage(id, name, position, show_labels = 0) {
   db.prepare(
@@ -806,6 +810,25 @@ function applyItemReorder(page_id, submitted) {
 }
 
 /**
+ * The sanctioned page-order writer (final polish). `submittedIds` is the full
+ * VISIBLE id list in the wanted order; applyPageOrder pins hidden pages after it
+ * so Unfiled can never become pages[0]. One transaction writing only
+ * `pages.position` — ids, names, show_labels, hidden and layout_config are never
+ * touched, and item slots/page_id are untouched by definition (the item writers
+ * above stay the only ones). Returns {ok} or {error} with nothing written.
+ */
+function applyPageReorder(submittedIds) {
+  const rows = getPages();
+  const result = applyPageOrder(rows, submittedIds);
+  if (result.error) return { error: result.error };
+  const update = db.prepare(`UPDATE pages SET position=? WHERE id=?`);
+  db.transaction(() => {
+    for (const [id, position] of result.positions) update.run(position, id);
+  })();
+  return { ok: true };
+}
+
+/**
  * The sanctioned cross-page move (plan D3): re-parents the row first — target
  * validation checks ids against the target page — then applies both pages'
  * submitted lists through applyItemReorder inside one transaction, so any
@@ -1039,6 +1062,7 @@ module.exports = {
   getItemRows,
   applyItemReorder,
   moveItemToPage,
+  applyPageReorder,
   getLayoutPresets,
   createLayoutPreset,
   getLayoutPreset,
