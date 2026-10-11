@@ -50,3 +50,8 @@ temp/
 # binaries
 *.exe
 *.dll
+
+# playwright (viewport matrix artifacts)
+test-results/
+playwright-report/
+blob-report/
