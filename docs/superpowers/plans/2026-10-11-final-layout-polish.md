@@ -435,6 +435,16 @@ const { firstVisiblePage } = require("./pageOrder");
 
 Then insert immediately after the `reorder_items` block (which ends at `server.js:1192`):
 
+> **AS BUILT (corrected after Task 3 review).** Two changes shipped in the fix round. (1) The
+> in-handler normalisation block below was replaced by `normalizeSubmittedPageIds(msg.page_ids)`,
+> exported from `host/src/pageOrder.js` — the review caught that the test file mirrored the handler's
+> copy, so the test passed even with the handler deleted. Semantics are unchanged from this snippet's
+> intent, except a non-array is passed through so `applyPageOrder` reports "must be an array" instead
+> of a misleading coverage error. (2) `db.applyPageReorder`'s transaction is wrapped in
+> `try { run(); } catch (e) { return { error: e.message }; }` (the `moveItemToPage` house style),
+> because this handler is `async` and an unguarded DB throw would become an unhandled rejection that
+> kills the host and every connected session.
+
 ```js
     if (msg.t === "reorder_pages") {
       // FEATURE: Page reordering — {page_ids:[...]} is the VISIBLE order only,
@@ -477,16 +487,23 @@ Replace `server.js:1339` inside `performSwitch`:
 
 Replace `server.js:367` and `:375` inside `POST /api/pages` so a hidden tail row can't be collided with:
 
+> **AS BUILT (corrected after Task 3 review — this step as written was wrong).** `visibleCount`
+> collides by construction: `applyPageOrder` pins the first hidden row at exactly `visibleCount`, so
+> the new row always ties with Unfiled and `ORDER BY position, rowid` puts it last anyway — the read
+> order is unchanged while `pages.position` becomes duplicated on every deck that has an Unfiled page
+> (and once a gap exists it can collide with a *visible* page). What shipped instead: keep
+> `position = pages.length` for the insert and, immediately before `broadcastState()`, re-densify
+> through the sanctioned writer so the new page joins the visible tail and hidden pages re-pin behind
+> it. A failed tidy logs and is non-fatal; the created page stays usable.
+
 ```js
-  const pages = db.getPages();
-  // Page reordering pins hidden pages at the tail, so a new page takes the slot
-  // just past the last VISIBLE page rather than `pages.length` — with an Unfiled
-  // page present those two values differ, and `pages.length` would land the new
-  // page behind Unfiled and re-sort it into the visible block on the next read.
-  const position = pages.filter((p) => !p.hidden).length;
+  const page = db.createPage(uuid(), req.body.name || "New Page", pages.length, /* parent unchanged */);
+  // The fresh row sits past everything (including Unfiled); this pulls it back to the end of the
+  // VISIBLE block and re-pins hidden pages behind it, so positions stay unique and dense.
+  const tidy = db.applyPageReorder(db.getPages().filter((p) => !p.hidden).map((p) => p.id));
+  if (tidy.error) console.warn(`[createPage] order not re-densified: ${tidy.error}`);
 ```
 
-…and change the `db.createPage(uuid(), req.body.name || "New Page", pages.length, …)` call's third argument from `pages.length` to `position`.
 
 - [ ] **Step 7: Run the host suite**
 
@@ -495,15 +512,22 @@ Expected: PASS.
 
 - [ ] **Step 8: Smoke the frame against an isolated host**
 
-Start a throwaway host (never the real DB, never port 9001 if it is occupied by the live host — use `PORT=9099`):
+Start a throwaway host. Two environment facts make the brief's plain `node` form unusable as written:
+`host/src/network.js` hardcodes `const PORT = 9001` (so a `PORT=9099` env var is inert), and this
+machine's `better-sqlite3` binding is built for Electron's ABI (plain `node` fails at `new Database()`
+— never "fix" that with a rebuild, it would break the desktop pass). Use Electron's node runtime and
+override the exported port from a throwaway wrapper outside the repo:
 
 ```bash
 mkdir -p /e/temp/echodeck-test-home
-USERPROFILE='E:\\temp\\echodeck-test-home' APPDATA='E:\\temp\\echodeck-test-home' \
-  LOCALAPPDATA='E:\\temp\\echodeck-test-home' PORT=9099 node host/src/server.js &
+cd host && USERPROFILE='E:\\temp\\echodeck-test-home' APPDATA='E:\\temp\\echodeck-test-home' \
+  LOCALAPPDATA='E:\\temp\\echodeck-test-home' \
+  ELECTRON_RUN_AS_NODE=1 ./node_modules/.bin/electron <wrapper-that-sets-network.PORT=9099-then-requires-src/server.js>
 sleep 2
 curl -s localhost:9099/api/pages | head -c 400
 ```
+
+Never bind or disturb the live host on 9001, and never open the real `macro-deck.db`.
 
 Then from a second shell drive the ws frame with a short Node script using `ws` from `host/node_modules` (loopback needs no token): connect, send `{v:1,t:"reorder_pages",page_ids:["<second-id>","<first-id>"]}`, and assert the echoed `state` frame's `pages` array comes back in the new order; then send a bad batch (`page_ids:["nope"]`) and assert **no** further state frame arrives and the host log shows `[reorder_pages] rejected`. Kill the host and delete nothing else.
 
