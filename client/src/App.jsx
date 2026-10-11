@@ -1154,12 +1154,19 @@ export default function App() {
         return false;
       }
       const known = new Set(pages.map((p) => p.id));
+      // Only scopes that actually say something count as "mentioned": an empty
+      // defaults {} or an empty per-page entry is truthy but would fire a
+      // whole-scope REPLACE that clears it. Mirror buildPresetSnapshot's
+      // drop-empty-scope rule so apply never wipes a scope the preset means to
+      // leave alone.
+      const isFilled = (v) =>
+        v && typeof v === "object" && Object.keys(v).length > 0;
       const pageEntries = Object.entries(
         config.pages && typeof config.pages === "object" ? config.pages : {},
-      );
+      ).filter(([, value]) => isFilled(value));
       const skipped = pageEntries.filter(([id]) => !known.has(id)).length;
       const jobs = [];
-      if (config.defaults && typeof config.defaults === "object") {
+      if (isFilled(config.defaults)) {
         const value = config.defaults;
         jobs.push({
           label: "global",

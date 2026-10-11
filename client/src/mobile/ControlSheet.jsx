@@ -618,15 +618,16 @@ export default function ControlSheet({
                 background: settingsOpen ? "#2a2a35" : "#1a1a22",
                 color: settingsOpen ? "#e0e0ec" : "#c0c0cc",
               }}
-              onClick={() =>
-                setSettingsOpen((v) => {
-                  // Fetch-on-open (Task 6.2): announce only the transition
-                  // into the panel; the container caches, so re-clicks while
-                  // already open never refetch.
-                  if (!v) onSettingsOpen?.();
-                  return !v;
-                })
-              }
+              onClick={() => {
+                // Fetch-on-open (Task 6.2): announce the transition into the
+                // panel. Read the CURRENT settingsOpen from the closure and fire
+                // the side effect OUTSIDE the setSettingsOpen updater — a
+                // side-effect inside the updater is double-invoked under
+                // StrictMode, which fired the initial listPresets GET twice.
+                const next = !settingsOpen;
+                setSettingsOpen(next);
+                if (next) onSettingsOpen?.();
+              }}
             >
               <Icon name="settings" size={12} />
               Settings

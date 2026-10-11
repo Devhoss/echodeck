@@ -260,21 +260,20 @@ test("buildPresetSnapshot: only defaults touched emits just {defaults}", () => {
   assert.equal(snap.pages, undefined);
 });
 
-test("buildPresetSnapshot: a page touch with a non-default global emits both scopes", () => {
-  // Global preset large, user pending gap 9, page target p1 with no stored
-  // config: defaults carries the whole current global picture (large + the
-  // pending gap, per "smallest partial that means the same as what shows"),
-  // pages carries the page's new stored value.
+test("buildPresetSnapshot: toggle OFF (global scope) writes only defaults, never pages", () => {
+  // The scope-routing fix for Task 6.2 Important #1. Toggle OFF → the touch
+  // lands on the deck's defaults; it must NOT also pin pages[p1] (that used
+  // to leak a page's scope against future global edits). currentPageId is
+  // passed in but ignored in the global scope.
   const snap = buildPresetSnapshot(
     { gap: 9 },
     merged({ preset: "large" }, null),
     "p1",
     null,
+    "global",
   );
-  assert.deepEqual(snap, {
-    defaults: { preset: "large", gap: 9 },
-    pages: { p1: { gap: 9 } },
-  });
+  assert.deepEqual(snap, { defaults: { preset: "large", gap: 9 } });
+  assert.equal(snap.pages, undefined);
 });
 
 test("buildPresetSnapshot: a page with no touched keys never produces a pages entry", () => {
@@ -286,30 +285,39 @@ test("buildPresetSnapshot: a page with no touched keys never produces a pages en
   assert.deepEqual(snap, { defaults: { gap: 11 } });
 });
 
-test("buildPresetSnapshot: the page entry is its full NEW stored value, keeping its own stored keys", () => {
+test("buildPresetSnapshot: toggle ON (page scope) writes only pages[pid], defaults untouched", () => {
   // Host PATCH replaces the page scope wholesale, so a touched-only diff
   // would silently DROP the page's other stored knobs on apply. Keeping them
-  // is the same mergeScopeConfig discipline as 6.1's page save.
-  const snap = buildPresetSnapshot({ gap: 9 }, merged(null, { cols: 5, gap: 4 }), "p1", {
-    cols: 5,
-    gap: 4,
-  });
-  assert.deepEqual(snap.pages, { p1: { cols: 5, gap: 9 } });
+  // is the same mergeScopeConfig discipline as 6.1's page save. Crucially the
+  // page branch emits NO defaults key — a page-scoped touch must never bake
+  // itself into the deck's global config (the leak the fix removed).
+  const snap = buildPresetSnapshot(
+    { gap: 9 },
+    merged(null, { cols: 5, gap: 4 }),
+    "p1",
+    { cols: 5, gap: 4 },
+    "page",
+  );
+  assert.deepEqual(snap, { pages: { p1: { cols: 5, gap: 9 } } });
+  assert.equal(snap.defaults, undefined);
 });
 
-test("buildPresetSnapshot: stored PAGE overrides never leak into defaults", () => {
+test("buildPresetSnapshot: stored PAGE overrides never leak into a global-scope defaults", () => {
   // The merge the form renders is page > global; a page-owned key is not the
   // global's opinion. Freezing it into defaults would spread one page's
   // knobs across the whole deck on apply — the cascade-freezing 6.1 refuses.
+  // Global scope (toggle OFF) also emits NO pages entry: the touch targets
+  // only the deck defaults.
   const snap = buildPresetSnapshot(
-    { gap: 10 }, // gap touched on a page whose stored config owns cols
+    { gap: 10 }, // gap touched while viewing a page whose stored config owns cols
     merged({ preset: "compact" }, { cols: 6 }),
     "p1",
     { cols: 6 },
+    "global",
   );
-  assert.deepEqual(snap.defaults, { preset: "compact", gap: 10 });
+  assert.deepEqual(snap, { defaults: { preset: "compact", gap: 10 } });
   assert.equal(snap.defaults.cols, undefined);
-  assert.deepEqual(snap.pages, { p1: { cols: 6, gap: 10 } });
+  assert.equal(snap.pages, undefined);
 });
 
 test("buildPresetSnapshot: an untouched form over a customized global snapshots that scope", () => {
@@ -368,6 +376,33 @@ test("buildPresetSnapshot: junk arguments cannot crash it", () => {
   assert.deepEqual(buildPresetSnapshot({ gap: 3 }, merged(), 7, null), {
     defaults: { gap: 3 },
   });
+});
+
+test("buildPresetSnapshot: a page-scoped touch produces a page-only snapshot (no defaults key)", () => {
+  // Reviewer Minor #5 — the definitive proof of the scope-routing fix. Toggle
+  // ON, viewing page "pageA" whose global has a non-default preset, user
+  // changes gap. The snapshot must contain ONLY a pages entry (the page's full
+  // new stored value), and must NOT carry a `defaults` key at all — before the
+  // fix the gap baked into defaults too, so applying shifted gap for the whole
+  // deck rather than just pageA.
+  const snap = buildPresetSnapshot(
+    { gap: 7 },
+    merged({ preset: "large" }, { cols: 3 }),
+    "pageA",
+    { cols: 3 },
+    "page",
+  );
+  assert.deepEqual(snap, { pages: { pageA: { cols: 3, gap: 7 } } });
+  assert.equal("defaults" in snap, false);
+});
+
+test("buildPresetSnapshot: a page-scoped touch with no page in view is empty", () => {
+  // scope "page" but currentPageId null (toggle wired to a page that vanished)
+  // → nothing to write; never falls back to a defaults entry.
+  assert.deepEqual(
+    buildPresetSnapshot({ gap: 7 }, merged({ preset: "large" }, null), null, null, "page"),
+    {},
+  );
 });
 
 // --- sanitizePresetName ------------------------------------------------------

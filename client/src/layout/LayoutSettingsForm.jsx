@@ -274,6 +274,11 @@ export default function LayoutSettingsForm({
   // The page scope is only ever snapshotted/applied when a real, visible page
   // backs the form (same pageName gate as the "Apply to this page" toggle).
   const snapshotPageId = pageName != null ? pageId ?? null : null;
+  // The preset's effective scope is the SAME toggle that routes the main Save —
+  // reused here, no new state: a page-scoped preset writes only that page, a
+  // global-scoped preset writes only the deck defaults (buildPresetSnapshot
+  // routes by this and never emits both scopes).
+  const presetScope = pageName != null && applyToPage ? "page" : "global";
 
   const [presetName, setPresetName] = useState("");
   const [presetBusy, setPresetBusy] = useState(false);
@@ -305,6 +310,7 @@ export default function LayoutSettingsForm({
     initialConfig,
     snapshotPageId,
     pageStoredConfig,
+    presetScope,
   );
   const cleanName = sanitizePresetName(presetName);
   // Disabled when the name (trimmed) is empty, when neither scope has
@@ -335,6 +341,11 @@ export default function LayoutSettingsForm({
   };
 
   const applyPresetFromPicker = (event) => {
+    // Reject a second apply while one is already in flight — the container's
+    // onApplyPreset is an async Promise that awaits every write (App.jsx /
+    // DesktopApp.jsx), so presetBusy is the authoritative busy signal. Without
+    // the guard two overlapping applies race each other's writes.
+    if (presetBusy) return;
     const id = event.target.value;
     setSelectedPresetId(id);
     disarmDelete();
@@ -523,6 +534,7 @@ export default function LayoutSettingsForm({
             aria-label="Apply a preset"
             value={effectiveSelectedId}
             onChange={applyPresetFromPicker}
+            disabled={presetBusy}
             style={styles.presetSelect}
           >
             <option value="">

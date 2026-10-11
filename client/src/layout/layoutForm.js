@@ -147,41 +147,60 @@ const SNAPSHOT_KEYS = Object.keys(DEFAULT_SETTINGS);
 // `changes` is the form's touched-key diff (the same object buildPartial
 // consumes), `initialConfig` the merged engine settings the form rendered,
 // `currentPageId` the page the "Apply to this page" target resolves to (null
-// when global-only), and `pageStored` that page's OWN stored layout_config
-// (null when none). Emits `{defaults?, pages?}` containing only scopes with
-// at least one key — a preset that mentions no scope changes no scope when
-// applied (host routes replace a scope wholesale; unmentioned scopes stay).
+// when global-only), `pageStored` that page's OWN stored layout_config (null
+// when none), and `scope` the form's effective scope ("global" | "page") —
+// the same value the main Save routes on. Emits a snapshot that touches EXACTLY
+// ONE scope (never both), and only scopes with at least one key — a preset that
+// mentions no scope changes no scope when applied (host routes replace a scope
+// wholesale; unmentioned scopes stay).
 //
-// The smallest-scope-diff rules:
-// - defaults = (merged effective MINUS keys the page scope owns) OVERLAID with
-//   the touched diff, then keys equal to DEFAULT_SETTINGS dropped. Subtracting
-//   page-owned keys matters because the page renders the MERGED config: a
-//   page-stored value frozen into defaults would leak that page's opinion
-//   into every page on apply (the exact cascade-freezing 6.1 guards against).
-//   A key whose global value equals an engine default is dropped too — the
-//   engine resolves it identically without it, and unmentioned scopes are
-//   left alone on apply (per-scope ruling; presets never clear a scope).
-// - pages[id] = the page's full NEW stored config (its own stored value with
-//   the diff layered over it, exactly what 6.1's page save PATCHes). Only
-//   emitted when the diff has keys — "the page has touched keys" — because an
-//   untouched page's stored config is profile-local placement of knobs, not
-//   something the user asked the preset to remember.
+// The scope routing rule (Task 6.2 fix round): a preset snapshot follows the
+// form's OWN effective scope — the same toggle that drives the main Save — and
+// NEVER writes into both scopes. `scope` is "global" | "page":
+// - "global" (toggle OFF / no page in view): emit ONLY {defaults} — the
+//   smallest diff of the touched partial over the reconstructed global config
+//   (the merged view minus any keys the page scope owns, so a page's stored
+//   knobs never leak deck-wide). No pages entry, even when currentPageId is
+//   present. Empty diff → {}.
+// - "page" (toggle ON with a real page in view): emit ONLY
+//   {pages: {currentPageId: stored ⊕ partial}} — the page's full new stored
+//   value, so apply's whole-scope PATCH keeps its other knobs. No defaults
+//   entry, so a page-scoped touch never pins/rewrites the global. A null page
+//   id or an empty diff → {}.
+// Before this, an unconditional two-scope overlay leaked every touch into both
+// scopes at once (a global touch pinned the page it happened to be viewed on,
+// and a page touch bakes the value into every other page). See the retargeted
+// tests in layoutForm.test.js.
 export function buildPresetSnapshot(
   changes,
   initialConfig,
   currentPageId,
   pageStored,
+  scope = "global",
 ) {
-  const merged =
-    initialConfig && typeof initialConfig === "object" && !Array.isArray(initialConfig)
-      ? initialConfig
-      : {};
   const stored =
     pageStored && typeof pageStored === "object" && !Array.isArray(pageStored)
       ? pageStored
       : {};
   const partial = buildPartial(changes);
 
+  // Page scope: only this page's full new stored value, no defaults entry.
+  if (scope === "page") {
+    if (
+      typeof currentPageId !== "string" ||
+      !currentPageId.length ||
+      !Object.keys(partial).length
+    )
+      return {};
+    const page = mergeScopeConfig(stored, partial);
+    return Object.keys(page).length ? { pages: { [currentPageId]: page } } : {};
+  }
+
+  // Global scope: only the defaults diff, no pages entry (even with a page id).
+  const merged =
+    initialConfig && typeof initialConfig === "object" && !Array.isArray(initialConfig)
+      ? initialConfig
+      : {};
   const globalVisible = {};
   for (const key of SNAPSHOT_KEYS) {
     // The page scope owns this key: its stored value is what the merge shows.
@@ -198,14 +217,6 @@ export function buildPresetSnapshot(
 
   const out = {};
   if (Object.keys(defaults).length) out.defaults = defaults;
-  if (
-    typeof currentPageId === "string" &&
-    currentPageId.length &&
-    Object.keys(partial).length
-  ) {
-    const page = mergeScopeConfig(stored, partial);
-    if (Object.keys(page).length) out.pages = { [currentPageId]: page };
-  }
   return out;
 }
 
