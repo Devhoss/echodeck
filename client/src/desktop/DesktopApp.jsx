@@ -35,6 +35,7 @@ import {
 import {
   SortableContext,
   rectSortingStrategy,
+  horizontalListSortingStrategy,
   arrayMove,
   sortableKeyboardCoordinates,
   useSortable,
@@ -133,6 +134,12 @@ const WIDGET_TILE_PREFIX = "widgettile:";
 function tileSortKey(it) {
   return it.kind === "widget" ? `${WIDGET_TILE_PREFIX}${it.id}` : it.id;
 }
+
+// Page pills share the deck's DndContext, so their ids need a prefix of their own
+// — a raw page id would collide with nothing today but reads as a deck item to
+// handleDragEnd's router, and `page:` is unambiguous for both.
+const PAGE_RAIL_PREFIX = "page:";
+const pageSortableId = (id) => `${PAGE_RAIL_PREFIX}${id}`;
 
 // Order-independent membership stamp of a deck (sorted "kind:id" keys). The
 // optimistic reorder overlay carries it so deckItems can tell whether the
@@ -346,6 +353,9 @@ export default function DesktopApp({
   const [ruleEditorKey, setRuleEditorKey] = useState(0);
   const [autoSwitch, setAutoSwitch] = useState(true);
   const reorderTimer = useRef(null);
+  // Separate timers: an item reorder and a page reorder must never cancel each
+  // other out, and both debounce against a 300 ms window.
+  const pageReorderTimer = useRef(null);
   const captureTimerRef = useRef(null);
   const [selectedPage, setSelectedPage] = useState(null);
   const [showQR, setShowQR] = useState(false);
@@ -593,6 +603,10 @@ export default function DesktopApp({
     return () => {
       clearInterval(captureTimerRef.current);
       clearInterval(devicesInterval);
+      // A drop landing inside the 300 ms window of an unmount must not fire
+      // its debounced frame from a stale closure.
+      clearTimeout(reorderTimer.current);
+      clearTimeout(pageReorderTimer.current);
     };
     // loadApplications is a useCallback with no dependencies, so listing it
     // here satisfies the rule without making the effect re-run.
@@ -937,18 +951,20 @@ export default function DesktopApp({
     if (!name) return;
     setAddingPage(false);
     setNewPageName("");
-    await fetch(`${api()}/pages`, {
+    const res = await fetch(`${api()}/pages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       // FEATURE: Key labels — a new profile inherits the flag from the profile
       // it was created from, so a variant of a labelled page stays labelled.
       body: JSON.stringify({ name, from_page_id: currentPage }),
     });
-    const data = await reloadPages();
-    const newPage = data[data.length - 1];
-    if (newPage) {
-      setCurrentPage(newPage.id);
-    }
+    // The response is the new page, not "whichever row sorted last" — with a
+    // hidden Unfiled page pinned to the tail, the created page is no longer the
+    // array's final element. The host re-densifies before replying, so this
+    // row already carries its post-tidy position.
+    const created = await res.json().catch(() => null);
+    await reloadPages();
+    if (created?.id) switchPage(created.id);
   }
 
   // Memoised because two useCallbacks below depend on it. As a plain function
@@ -966,7 +982,11 @@ export default function DesktopApp({
     askConfirm("Delete this page and all its buttons?", async () => {
       await fetch(`${api()}/pages/${id}`, { method: "DELETE" });
       const data = await reloadPages();
-      setCurrentPage(data[0]?.id ?? null);
+      // Not data[0] blindly: with hidden pages pinned at the tail the first
+      // row is only a safe fallback when every remaining page is hidden (or
+      // none remain at all).
+      const first = data.find((p) => !p.hidden) ?? data[0];
+      setCurrentPage(first?.id ?? null);
       setSelectedBtn(null);
     });
   }
@@ -1543,6 +1563,34 @@ export default function DesktopApp({
         return;
       }
 
+      // Page pills ride the deck's own DndContext, so their drops land here too.
+      // Order changes optimistically and the debounced reorder_pages echo (or a
+      // later state frame) is the truth — the same contract as a tile drag.
+      if (dragged.startsWith(PAGE_RAIL_PREFIX)) {
+        const from = visiblePages.findIndex(
+          (p) => pageSortableId(p.id) === dragged,
+        );
+        const to = visiblePages.findIndex(
+          (p) => pageSortableId(p.id) === String(over.id),
+        );
+        if (from < 0 || to < 0 || from === to) return;
+        const reordered = arrayMove(visiblePages, from, to);
+        // Hidden pages are not in the rail, so they must not be dropped: they
+        // trail, which mirrors the host pinning them behind the visible block.
+        setPages([...reordered, ...pages.filter((p) => p.hidden)]);
+        clearTimeout(pageReorderTimer.current);
+        pageReorderTimer.current = setTimeout(() => {
+          wsRef.current?.send(
+            JSON.stringify({
+              v: 1,
+              t: "reorder_pages",
+              page_ids: reordered.map((p) => p.id),
+            }),
+          );
+        }, 300);
+        return;
+      }
+
       // Tile-to-tile reorder over the *unified* deck: buttons and widgets live
       // in one slot-ordered list now, so a key can be dropped between two tiles
       // and vice-versa. arrayMove the merged order, dense it back into slots,
@@ -1580,12 +1628,26 @@ export default function DesktopApp({
     // label the key, so a stale list would silently drop back to "New Button"
     // for anything installed since this callback was made. `deckItems` and
     // `currentPage` matter because the reorder path arrayMoves over the merged
-    // list and stamps the batch with the page it belongs to. `createWidget` is a
+    // list and stamps the batch with the page it belongs to. `pages` and
+    // `visiblePages` matter for the same reason one level up: the page-rail
+    // branch arrayMoves the visible pages and re-appends the hidden tail, and a
+    // stale snapshot would send ids the host no longer knows — reorder_pages
+    // is all-or-nothing with a silent rejection, so the bad batch would just
+    // never land. `createWidget` is a
     // plain async function in the component body, so it is recreated on every
     // render and listing it would defeat the memo entirely — it closes over the
     // same state this callback already depends on.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [wsRef, assignAction, createWithAction, applications, deckItems, currentPage],
+    [
+      wsRef,
+      assignAction,
+      createWithAction,
+      applications,
+      deckItems,
+      currentPage,
+      pages,
+      visiblePages,
+    ],
   );
 
   // ── Derived ───────────────────────────────────────────────────────────────
@@ -3429,29 +3491,83 @@ function ProfileMenu({
   );
 }
 
-/** Profile pills under the canvas — the fast switch, mirroring a deck's pages. */
+const PageRailPill = memo(function PageRailPill({
+  page,
+  index,
+  active,
+  disabled,
+  onSelect,
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+    isOver,
+  } = useSortable({ id: pageSortableId(page.id), disabled });
+
+  return (
+    <button
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      className="deck-tile-draggable"
+      style={{
+        ...styles.pagePill,
+        ...(active ? styles.pagePillActive : {}),
+        transform: CSS.Transform.toString(transform),
+        transition,
+        opacity: isDragging ? 0 : 1,
+        zIndex: isDragging ? 999 : "auto",
+        outlineStyle: "solid",
+        outlineWidth: 2,
+        outlineColor: isOver ? "var(--accent)" : "transparent",
+        outlineOffset: 1,
+      }}
+      onClick={() => {
+        if (!isDragging) onSelect(page.id);
+      }}
+      // The pill's label is a positional number, so the accessible name carries
+      // the real name and where it sits — that is what makes a keyboard move
+      // comprehensible.
+      aria-label={`${page.name || "Page"} — position ${index + 1}`}
+      aria-current={active}
+      title={page.name}
+    >
+      {index + 1}
+    </button>
+  );
+});
+
+/** Profile pills under the canvas — the fast switch, and the drag handle for
+ *  page order (final polish). Hidden pages are already filtered out by the
+ *  caller, so Unfiled is never a reorder target. */
 const PageRail = memo(function PageRail({
   pages,
   currentPage,
   onSelectPage,
   onAddPage,
 }) {
+  const ids = pages.map((p) => pageSortableId(p.id));
   return (
     <div style={styles.pageRail}>
-      {pages.map((p, i) => (
-        <button
-          key={p.id}
-          style={{
-            ...styles.pagePill,
-            ...(p.id === currentPage ? styles.pagePillActive : {}),
-          }}
-          onClick={() => onSelectPage(p.id)}
-          aria-current={p.id === currentPage}
-          title={p.name}
-        >
-          {i + 1}
-        </button>
-      ))}
+      <SortableContext
+        items={ids}
+        strategy={horizontalListSortingStrategy}
+      >
+        {pages.map((p, i) => (
+          <PageRailPill
+            key={p.id}
+            page={p}
+            index={i}
+            active={p.id === currentPage}
+            disabled={pages.length < 2}
+            onSelect={onSelectPage}
+          />
+        ))}
+      </SortableContext>
       <button
         style={styles.pagePill}
         onClick={onAddPage}
