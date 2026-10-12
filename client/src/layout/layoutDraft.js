@@ -9,7 +9,7 @@
  * WIDGET_SIZES / buttons size column) across the process boundary.
  *
  * ── Model ───────────────────────────────────────────────────────────────────
- * A `draft` is `{ items, byId, unfiledPageId, pageOrder }`:
+ * A `draft` is `{ items, byId, unfiledPageId, pageOrder, pageOrderClaim }`:
  *   - items: one clone per deck tile, carrying its original fields (label,
  *     action_type, widget_type, source_id, … passthrough for the editor to
  *     render previews) plus normalized `key`, `kind`, `id`, `page_id`, `slot`,
@@ -23,6 +23,11 @@
  *     reordering is draft-scoped). Seeded by createDraft from the caller's
  *     visibleDeckPages(pages); only shiftPage changes it and item ops carry it
  *     forward, so a hidden page can never enter it.
+ *   - pageOrderClaim: boolean — this draft holds a page order a local tap
+ *     authored and the host has not yet confirmed. No claim: the draft has no
+ *     opinion and FOLLOWS the host (followHostPageOrder). Outstanding claim:
+ *     frames only heal the set (reconcilePageOrder), so a refused retry stays
+ *     committable. The claim closes when a frame's order confirms it.
  *
  * ── Tile identity (READ THIS, Task 4.3) ─────────────────────────────────────
  * Buttons and widgets have independent numeric id sequences, so a bare number
@@ -69,7 +74,10 @@
  *   Page reordering (final polish). Moves one VISIBLE page ±1 place in
  *   `draft.pageOrder` — a list the draft receives from the caller
  *   (visibleDeckPages(pages)) and never derives from item rows, so a hidden page
- *   cannot sneak into a reorder batch. Item ops leave it untouched.
+ *   cannot sneak into a reorder batch. Item ops leave it untouched. A move that
+ *   actually happens AUTHORS `pageOrderClaim: true` (this draft now has an
+ *   order opinion the host has not confirmed); the same-reference no-ops
+ *   author nothing.
  *
  * ── diffDraft(base, draft) -> { reordersByPage, sizePatches, moves, detachments, pageOrder }
  * The top-level keys are the plan's contract. Value shapes (picked here,
@@ -100,10 +108,16 @@ import { TILE_SIZES } from "./deckLayout.js";
 const tileKey = (kind, id) => `${kind}:${id}`;
 const bySlot = (a, b) => a.slot - b.slot;
 
-function makeDraft(items, unfiledPageId, pageOrder) {
+function makeDraft(items, unfiledPageId, pageOrder, pageOrderClaim = false) {
   const byId = {};
   for (const it of items) byId[it.key] = it;
-  return { items, byId, unfiledPageId, pageOrder: normalizeOrder(pageOrder) };
+  return {
+    items,
+    byId,
+    unfiledPageId,
+    pageOrder: normalizeOrder(pageOrder),
+    pageOrderClaim: pageOrderClaim === true,
+  };
 }
 
 // Visible page ids, de-duped, strings only. Order is the caller's business: it
@@ -134,7 +148,7 @@ function arrayMove(list, from, to) {
   return out;
 }
 
-export function createDraft(deckItems, pageOrder = []) {
+export function createDraft(deckItems, pageOrder = [], pageOrderClaim = false) {
   // Clone each row's own fields (never keep references to caller rows) and
   // stash the pre-densify ordering key so pages can be re-ordered independently.
   const seeded = deckItems.map((it, index) => ({
@@ -165,7 +179,7 @@ export function createDraft(deckItems, pageOrder = []) {
       items.push(it);
     });
   }
-  return makeDraft(items, undefined, pageOrder);
+  return makeDraft(items, undefined, pageOrder, pageOrderClaim);
 }
 
 export function resize(draft, id, size) {
@@ -174,7 +188,7 @@ export function resize(draft, id, size) {
   if (!TILE_SIZES.includes(size)) return draft; // invalid size = no-op
   if (cur.size === size) return draft; // idempotent
   const items = draft.items.map((it) => (it.key === id ? { ...it, size } : it));
-  return makeDraft(items, draft.unfiledPageId, draft.pageOrder);
+  return makeDraft(items, draft.unfiledPageId, draft.pageOrder, draft.pageOrderClaim);
 }
 
 export function reorder(draft, activeId, overId, kindOrder) {
@@ -204,7 +218,7 @@ export function reorder(draft, activeId, overId, kindOrder) {
   const items = draft.items.map((it) =>
     it.page_id === page ? { ...it, slot: slotOf.get(it.key) } : it,
   );
-  return makeDraft(items, draft.unfiledPageId, draft.pageOrder);
+  return makeDraft(items, draft.unfiledPageId, draft.pageOrder, draft.pageOrderClaim);
 }
 
 /**
@@ -213,7 +227,9 @@ export function reorder(draft, activeId, overId, kindOrder) {
  * Move earlier / Move later — and it changes nothing about the items, so it
  * composes freely with reorder/moveToPage/detach in one session. Unknown ids
  * and moves past either end are no-ops returning the SAME draft, so a disabled
- * button firing anyway cannot dirty the toolbar.
+ * button firing anyway cannot dirty the toolbar. A move that happens authors
+ * the page-order CLAIM: this draft now has an order the host has not confirmed,
+ * which is the only thing that may make a Save re-commit it.
  */
 export function shiftPage(draft, pageId, delta) {
   const order = draft.pageOrder;
@@ -221,17 +237,18 @@ export function shiftPage(draft, pageId, delta) {
   if (from < 0) return draft;
   const to = from + (Number.isInteger(delta) ? delta : 0);
   if (to < 0 || to >= order.length) return draft;
-  return makeDraft(draft.items, draft.unfiledPageId, arrayMove(order, from, to));
+  if (to === from) return draft; // delta 0 authored nothing
+  return makeDraft(draft.items, draft.unfiledPageId, arrayMove(order, from, to), true);
 }
 
 /**
  * Page reordering: heal a draft's page ORDER against the host's authoritative
  * visible ids — prune pages the host no longer shows, append pages created since
  * the draft was seeded. Never re-sorts: a surviving id keeps its slot, so an
- * unsaved claim is never clobbered. Same reference when the sets already match.
- * A stale id left in the order would poison the whole batch (the host's
- * `reorder_pages` is all-or-nothing), and a page missing from it would render a
- * toolbar row whose Earlier/Later buttons do nothing.
+ * unsaved claim is never clobbered. Same reference when the sets already match
+ * and the claim does not flip. A stale id left in the order would poison the
+ * whole batch (the host's `reorder_pages` is all-or-nothing), and a page missing
+ * from it would render a toolbar row whose Earlier/Later buttons do nothing.
  */
 export function reconcilePageOrder(draft, visibleIds) {
   const order = draft.pageOrder;
@@ -242,10 +259,37 @@ export function reconcilePageOrder(draft, visibleIds) {
     ...order.filter((id) => hostSet.has(id)),
     ...host.filter((id) => !orderSet.has(id)),
   ];
-  if (next.length === order.length && next.every((id, i) => id === order[i])) {
+  // The host agreeing closes the claim; anything else leaves it standing so Save
+  // can re-commit a batch the host refused.
+  const claim = next.every((id, i) => id === host[i]) ? false : draft.pageOrderClaim;
+  if (
+    next.length === order.length &&
+    next.every((id, i) => id === order[i]) &&
+    claim === draft.pageOrderClaim
+  ) {
     return draft;
   }
-  return makeDraft(draft.items, draft.unfiledPageId, next);
+  return makeDraft(draft.items, draft.unfiledPageId, next, claim);
+}
+
+/**
+ * Page reordering: mirror the host's visible order into a draft that authored no
+ * claim of its own. A phone sitting in Edit Layout without having touched the
+ * Pages rows has no opinion about order, so another client's reorder must land as
+ * the draft's order — otherwise the dots show an order the host already replaced
+ * and Save can re-assert it. Same reference when the sequences already match.
+ */
+export function followHostPageOrder(draft, hostIds) {
+  const order = draft.pageOrder;
+  const host = hostIds ?? [];
+  if (
+    order.length === host.length &&
+    order.every((id, i) => id === host[i]) &&
+    !draft.pageOrderClaim
+  ) {
+    return draft;
+  }
+  return makeDraft(draft.items, draft.unfiledPageId, host, false);
 }
 
 export function moveToPage(draft, id, pageId) {
@@ -268,7 +312,7 @@ export function moveToPage(draft, id, pageId) {
     if (patch.has(it.key)) return { ...it, slot: patch.get(it.key) };
     return it;
   });
-  return makeDraft(items, draft.unfiledPageId, draft.pageOrder);
+  return makeDraft(items, draft.unfiledPageId, draft.pageOrder, draft.pageOrderClaim);
 }
 
 export function detach(draft, id, requestUnfiledPage) {

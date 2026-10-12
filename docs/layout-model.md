@@ -242,7 +242,8 @@ are `getPages()`'s `SELECT * FROM pages ORDER BY position, rowid`
   (`pageOrder.js:32-78`, shared normaliser `pageOrder.js:94-98`). The host
   logs a warning and returns — no ack frame, no broadcast
   (`server.js:1213-1216`). A rejected batch is therefore invisible on the
-  socket, which is precisely why the phone's two heal rules exist (7.4).
+  socket, which is precisely why the phone's heal rules and its claim-gated
+  order batch exist (7.4).
 - **PATCH is an escape hatch, not the ordering path.** `position` remains in
   the `PAGE_FIELDS` whitelist (`db.js:451-457`), so `PATCH /api/pages/:id`
   (`server.js:395-403`) can still write it per page — but a single-page write
@@ -316,28 +317,46 @@ The same phone/desktop asymmetry as tile drag (section 6):
 
 ### 7.4 Phone heal rules
 
-Both exist because Save is optimistic and a rejected batch is met with silence
-(7.1):
+These exist because Save is optimistic and a rejected batch is met with
+silence (7.1). The draft carries a `pageOrderClaim` flag: `shiftPage` sets it
+only when a tap really moves a page (`layoutDraft.js:234`), item ops and draft
+rebuilds carry it through, and it says "this session authored the order and
+the host has not yet confirmed it". The `state` frame handler runs three
+behaviours over it, on both `draft` and `baseDraft` (`App.jsx:661-668`), and
+the ORDER heal runs on EVERY frame — it no longer waits for the Save window
+(only the ITEM re-seed stays gated; the gate exists because item writes echo
+back out of order, and the order axis has no such race):
 
-- **Set equality on every `state` frame.** `reconcilePageOrder(draft,
-  visibleIds)` prunes ids the host no longer shows and appends host-new ones,
-  never re-sorting — a surviving id keeps its slot, so an unsaved claim is
-  never clobbered, and the same reference comes back when the sets already
-  match (`layoutDraft.js:236-249`). It runs on both `draft` and `baseDraft`
-  after every `state` frame (`App.jsx:665-675`), keeping
-  `set(draft.pageOrder) === set(visible page ids)` at all times. Two
-  consequences: `pagesInOrder` is a pure permutation, so an unowned (dead)
-  toolbar row is unrepresentable; and a stale id can never poison the
-  all-or-nothing batch forever.
-- **The order batch is measured against the host.** `pageOrderBatch(draft,
-  hostIds)` returns the draft's whole order whenever it differs from the
-  host's visible order — a length mismatch means the heal owns that case, so
-  it stays `[]` (`deckPages.js:26-38`). The resulting `pendingPageOrder` feeds
-  BOTH `dirty` and the Save frame (`App.jsx:985-989,994-1009,1379-1387`), so
-  a claim the baseline accepted but the host rejected keeps Save enabled: the
-  user taps Save and the order is re-committed. A baseline-only comparison
-  would strand that claim — draft equal to baseline, Save dark, the only exit
-  leaving Edit Layout.
+- **No claim: the draft follows the host's order.**
+  `followHostPageOrder(draft, visibleIds)` mirrors the host's visible sequence
+  outright, same reference when it already matches (`layoutDraft.js:282-293`).
+  A phone that never touched the Pages rows has no opinion, so another
+  client's reorder lands on screen immediately and can never be re-asserted
+  by this phone's next unrelated Save.
+- **Claim outstanding: set-heal only.** `reconcilePageOrder(draft, visibleIds)`
+  prunes ids the host no longer shows and appends host-new ones, never
+  re-sorting — a surviving id keeps its slot, so the unsaved claim is never
+  clobbered (`layoutDraft.js:253-273`). It keeps
+  `set(draft.pageOrder) === set(visible page ids)` at all times, so
+  `pagesInOrder` stays a pure permutation (an unowned/dead toolbar row is
+  unrepresentable) and a stale id can never poison the all-or-nothing batch
+  forever.
+- **Host agreement closes the claim.** When the healed order is exactly the
+  host's sequence, `reconcilePageOrder` clears `pageOrderClaim`
+  (`layoutDraft.js:262-264`): the confirmation frame has arrived, and the
+  draft goes back to following.
+
+The order batch is measured against the host, and only an authored claim may
+assert one. `pageOrderBatch(draft, hostIds)` returns the draft's whole order
+whenever it differs from the host's visible order — a length mismatch means
+the heal owns that case, so it stays `[]` (`deckPages.js:26-38`).
+`pendingPageOrder` consults it only when `draft.pageOrderClaim` stands
+(`App.jsx:1006-1015`), so an unclaimed draft never re-asserts someone else's
+reorder, while a claim the baseline accepted but the host rejected keeps Save
+enabled: the user taps Save and the order is re-committed. A baseline-only
+comparison would strand that claim — draft equal to baseline, Save dark, the
+only exit leaving Edit Layout. The resulting `pendingPageOrder` feeds BOTH
+`dirty` and the Save frame (`App.jsx:1020-1035,1405-1412`).
 
 ## 8. Surface split: phone vs desktop (final polish)
 
@@ -554,25 +573,34 @@ An honest map of what the suites guard — and what no suite can.
   strictly behind the visible block, all-or-nothing rejection of missing /
   unknown / duplicate / hidden-naming / non-string ids, and `firstVisiblePage`
   never surfacing a hidden page. `host/test/reorderPagesHandler.test.js`
-  mirrors the `server.js` `reorder_pages` block exactly and captures the frame
-  contract, including the rejection path: an invalid batch writes nothing and
-  answers with silence — no ack frame (7.1). Item ordering stays covered by
-  `itemOrder.test.js` and `reorderItemsHandler.test.js`.
+  hand-mirrors the `server.js` `reorder_pages` block and cannot import the
+  real handler, so it proves the mirrored contract, not the real handler's
+  frame emission. What DOES pin "an invalid batch writes nothing and answers
+  with silence — no ack frame" (7.1) is the final-polish isolated-host run:
+  this branch's unmodified `host/src/server.js` under `ELECTRON_RUN_AS_NODE`
+  against a throwaway db, where a rejected batch produced no ack and no
+  broadcast in the host log and the stored order stayed unchanged. Item
+  ordering stays covered by `itemOrder.test.js` and
+  `reorderItemsHandler.test.js`.
 - **Client unit** (`cd client && npm test`). `test/deckPages.test.js` covers
   `visibleDeckPages`, `pagesInOrder` (identity-preserving permutation,
   unmentioned pages trailing, unknown ids dropped) and `pageOrderBatch` —
   including its host-measured rule that a draft order differing from the
   host's always produces a batch (7.4). `test/layoutDraft.test.js` covers the
   draft's page-order axis end to end: `createDraft` seeding, `shiftPage`
-  moves, `reconcilePageOrder` set-equality healing on both sides without
-  re-sorting survivors, and `diffDraft().pageOrder`.
+  moves (and the `pageOrderClaim` a real move authors, while dead ends return
+  the same reference), claim preservation across item ops,
+  `reconcilePageOrder` set-equality healing on both sides without re-sorting
+  survivors — including keeping an outstanding claim and clearing the one the
+  host just confirmed — `followHostPageOrder` mirroring, and
+  `diffDraft().pageOrder` (which deliberately never reports the claim).
 - **Playwright viewport matrix** (`cd client && npm run test:viewport`): 14
-  viewports (`test/viewports.js`) × 11 tests (`test/viewport/deck.spec.ts`),
-  154 runs, against a mock socket. Tests 1-3 guard no horizontal overflow and
+  viewports (`test/viewports.js`) × 13 tests (`test/viewport/deck.spec.ts`),
+  182 runs, against a mock socket. Tests 1-3 guard no horizontal overflow and
   tiles landing on the engine's measured grid; the shared edit-mode entry
   helper `enterEditMode` opens the sheet and asserts
   `scrollHeight - clientHeight <= 1`, so a sheet row that ever outgrows the
-  220-px landscape cap fails. Tests 7-11 are the mobile page-reorder suite,
+  220-px landscape cap fails. Tests 7-13 are the mobile page-reorder suite,
   cited by test number and name: test 7 "pages: the Unfiled page stays out of
   navigation, and a move emits reorder_pages" — a committed move emits exactly
   one `reorder_pages`, after the item reorders, as `handleSave`'s step (e);
@@ -580,7 +608,15 @@ An honest map of what the suites guard — and what no suite can.
   writes it"; test 9 "pages: a pending page move survives a mid-draft fold and
   a host re-seed"; test 10 "pages: a rejected order stays saveable and
   re-commits on a second Save", proving the host-measured batch rule; test 11
-  "pages: a page created mid-draft becomes a live, reorderable row".
+  "pages: a page created mid-draft becomes a live, reorderable row"; test 12
+  "pages: a remote reorder is followed, never re-asserted by an unrelated
+  Save" — an unclaimed draft mirrors the host's new order, Save stays dark,
+  and the item-only Save emits zero `reorder_pages` frames; test 13 "pages: a
+  remote delete inside the Save window still heals and stays committable" —
+  a delete frame pushed from inside a held `PATCH /api/buttons/1` route lands
+  while `saveInFlight` is true, the order heal (ungated, unlike the item
+  re-seed) still prunes the dead row, and Save re-lights for the still
+  unaccepted order.
 
 **Not automated — human passes only.**
 

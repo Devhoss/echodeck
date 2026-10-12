@@ -35,6 +35,7 @@ import {
   detach,
   shiftPage,
   reconcilePageOrder,
+  followHostPageOrder,
 } from "./layout/layoutDraft.js";
 import DeckEditorBar from "./mobile/DeckEditorBar.jsx";
 // FEATURE: Mobile customization (Tasks 5.1 + 5.2) — the collapsed status
@@ -185,11 +186,16 @@ const arrayMoveKeys = (list, from, to) => {
 // FEATURE: Page reordering — `draft.pageOrder` MUST be carried through this
 // rebuild: createDraft defaults it to [], so folding a page mid-session would
 // silently RESET a page move the user already made, exactly like the item rows
-// would reset if their slots were dropped.
+// would reset if their slots were dropped. The CLAIM rides through too — a
+// fold is not the host confirming an order.
 const foldPageIntoDraft = (draft, pageId, serverRows) =>
   draftHasPage(draft, pageId)
     ? draft
-    : createDraft([...draft.items, ...serverRows], draft.pageOrder);
+    : createDraft(
+        [...draft.items, ...serverRows],
+        draft.pageOrder,
+        draft.pageOrderClaim,
+      );
 
 // FEATURE: Edit Layout (Task 4.3a review) — reconcile ONE page's rows against
 // the host's authoritative snapshot. A `state` frame carries per-item rows for
@@ -235,7 +241,8 @@ const draftPageDiverges = (draft, pageId, serverItems) => {
 // applied to the draft and to the baseline separately, so an unsaved page move
 // survives the re-seed on the draft while the baseline keeps the order the host
 // still has — exactly the diff Save must emit. Dropping the order here would reset
-// both to [] and silently swallow the pending move.
+// both to [] and silently swallow the pending move. The claim is carried for the
+// same reason: a re-seed of one page's ROWS says nothing about the deck order.
 const reseedPageFromServer = (draft, pageId, serverItems) => {
   if (!draft) return draft;
   return createDraft(
@@ -244,6 +251,7 @@ const reseedPageFromServer = (draft, pageId, serverItems) => {
       ...serverItems,
     ],
     draft.pageOrder,
+    draft.pageOrderClaim,
   );
 };
 
@@ -634,12 +642,30 @@ export default function App() {
         // callback — never in an effect — so it does not trip that rule.)
         //
         // 4.3b: Save now also commits moves/detachments/size before the reorder
-        // batches. Each of those sends triggers a host `state` broadcast; while a
-        // Save is in flight we deliberately do NOT re-seed the draft/baseline from
-        // those echoes (they are our own writes arriving out of order relative to
-        // the batch), so the optimistic `setBaseDraft(draft)` at the end of
-        // handleSave cannot race them. Ordinary `state` frames still reconcile
-        // exactly as in 4.3a, and normal mode is inert (draft null → bails).
+        // batches. Each of those sends triggers a host `state` broadcast; the
+        // ITEM re-seed below is deliberately gated on `saveInFlightRef` — those
+        // echoes are our own writes arriving out of order relative to the batch,
+        // and re-seeding from them would race the optimistic `setBaseDraft(draft)`
+        // at the end of handleSave. The ORDER heal is NOT gated: it runs on every
+        // `state` frame like in 4.3a, because the order axis has no such echo
+        // race (see healPageOrder). Normal mode is inert either way (draft null →
+        // every updater bails by reference).
+        const hostVisibleIds = visibleDeckPages(msg.pages).map((p) => p.id);
+        // Page order heals on EVERY state frame, including while a Save is in
+        // flight: the gate exists for the item axis (our own writes echo back out
+        // of order), and order has no such race — the only order frame this client
+        // sends is its own last step, which either matches the draft (claim
+        // closes) or does not arrive at all (rejection is silent). A remote page
+        // delete inside the Save window used to skip the heal, leave a phantom
+        // toolbar row and take Save dark with no later frame to reopen it.
+        const healPageOrder = (prev) => {
+          if (!prev) return prev;
+          return prev.pageOrderClaim
+            ? reconcilePageOrder(prev, hostVisibleIds)
+            : followHostPageOrder(prev, hostVisibleIds);
+        };
+        setDraft(healPageOrder);
+        setBaseDraft(healPageOrder);
         if (!saveInFlightRef.current) {
           const pageId = msg.current_page;
           const reseedIfDiverged = (prev) => {
@@ -663,16 +689,8 @@ export default function App() {
               ? reseedPageFromServer(prev, pageId, serverItems)
               : prev;
           };
-          const hostVisibleIds = visibleDeckPages(msg.pages).map((p) => p.id);
-          const reconcileIfDiverged = (prev) => {
-            if (!prev) return prev;
-            // Heal the page-order SET second: it must run even when the item path
-            // bails (the viewed page may be perfectly in sync while another page
-            // was created or deleted since this draft was seeded).
-            return reconcilePageOrder(reseedIfDiverged(prev), hostVisibleIds);
-          };
-          setDraft(reconcileIfDiverged);
-          setBaseDraft(reconcileIfDiverged);
+          setDraft(reseedIfDiverged);
+          setBaseDraft(reseedIfDiverged);
         }
       }
       if (msg.t === "widget_data") {
@@ -979,15 +997,21 @@ export default function App() {
 
   const hostPageIds = useMemo(() => visiblePages.map((p) => p.id), [visiblePages]);
 
-  // FEATURE: Page reordering — the order to send, judged against the host rather
-  // than only the baseline. `diff.pageOrder` covers the unsaved claim; the host
-  // comparison covers the claim the baseline already accepted but the host never
-  // did (Save is optimistic; rejection is silent), which is what keeps Save
-  // enabled so the user can re-commit instead of leaving Edit Layout.
+  // FEATURE: Page reordering — the order to send. `diff.pageOrder` covers the
+  // unsaved claim against the baseline; the host comparison covers a claim the
+  // baseline already accepted but the host never did (Save is optimistic;
+  // rejection is silent), which is what keeps Save enabled so the user can
+  // re-commit instead of leaving Edit Layout. Both halves only ever speak for a
+  // claim THIS session authored.
   const pendingPageOrder = useMemo(() => {
     if (!draft || !baseDraft) return [];
     const fromBaseline = diffDraft(baseDraft, draft).pageOrder;
-    return fromBaseline.length ? fromBaseline : pageOrderBatch(draft, hostPageIds);
+    if (fromBaseline.length) return fromBaseline;
+    // The host-measured comparison exists ONLY to re-commit a claim this session
+    // authored and the host refused (Save is optimistic, rejection is silent).
+    // With no authored claim the draft follows the host, so a divergence here is
+    // someone else's reorder and re-asserting it would undo their work.
+    return draft.pageOrderClaim ? pageOrderBatch(draft, hostPageIds) : [];
   }, [draft, baseDraft, hostPageIds]);
 
   // Structural dirtiness, not reference dirtiness: a drag that landed back where

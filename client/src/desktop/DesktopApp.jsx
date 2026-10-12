@@ -1652,6 +1652,25 @@ export default function DesktopApp({
     ],
   );
 
+  // ── Page rail clicks ──────────────────────────────────────────────────────
+  // Memoised for the same reason as :970's reloadPages: <PageRail> and its
+  // pills are memo() layers, and inline arrows at the render site rebuild on
+  // every state frame, which defeats them and re-renders the whole rail.
+  // These two bodies only read stable setters (plus the `switchPage` prop),
+  // so the callbacks are effectively permanent.
+  const handleSelectRailPage = useCallback(
+    (id) => {
+      switchPage(id);
+      setSelectedBtn(null);
+    },
+    [switchPage, setSelectedBtn],
+  );
+
+  const handleAddPage = useCallback(() => {
+    setAddingPage(true);
+    setProfileMenuOpen(true);
+  }, [setAddingPage, setProfileMenuOpen]);
+
   // ── Derived ───────────────────────────────────────────────────────────────
 
   const isConnected = status === "connected";
@@ -1952,14 +1971,8 @@ export default function DesktopApp({
             <PageRail
               pages={visiblePages}
               currentPage={currentPage}
-              onSelectPage={(id) => {
-                switchPage(id);
-                setSelectedBtn(null);
-              }}
-              onAddPage={() => {
-                setAddingPage(true);
-                setProfileMenuOpen(true);
-              }}
+              onSelectPage={handleSelectRailPage}
+              onAddPage={handleAddPage}
             />
 
             {/* ── Inspector: sits under the canvas, like the deck's own panel ──

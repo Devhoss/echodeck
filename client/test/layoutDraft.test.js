@@ -15,6 +15,7 @@ import {
   detach,
   shiftPage,
   reconcilePageOrder,
+  followHostPageOrder,
   diffDraft,
 } from "../src/layout/layoutDraft.js";
 
@@ -609,4 +610,153 @@ test("reconcilePageOrder preserves items and the unfiled marker on a changed set
   assert.equal(next.unfiledPageId, "__unfiled__");
   assert.equal(next.byId["button:1"], d.byId["button:1"], "byId still resolves a key");
   assert.deepEqual(next.pageOrder, ["p1", "p2", "p3", "p4"]);
+});
+
+// ---- page-order CLAIM (final-review fix 1: the batch fires only for an
+// authored claim) ----
+// `draft.pageOrderClaim` means: a local tap authored this page order and the
+// host has not yet confirmed it. With no claim the draft follows the host
+// (followHostPageOrder); with an outstanding claim the frame only heals the
+// set (reconcilePageOrder) so a refused retry stays committable; a frame whose
+// order equals the healed draft closes the claim.
+
+// A draft holding a real claim: order [p1, p3, p2], pageOrderClaim true.
+const claimedOrderDraft = (items = [tile("button", 1, "p1", 0)]) =>
+  shiftPage(createDraft(items, ORDER), "p3", -1);
+
+test("createDraft seeds pageOrderClaim false for both existing call shapes", () => {
+  assert.equal(createDraft([tile("button", 1, "p1", 0)]).pageOrderClaim, false);
+  assert.equal(orderDraft().pageOrderClaim, false);
+});
+
+test("createDraft's optional third argument re-seeds a claim a rebuild carries", () => {
+  assert.equal(createDraft([], ORDER, true).pageOrderClaim, true);
+  // Strict === true: junk from a caller cannot author a claim.
+  assert.equal(createDraft([], ORDER, "yes").pageOrderClaim, false);
+});
+
+test("shiftPage that actually moves authors the page-order claim", () => {
+  const d = orderDraft();
+  const next = shiftPage(d, "p3", -1);
+  assert.notEqual(next, d);
+  assert.deepEqual(next.pageOrder, ["p1", "p3", "p2"]);
+  assert.equal(next.pageOrderClaim, true);
+});
+
+test("shiftPage dead ends return the SAME reference and therefore never author a claim", () => {
+  const d = orderDraft();
+  assert.equal(shiftPage(d, "nope", 1), d); // unknown id
+  assert.equal(shiftPage(d, "p1", -1), d); // past the head
+  assert.equal(shiftPage(d, "p3", 1), d); // past the tail
+  assert.equal(shiftPage(d, "p2", 0), d); // delta 0 authored nothing
+  assert.equal(d.pageOrderClaim, false);
+});
+
+test("item ops preserve an authored page-order claim", () => {
+  const items = [
+    tile("button", 1, "p1", 0),
+    tile("button", 2, "p1", 1),
+    tile("widget", 9, "p2", 0),
+  ];
+  const claimed = claimedOrderDraft(items);
+  assert.equal(claimed.pageOrderClaim, true);
+  assert.equal(resize(claimed, "button:1", "2x1").pageOrderClaim, true);
+  assert.equal(reorder(claimed, "button:1", "button:2").pageOrderClaim, true);
+  assert.equal(moveToPage(claimed, "widget:9", "p3").pageOrderClaim, true);
+  // detach spreads moveToPage's result, so it inherits the claim — pinned here.
+  assert.equal(detach(claimed, "button:2", () => "__unfiled__").pageOrderClaim, true);
+  // The absence of a claim is carried just as faithfully.
+  const plain = createDraft(items, ORDER);
+  assert.equal(resize(plain, "button:1", "2x1").pageOrderClaim, false);
+  assert.equal(reorder(plain, "button:1", "button:2").pageOrderClaim, false);
+  assert.equal(moveToPage(plain, "widget:9", "p3").pageOrderClaim, false);
+  assert.equal(detach(plain, "button:2", () => "__unfiled__").pageOrderClaim, false);
+});
+
+test("reconcilePageOrder keeps an outstanding claim while the host disagrees", () => {
+  const claimed = claimedOrderDraft(); // order [p1, p3, p2], claim true
+  // Same set, host sequence differs: the healed order still disagrees, so the
+  // refused retry must stay committable.
+  assert.equal(reconcilePageOrder(claimed, ["p2", "p3", "p1"]).pageOrderClaim, true);
+  // A create in the same frame does not close it either.
+  const grown = reconcilePageOrder(claimed, ["p2", "p3", "p1", "p4"]);
+  assert.deepEqual(grown.pageOrder, ["p1", "p3", "p2", "p4"]);
+  assert.equal(grown.pageOrderClaim, true);
+});
+
+test("reconcilePageOrder clears the claim the host's frame just confirmed", () => {
+  const claimed = claimedOrderDraft(); // order [p1, p3, p2], claim true
+  const agreed = reconcilePageOrder(claimed, ["p1", "p3", "p2"]); // host agrees
+  assert.notEqual(agreed, claimed, "the claim flip changes the model");
+  assert.deepEqual(agreed.pageOrder, ["p1", "p3", "p2"]);
+  assert.equal(agreed.pageOrderClaim, false);
+  // With the claim closed, a later remote reorder is followed, not re-asserted.
+  assert.equal(reconcilePageOrder(agreed, ["p1", "p3", "p2"]), agreed);
+});
+
+test("reconcilePageOrder still never re-sorts a surviving id while healing a claim", () => {
+  const claimed = {
+    ...createDraft([tile("button", 1, "p1", 0)], ["p3", "p1", "p2"]),
+    pageOrderClaim: true,
+  };
+  const next = reconcilePageOrder(claimed, ["p1", "p2", "p3"]);
+  assert.deepEqual(next.pageOrder, ["p3", "p1", "p2"], "survivors keep the draft slots");
+  assert.equal(next.pageOrderClaim, true, "still outstanding");
+});
+
+test("the healed order is always the host's exact set, so the claim comparison is total not partial", () => {
+  // Draft ids the host has never seen AND host ids the draft has never seen,
+  // in one frame: `next` = (order ∩ host) ∪ (host \\ order) = host's set
+  // exactly — never longer, never shorter — which is what lets
+  // reconcilePageOrder compare sequences without a length guard.
+  const claimed = {
+    ...createDraft([tile("button", 1, "p1", 0)], ["p9", "p8", "p1"]),
+    pageOrderClaim: true,
+  };
+  const host = ["p1", "p2", "p3"];
+  const next = reconcilePageOrder(claimed, host);
+  assert.equal(next.pageOrder.length, host.length);
+  assert.deepEqual(next.pageOrder, host);
+  assert.equal(next.pageOrderClaim, false, "healed === host closes the claim");
+});
+
+test("followHostPageOrder is the identity when the sequences already match and no claim exists", () => {
+  const d = orderDraft();
+  assert.equal(followHostPageOrder(d, ["p1", "p2", "p3"]), d);
+});
+
+test("followHostPageOrder mirrors the host list and forces the claim off when they differ", () => {
+  const d = orderDraft();
+  const next = followHostPageOrder(d, ["p3", "p2", "p1"]);
+  assert.notEqual(next, d);
+  assert.deepEqual(next.pageOrder, ["p3", "p2", "p1"]);
+  assert.equal(next.pageOrderClaim, false);
+});
+
+test("followHostPageOrder mirrors even for a claimed draft — callers must not call it while a claim stands (App's heal chooses)", () => {
+  const claimed = claimedOrderDraft(); // [p1, p3, p2], claim true
+  const next = followHostPageOrder(claimed, ["p1", "p2", "p3"]);
+  assert.deepEqual(next.pageOrder, ["p1", "p2", "p3"]);
+  assert.equal(next.pageOrderClaim, false);
+});
+
+test("followHostPageOrder mirrors an absent host list to the empty order", () => {
+  const next = followHostPageOrder(orderDraft(), null);
+  assert.deepEqual(next.pageOrder, []);
+  assert.equal(next.pageOrderClaim, false);
+});
+
+test("diffDraft reports the plan's five keys and nothing about the claim", () => {
+  const base = orderDraft();
+  const diff = diffDraft(base, shiftPage(base, "p3", -1));
+  assert.deepEqual(Object.keys(diff).sort(), [
+    "detachments",
+    "moves",
+    "pageOrder",
+    "reordersByPage",
+    "sizePatches",
+  ]);
+  // Two drafts that differ ONLY in the claim diff to nothing: the claim is
+  // heal bookkeeping, never a wire fact.
+  assert.deepEqual(diffDraft(base, { ...base, pageOrderClaim: true }), EMPTY);
 });

@@ -19,7 +19,8 @@
 //  6. edit mode: tap-select → resize → drag-reorder → Save, with the diff
 //     reaching the socket (captured `send()` frames) and REST (route capture)
 //
-// Five more, added with page reordering (final polish, Task 8):
+// Five more, added with page reordering (final polish, Task 8), and two more
+// from the final-review fix round (the page-order claim model):
 //  7. the hidden Unfiled page stays out of the pager, and a draft page move
 //     commits exactly one reorder_pages frame — after the item reorders
 //  8. Done (Discard) restores the original page order and never writes it
@@ -27,6 +28,8 @@
 //     host re-seed)
 // 10. a host-rejected page order stays saveable and re-commits on a second Save
 // 11. a page created mid-draft becomes a live, reorderable row
+// 12. a remote reorder is FOLLOWED (an unclaimed draft never re-asserts it)
+// 13. a remote page delete inside the Save window still heals the order axis
 //
 // Standing owner rule verified in EVERY test: no WebSocket to port 9001 or any
 // host is ever attempted (page.on("websocket") stays empty), and all REST
@@ -885,6 +888,204 @@ test.describe("deck viewport matrix", () => {
       frames[0].page_ids.includes("page_three"),
       `the batch carries the created page; got ${JSON.stringify(frames[0].page_ids)}`,
     ).toBe(true);
+
+    assertNoRealSocket(captured);
+  });
+
+  // Final-review fix 1 (Important 1): the host-measured batch used to fire for
+  // ANY draft/host order divergence — including one this phone never authored.
+  // A remote client's reorder then let an unrelated phone Save silently
+  // re-assert the stale order. Under the claim model an unclaimed draft FOLLOWS
+  // the host: Save stays dark on someone else's reorder, the dots stay honest,
+  // and a resize Save emits no reorder_pages frame at all.
+  test("12. pages: a remote reorder is followed, never re-asserted by an unrelated Save", async ({
+    page,
+  }) => {
+    const { captured, fixture } = await openMockDeck(page);
+    await enterEditMode(page);
+    await openPagesDisclosure(page);
+    expect(await pagesListLabels(page), "opens in the host's order").toEqual([
+      "1. Main",
+      "2. Second",
+    ]);
+
+    // Another client reorders the deck: the SAME visible set, a different order.
+    const remote = {
+      ...fixture.state,
+      pages: [
+        fixture.state.pages[1],
+        fixture.state.pages[0],
+        fixture.state.pages[2],
+      ],
+    };
+    await page.evaluate(
+      (frame) => (window as any).__MOCK_WS__.pushFrame(frame),
+      remote,
+    );
+
+    const saveBtn = page.getByRole("button", { name: "Save", exact: true });
+    await expect(
+      saveBtn,
+      "a reorder this client did not author cannot light up Save",
+    ).toBeDisabled();
+    await expect
+      .poll(() => pagesListLabels(page), "the unclaimed draft follows the host")
+      .toEqual(["1. Second", "2. Main"]);
+    await expect
+      .poll(() => dotOrder(page), "the dots stay honest about the host's order")
+      .toEqual(["Second", "Main"]);
+
+    // The one Save-worthy change in this draft is a tile resize.
+    const t1 = page.locator('[data-deck-item="1"]');
+    await t1.scrollIntoViewIfNeeded();
+    await t1.click();
+    await page.getByRole("button", { name: "1×2", exact: true }).click();
+    await expect(saveBtn, "the resize alone dirties the draft").toBeEnabled();
+    await saveBtn.click();
+    const toast = page.locator('[role="status"]:not([id^="DndLiveRegion"])');
+    await expect(toast).toContainText("Sent", { timeout: 10_000 });
+
+    const sent = await mockSentFrames(page);
+    expect(
+      sent.filter((f: any) => f.t === "reorder_pages").length,
+      `the phone never re-asserts an order it did not author; sent=${JSON.stringify(sent)}`,
+    ).toBe(0);
+
+    assertNoRealSocket(captured);
+  });
+
+  // Final-review fix 1 (Important 2): the order heal used to hide behind the
+  // saveInFlight gate. A remote page DELETE landing inside the Save window was
+  // skipped entirely — after Save the baseline held a phantom id, the
+  // host-measured batch returns [] on a length mismatch, and Save went dark for
+  // good with no later frame guaranteed to reopen it. The order axis now heals
+  // on EVERY state frame; the item re-seed stays gated (it exists for our own
+  // echoes arriving out of order).
+  test("13. pages: a remote delete inside the Save window still heals and stays committable", async ({
+    page,
+  }) => {
+    const { captured, fixture } = await openMockDeck(page);
+    await enterEditMode(page);
+
+    const THIRD = { id: "page_three", name: "Third", position: 3 };
+    const withThree = {
+      ...fixture.state,
+      pages: [...fixture.state.pages, THIRD],
+    };
+    await page.evaluate(
+      (frame) => (window as any).__MOCK_WS__.pushFrame(frame),
+      withThree,
+    );
+
+    await openPagesDisclosure(page);
+    await expect
+      .poll(
+        () => pagesListLabels(page),
+        "the new page is adopted while no claim stands",
+      )
+      .toEqual(["1. Main", "2. Second", "3. Third"]);
+
+    // A real claim: Second past Main, then Third past Second, so the draft
+    // order is [page_two, page_three, page_main].
+    await page.getByRole("button", { name: "Later", exact: true }).first().click();
+    await expect
+      .poll(() => pagesListLabels(page))
+      .toEqual(["1. Second", "2. Main", "3. Third"]);
+    await page.getByRole("button", { name: "Earlier", exact: true }).last().click();
+    await expect
+      .poll(() => pagesListLabels(page))
+      .toEqual(["1. Second", "2. Third", "3. Main"]);
+
+    // A tile resize joins the Save, deliberately: the REST write it awaits is
+    // what gives the Save a REAL in-flight window. A page-order-only Save runs
+    // synchronously (no await between gate-on and gate-off), so no externally
+    // pushed frame could ever land inside it.
+    const t1 = page.locator('[data-deck-item="1"]');
+    await t1.scrollIntoViewIfNeeded();
+    await t1.click();
+    await page.getByRole("button", { name: "1×2", exact: true }).click();
+
+    // The host deletes page_two. The frame is pushed from INSIDE the resize
+    // PATCH's route handler before the route fulfils — the Save's fetch cannot
+    // resolve before the fulfil, so the frame provably arrives while
+    // saveInFlight is still true.
+    const deleted = {
+      ...fixture.state,
+      pages: [fixture.state.pages[0], THIRD, fixture.state.pages[2]],
+    };
+    let deleteLanded = false;
+    for (const origin of ["http://localhost:9001", "http://127.0.0.1:9001"]) {
+      await page.route(`${origin}/api/buttons/1`, async (route) => {
+        const req = route.request();
+        const cors = {
+          "access-control-allow-origin": "*",
+          "access-control-allow-headers": "content-type,x-echodeck-token",
+          "access-control-allow-methods": "GET,POST,PATCH,DELETE,OPTIONS",
+        };
+        if (req.method() === "OPTIONS") {
+          await route.fulfill({ status: 204, headers: cors });
+          return;
+        }
+        if (!deleteLanded) {
+          deleteLanded = true;
+          await page.evaluate(
+            (frame) => (window as any).__MOCK_WS__.pushFrame(frame),
+            deleted,
+          );
+          // Hold the Save open long enough for the healed render to settle.
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        await route.fulfill({
+          status: 200,
+          headers: { ...cors, "content-type": "application/json" },
+          body: JSON.stringify({ ok: true }),
+        });
+      });
+    }
+
+    const saveBtn = page.getByRole("button", { name: "Save", exact: true });
+    await expect(saveBtn, "claim + resize make the draft dirty").toBeEnabled();
+    await saveBtn.click();
+    const toast = page.locator('[role="status"]:not([id^="DndLiveRegion"])');
+    await expect(toast, "the held write completes the Save").toContainText("Sent", {
+      timeout: 10_000,
+    });
+
+    // (i) The mid-Save delete healed: the dead page's row and dot are gone and
+    // the survivors read in the healed draft order.
+    await expect
+      .poll(
+        () => pagesListLabels(page),
+        "the deleted page's toolbar row is gone",
+      )
+      .toEqual(["1. Third", "2. Main"]);
+    await expect
+      .poll(() => dotOrder(page), "the deleted page's dot is gone")
+      .toEqual(["Main"]);
+
+    // (ii) Save STAYS enabled — the healed claim is real and still unaccepted.
+    await expect(
+      saveBtn,
+      "the healed, still-uncommitted order keeps Save enabled",
+    ).toBeEnabled();
+
+    // (iii) The retry commits a batch with no deleted id and the host's
+    // current visible length.
+    await saveBtn.click();
+    await expect(toast).toContainText("Sent", { timeout: 10_000 });
+    const frames = (await mockSentFrames(page)).filter(
+      (f: any) => f.t === "reorder_pages",
+    );
+    expect(frames.length, "one batch on the first Save, one on the retry").toBe(2);
+    expect(
+      frames[1].page_ids.includes("page_two"),
+      `the retry carries no deleted id; got ${JSON.stringify(frames[1].page_ids)}`,
+    ).toBe(false);
+    expect(frames[1].page_ids).toEqual(["page_three", "page_main"]);
+    expect(
+      frames[1].page_ids.length,
+      "the batch has the host's current visible-page count",
+    ).toBe(2);
 
     assertNoRealSocket(captured);
   });

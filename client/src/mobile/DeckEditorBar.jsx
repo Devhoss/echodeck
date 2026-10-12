@@ -130,7 +130,12 @@ export default function DeckEditorBar({
   // Visible move targets: real pages that are neither hidden nor the page the
   // tile is already on. The Unfiled target is offered separately and routes to
   // onDetach (not onMoveToPage) so a detach re-parents to the lazy Unfiled page.
-  const moveTargets = visibleDeckPages(pages).filter((p) => p.id !== currentPage);
+  // Built from `orderedPages` (the SAME draft-order list the Pages panel below
+  // shows, already visible-only) so the two never disagree on screen mid-draft;
+  // `pages` alone is the host order and lags the draft.
+  const moveTargets = (
+    Array.isArray(orderedPages) ? orderedPages : visibleDeckPages(pages)
+  ).filter((p) => p.id !== currentPage);
 
   const closeMove = () => setMoveOpen(false);
 
