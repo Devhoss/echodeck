@@ -33,11 +33,15 @@ npx cap sync android
 Write-Host ""
 Write-Host "▶ Building APK..." -ForegroundColor Yellow
 Set-Location android
-.\gradlew.bat assembleDebug --no-daemon
+.\gradlew.bat assembleRelease --no-daemon
 
 # ── 4. Copy to repo root with versioned name ──────────────────────────────────
 Set-Location ..\..
-Copy-Item "client\android\app\build\outputs\apk\debug\app-debug.apk" $APK_NAME
+$RELEASE_APK = "client\android\app\build\outputs\apk\release\app-release.apk"
+if (-not (Test-Path $RELEASE_APK)) {
+    throw "No signed APK. Add the ECHODECK_KEYSTORE* entries to ~/.gradle/gradle.properties."
+}
+Copy-Item $RELEASE_APK $APK_NAME
 
 Write-Host ""
 Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Green

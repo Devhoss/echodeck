@@ -16,8 +16,26 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    // Release signing. Values come from ~/.gradle/gradle.properties locally or
+    // from environment variables in CI. The keystore itself never lives in the
+    // repo. Without them, assembleRelease still works but yields an unsigned APK.
+    def signingValue = { String key -> project.findProperty(key) ?: System.getenv(key) }
+    def releaseKeystore = signingValue('ECHODECK_KEYSTORE')
+    signingConfigs {
+        if (releaseKeystore) {
+            release {
+                storeFile file(releaseKeystore)
+                storePassword signingValue('ECHODECK_KEYSTORE_PASSWORD')
+                keyAlias signingValue('ECHODECK_KEY_ALIAS')
+                keyPassword signingValue('ECHODECK_KEY_PASSWORD')
+            }
+        }
+    }
     buildTypes {
         release {
+            if (releaseKeystore) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }

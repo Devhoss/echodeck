@@ -152,13 +152,29 @@ jobs:
         working-directory: client/android
         run: chmod +x gradlew
 
+      # The keystore arrives as a base64 secret and is decoded outside the
+      # workspace, so it can never be uploaded or committed by a later step.
+      - name: Decode signing keystore
+        env:
+          ECHODECK_KEYSTORE_BASE64: ${{ secrets.ECHODECK_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$ECHODECK_KEYSTORE_BASE64" ]; then
+            echo "::error::ECHODECK_KEYSTORE_BASE64 secret is not set"; exit 1
+          fi
+          echo "$ECHODECK_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/echodeck-release.jks"
+
       - name: Build APK
         working-directory: client/android
-        run: ./gradlew assembleDebug --no-daemon
+        env:
+          ECHODECK_KEYSTORE: ${{ runner.temp }}/echodeck-release.jks
+          ECHODECK_KEYSTORE_PASSWORD: ${{ secrets.ECHODECK_KEYSTORE_PASSWORD }}
+          ECHODECK_KEY_ALIAS: ${{ secrets.ECHODECK_KEY_ALIAS }}
+          ECHODECK_KEY_PASSWORD: ${{ secrets.ECHODECK_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease --no-daemon
 
       - name: Rename APK
         run: |
-          cp client/android/app/build/outputs/apk/debug/app-debug.apk \
+          cp client/android/app/build/outputs/apk/release/app-release.apk \
              echodeck-${{ github.ref_name }}.apk
 
       - name: Upload APK to release
