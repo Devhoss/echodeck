@@ -362,10 +362,12 @@ only exit leaving Edit Layout. The resulting `pendingPageOrder` feeds BOTH
 
 The owner's division of the two surfaces, now settled:
 
-- **The phone's control sheet is status + disconnect + Edit Layout.** Its grid
-  holds exactly two rows: the stats row (when `stats` is present) and one
-  combined row with the connection pill, Disconnect and Edit Layout
-  (`ControlSheet.jsx:248-352`). It carries no volume or mic controls.
+- **The phone's control sheet is a single compact bar: status + disconnect +
+  Edit Layout.** The stats pills (when `stats` is present), the connection pill,
+  Disconnect and Edit Layout all flow inline in one wrapping row
+  (`ControlSheet.jsx`), so the sheet is a single line wherever width allows and
+  wraps to two short lines on narrow portrait. It carries no volume or mic
+  controls.
 - **Detailed layout settings and presets are desktop-only.**
   `LayoutSettingsForm` renders only in the desktop's Layout Settings modal —
   the `showLayoutSettings`-guarded block in `DesktopApp.jsx`, at the

@@ -227,25 +227,11 @@ export default function ControlSheet({
           gap: 5,
         }}
       >
-        {/* Caption: local stats are about THIS machine (the host the phone is
-            paired to), explicitly not the Homelab — remote numbers live only
-            in widget tiles, which carry their own source label. */}
-        <div
-          style={{
-            fontSize: 10,
-            fontWeight: 700,
-            letterSpacing: 0.6,
-            textTransform: "uppercase",
-            color: "#55556a",
-          }}
-        >
-          EchoDeck host — this computer
-        </div>
-
-        {/* The two remaining rows stack in a single column (see the flex
-            `.deck-sheet-grid` below); the narrow two-column trick and its
-            span-all overrides are gone now that the sheet fits the 220-px
-            landscape cap on its own. */}
+        {/* One compact bar: stats and the connection / Disconnect / Edit Layout
+            group sit inline (`.deck-sheet-grid` is a wrapping row), so the
+            sheet is a single line wherever width allows. On narrow portrait the
+            row wraps into two short lines — the controls stay reachable rather
+            than clipping. */}
         <div className="deck-sheet-grid">
           {/* FEATURE: System stats — CPU / RAM / clock pills (relocated from
               the header, same fixed slot widths, so nothing jumps). */}
@@ -267,8 +253,17 @@ export default function ControlSheet({
 
           {/* Connection status pill + Disconnect button + Edit Layout —
               relocated verbatim from the old header (the confirm modal itself
-              stays in App.jsx; only the trigger moved here). */}
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              stays in App.jsx; only the trigger moved here). `marginLeft:auto`
+              pins this group to the far right of the bar, leaving the stats on
+              the left instead of a gap after the clock. */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              marginLeft: "auto",
+            }}
+          >
             <div
               style={{
                 display: "flex",
@@ -354,15 +349,15 @@ export default function ControlSheet({
       </div>
 
       <style>{`
-        /* One flow for every viewport: the sheet now holds two short rows, so
-           the narrow (<500px) two-column trick is no longer needed to fit the
-           220-px cap — and it never applied to landscape anyway, which is what
-           used to clip. */
+        /* One compact bar for every viewport: stats and the connection /
+           Disconnect / Edit Layout group flow inline and wrap only when the
+           width runs out (narrow portrait), so the sheet never clips its cap. */
         .deck-sheet-grid {
           display: flex;
-          flex-direction: column;
+          flex-direction: row;
+          flex-wrap: wrap;
           gap: 8px;
-          align-items: stretch;
+          align-items: center;
         }
       `}</style>
     </div>

@@ -1739,7 +1739,7 @@ export default function App() {
         gap: layout ? layout.gap : 8,
       }}
     >
-      {buttons.length === 0 && status === "connected" && <SkeletonGrid />}
+      {deckItems.length === 0 && status === "connected" && <SkeletonGrid />}
       {layout &&
         renderItems.map((item, i) => {
           const p = layout.placements[i];
